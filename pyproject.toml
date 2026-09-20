@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-reset-monitor"
+version = "0.9.0"
+description = "Monitor Codex, Grok, Kimi, DeepSeek Harness and other code agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+codex-reset-monitor = "codex_reset_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff.lint.per-file-ignores]
+# Dashboard 内嵌的 HTML/CSS/JavaScript 使用长行保持浏览器模板可读；Python 代码仍按
+# 默认 Ruff 规则检查。
+"src/codex_reset_monitor/dashboard.py" = ["E501"]
