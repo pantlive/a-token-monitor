@@ -1373,6 +1373,8 @@ class HousekeepingDashboardTests(unittest.TestCase):
                 total_warn_gb=0.000001,
             ),
             archive_dir=root / "state" / "archives",
+            # 中文注释：daemon 会把仍在运行的会话路径交进来，归档时必须跳过。
+            active_paths=lambda: {str(long_session)},
         )
         registry = MultiSessionRegistry(root / "monitor-state")
         registry.upsert_session(
@@ -1541,6 +1543,124 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertEqual(refreshed["preview"]["count"], 0)
         self.assertEqual(len(refreshed["archives"]), 1)
 
+    def test_active_sessions_expose_archive_capability(self) -> None:
+        """活动会话表要给出能否单独归档，并附上原因。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            running_jsonl = None
+            for session in registry.list_sessions():
+                if session.pids:
+                    running_jsonl = session.jsonl_path
+            # 追加一个已结束、可归档的会话
+            finished = (
+                root
+                / ".codex"
+                / "sessions"
+                / "2026"
+                / "09"
+                / "10"
+                / "rollout-2026-09-10T01-00-00-99999999-8888-4777-8666-555544443333.jsonl"
+            )
+            finished.parent.mkdir(parents=True, exist_ok=True)
+            finished.write_bytes(b"x" * 4096)
+            stamp = time.time() - 12 * 86_400
+            os.utime(finished, (stamp, stamp))
+            registry.upsert_session(
+                TrackedSession(
+                    thread_id="thread-finished",
+                    session_id="99999999-8888-4777-8666-555544443333",
+                    jsonl_path=str(finished),
+                    cwd="/home/dev/iota",
+                    source="cli",
+                    status=SessionStatus.COMPLETED,
+                    confidence=DetectionConfidence.OPEN_FILE,
+                    first_seen_at=100,
+                    last_seen_at=time.time() - 60,
+                )
+            )
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/api/state", timeout=5) as response:
+                    state = json.load(response)
+            finally:
+                server.close()
+
+        by_id = {item["session_id"]: item for item in state["sessions"]}
+        self.assertIn("99999999-8888-4777-8666-555544443333", by_id)
+        finished_entry = by_id["99999999-8888-4777-8666-555544443333"]
+        self.assertTrue(finished_entry["archive"]["eligible"])
+        self.assertFalse(finished_entry["active"])
+        self.assertEqual(state["counts"]["recent"], 1)
+        running = next(item for item in state["sessions"] if item["pids"])
+        self.assertFalse(running["archive"]["eligible"])
+        self.assertEqual(running["archive"]["reason"], "会话仍在运行")
+        self.assertEqual(running["jsonl_path"], running_jsonl)
+
+    def test_archive_single_session_through_the_api(self) -> None:
+        """POST 指定 session 时只归档该会话，并拒绝不可归档的路径。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            finished = (
+                root
+                / ".codex"
+                / "sessions"
+                / "2026"
+                / "09"
+                / "10"
+                / "rollout-2026-09-10T01-00-00-77777777-8888-4777-8666-555544443333.jsonl"
+            )
+            finished.parent.mkdir(parents=True, exist_ok=True)
+            finished.write_bytes(b"y" * 2048)
+            stamp = time.time() - 20 * 86_400
+            os.utime(finished, (stamp, stamp))
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with self._post(
+                    f"{base_url}/api/housekeeping",
+                    {
+                        "action": "archive",
+                        "session": str(finished),
+                        "confirm": True,
+                        "async": True,
+                    },
+                ) as response:
+                    started = json.load(response)
+                task_id = started["task"]["id"]
+                deadline = time.time() + 10
+                status = None
+                while time.time() < deadline:
+                    with urlopen(
+                        f"{base_url}/api/housekeeping?task={task_id}",
+                        timeout=5,
+                    ) as response:
+                        status = json.load(response)
+                    if status["task"]["state"] != "running":
+                        break
+                    time.sleep(0.05)
+                with self.assertRaises(HTTPError) as outside:
+                    self._post(
+                        f"{base_url}/api/housekeeping",
+                        {
+                            "action": "archive",
+                            "session": str(root / "nope.jsonl"),
+                            "confirm": True,
+                        },
+                    )
+            finally:
+                server.close()
+            archived_exists = finished.exists()
+
+        self.assertEqual(status["task"]["state"], "done")
+        self.assertEqual(status["task"]["result"]["count"], 1)
+        self.assertFalse(archived_exists)
+        self.assertEqual(outside.exception.code, 400)
+
     def test_page_contains_housekeeping_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1561,6 +1681,9 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertIn('id="housekeeping-clean-button"', html)
         self.assertIn("建议开新会话", html)
         self.assertIn("轮数 / 上下文", html)
+        self.assertIn("data-archive-session", html)
+        self.assertIn("归档此会话", html)
+        self.assertIn('id="session-notice"', html)
         self.assertLess(html.find('id="insights"'), html.find('id="housekeeping"'))
         self.assertIn('data-section-toggle="housekeeping"', html)
         self.assertIn('id="housekeeping-body"', html)

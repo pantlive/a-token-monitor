@@ -399,6 +399,153 @@ class ArchiveAndCleanTests(unittest.TestCase):
         self.assertEqual(monitor.latest()["observed_at"], 1_010.0)
 
 
+class SingleSessionArchiveTests(unittest.TestCase):
+    """验证按会话路径单独归档。"""
+
+    def test_criteria_paths_ignore_age_but_keep_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            just_finished = _old_session(
+                home,
+                "20260921",
+                "aaaa1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=1,
+            )
+            writing = _old_session(
+                home,
+                "20260601",
+                "bbbb1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            os.utime(writing, None)  # 刚刚还在写
+            active = _old_session(
+                home,
+                "20260602",
+                "bbbb2222-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            monitor = _monitor(root, home, active={str(active)})
+
+            # 指定路径时忽略保留天数：一天前的会话可以直接归档
+            plan = monitor.plan(
+                CleanupCriteria(paths=(str(just_finished),)),
+                now=time.time(),
+            )
+            # 仍在写入和仍在运行的会话即使被指定也要跳过
+            writing_plan = monitor.plan(
+                CleanupCriteria(paths=(str(writing),)),
+                now=time.time(),
+            )
+            active_plan = monitor.plan(
+                CleanupCriteria(paths=(str(active),)),
+                now=time.time(),
+            )
+
+        self.assertEqual([str(item.path) for item in plan.files], [str(just_finished)])
+        self.assertEqual(writing_plan.count, 0)
+        self.assertEqual(writing_plan.skipped_recent, 1)
+        self.assertEqual(active_plan.count, 0)
+        self.assertEqual(active_plan.skipped_active, 1)
+
+    def test_criteria_paths_select_only_requested_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            wanted = _old_session(
+                home,
+                "20260601",
+                "cccc1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            other = _old_session(
+                home,
+                "20260602",
+                "dddd1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            monitor = _monitor(root, home)
+
+            plan = monitor.plan(
+                CleanupCriteria(paths=(str(wanted),)),
+                now=time.time(),
+            )
+            result = monitor.archive(
+                CleanupCriteria(paths=(str(wanted),)),
+                confirm=True,
+            )
+            wanted_exists = wanted.exists()
+            other_exists = other.exists()
+
+        self.assertEqual([str(item.path) for item in plan.files], [str(wanted)])
+        self.assertEqual(result["count"], 1)
+        self.assertFalse(wanted_exists)
+        self.assertTrue(other_exists)
+
+    def test_unmatched_paths_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(
+                home,
+                "20260601",
+                "eeee1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            monitor = _monitor(root, home)
+            criteria = CleanupCriteria(paths=(str(root / "missing.jsonl"),))
+
+            preview = monitor.preview(criteria, now=time.time())
+
+        self.assertEqual(preview["count"], 0)
+        self.assertEqual(len(preview["unmatched"]), 1)
+
+    def test_session_archive_state_explains_why_not_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            ready = _old_session(
+                home,
+                "20260601",
+                "ffff1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            active = _old_session(
+                home,
+                "20260602",
+                "abcd1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=100,
+            )
+            fresh = _old_session(
+                home,
+                "20260921",
+                "dcba1111-2222-4333-8444-555566667777",
+                2048,
+                days_old=0,
+            )
+            outside = root / "elsewhere.jsonl"
+            outside.write_bytes(b"x" * 128)
+            monitor = _monitor(root, home, active={str(active)})
+
+            states = monitor.session_archive_state(
+                [str(ready), str(active), str(fresh), str(outside)],
+                now=time.time(),
+            )
+
+        self.assertTrue(states[str(ready)]["eligible"])
+        self.assertEqual(states[str(active)]["reason"], "会话仍在运行")
+        self.assertIn("仍在写入", states[str(fresh)]["reason"])
+        self.assertIn("可归档", states[str(outside)]["reason"])
+
+
 class HousekeepingTaskTests(unittest.TestCase):
     """验证后台归档/清理任务和进度上报。"""
 
