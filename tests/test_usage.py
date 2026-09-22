@@ -11,6 +11,7 @@ from pathlib import Path
 
 from token_monitor.registry import MultiSessionRegistry
 from token_monitor.usage import (
+    SessionSwitchThresholds,
     TokenUsage,
     UsageAggregator,
     _estimate_usage,
@@ -1363,6 +1364,362 @@ def _timestamp(value: str) -> float:
         .replace(tzinfo=timezone.utc)
         .timestamp()
     )
+
+
+def _write_search_session(
+    home: Path,
+    session_id: str,
+    cwd: str,
+    rows: tuple[tuple[str, str, int], ...],
+) -> Path:
+    """写入一个带项目目录、模型和累计 token 的合成 session。"""
+
+    path = (
+        home
+        / "sessions"
+        / "2026"
+        / "08"
+        / "27"
+        / f"rollout-2026-08-27T01-00-00-{session_id}.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    events: list[dict[str, object]] = [
+        {
+            "timestamp": "2026-08-27T01:00:00Z",
+            "type": "session_meta",
+            "payload": {"cwd": cwd},
+        },
+    ]
+    for when, model, total in rows:
+        events.append(
+            {
+                "timestamp": when,
+                "type": "event_msg",
+                "payload": {
+                    "thread_settings": {"model": model},
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": total,
+                            "output_tokens": 0,
+                            "total_tokens": total,
+                        }
+                    },
+                },
+            }
+        )
+    path.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class UsageSearchTests(unittest.TestCase):
+    """验证按日期、模型和会话检索 token 用量历史。"""
+
+    _PERSONAL_SESSION = "11111111-1111-4111-8111-111111111111"
+    _WORK_SESSION = "22222222-2222-4222-8222-222222222222"
+
+    def _aggregator(self, root: Path) -> UsageAggregator:
+        """建立两个会话、两个模型、两天跨度的用量索引。"""
+
+        personal = root / ".codex"
+        _write_search_session(
+            personal,
+            self._PERSONAL_SESSION,
+            "/home/dev/alpha",
+            (
+                ("2026-08-26T01:00:00Z", "gpt-5.6-luna", 1_000),
+                ("2026-08-27T01:00:00Z", "gpt-5.6-luna", 3_000),
+            ),
+        )
+        _write_search_session(
+            personal,
+            self._WORK_SESSION,
+            "/home/dev/beta",
+            (
+                ("2026-08-27T02:00:00Z", "gpt-5.6-sol", 5_000),
+                ("2026-08-27T03:00:00Z", "gpt-5.6-luna", 9_000),
+            ),
+        )
+        registry = MultiSessionRegistry(root / "state")
+        metadata = {
+            "codex": {
+                "account_id": "account-personal",
+                "profile_name": "codex",
+                "codex_home": str(personal),
+            }
+        }
+        aggregator = UsageAggregator(
+            discovery_interval=0.01,
+            refresh_interval=0.01,
+            cache_path=root / "state" / "usage-index.sqlite3",
+        )
+        aggregator.snapshot(
+            {"codex": registry},
+            account_metadata=metadata,
+            now=_timestamp("2026-08-27T12:00:00Z"),
+        )
+        return aggregator
+
+    def test_groups_by_date_session_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            result = aggregator.search(group="session", limit=50)
+
+        self.assertTrue(result["available"])
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["totals"]["records"], 4)
+        self.assertEqual(result["totals"]["sessions"], 2)
+        self.assertEqual(result["totals"]["total_tokens"], 12_000)
+        rows = result["rows"]
+        self.assertEqual(len(rows), 4)
+        session_ids = {row["session_id"] for row in rows}
+        self.assertEqual(
+            session_ids,
+            {self._PERSONAL_SESSION, self._WORK_SESSION},
+        )
+        work_rows = [row for row in rows if row["session_id"] == self._WORK_SESSION]
+        self.assertEqual(
+            sorted(row["model"] for row in work_rows),
+            ["gpt-5.6-luna", "gpt-5.6-sol"],
+        )
+        self.assertEqual(
+            sorted(row["total_tokens"] for row in work_rows),
+            [4_000, 5_000],
+        )
+        self.assertEqual({row["project"] for row in work_rows}, {"/home/dev/beta"})
+        self.assertEqual(
+            [row["date"] for row in work_rows],
+            [
+                datetime.fromtimestamp(
+                    _timestamp("2026-08-27T02:00:00Z")
+                ).astimezone().strftime("%Y-%m-%d")
+            ]
+            * 2,
+        )
+
+    def test_filters_by_model_session_project_and_date(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            by_model = aggregator.search(models=("gpt-5.6-sol",))
+            by_session = aggregator.search(session=self._WORK_SESSION[:8])
+            by_project = aggregator.search(project="beta")
+            by_keyword = aggregator.search(keyword="gpt-5.6-luna")
+            first_day = aggregator.search(
+                until=_timestamp("2026-08-26T23:59:59Z")
+            )
+            empty = aggregator.search(session="不存在的会话")
+
+        self.assertEqual(by_model["totals"]["records"], 1)
+        self.assertEqual(by_model["totals"]["total_tokens"], 5_000)
+        self.assertEqual(by_session["totals"]["records"], 2)
+        self.assertEqual(by_session["totals"]["sessions"], 1)
+        self.assertEqual(by_project["totals"]["records"], 2)
+        self.assertEqual(by_keyword["totals"]["records"], 3)
+        self.assertEqual(first_day["totals"]["records"], 1)
+        self.assertEqual(empty["matched_rows"], 0)
+        self.assertEqual(empty["rows"], [])
+
+    def test_summary_groups_and_sorting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            by_date = aggregator.search(group="date", sort="tokens")
+            by_model = aggregator.search(group="model", sort="tokens")
+
+        self.assertEqual(by_date["matched_rows"], 2)
+        newest = by_date["rows"][0]
+        self.assertEqual(newest["total_tokens"], 11_000)
+        self.assertEqual(newest["records"], 3)
+        self.assertEqual(newest["models"], ["gpt-5.6-luna", "gpt-5.6-sol"])
+        self.assertEqual(by_model["matched_rows"], 2)
+        self.assertEqual(by_model["rows"][0]["models"], ["gpt-5.6-luna"])
+        self.assertEqual(by_model["rows"][0]["total_tokens"], 7_000)
+        self.assertEqual(by_model["rows"][1]["model"], None)
+        self.assertEqual(by_model["rows"][1]["models"], ["gpt-5.6-sol"])
+
+    def test_pagination_and_facets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            first_page = aggregator.search(limit=2)
+            second_page = aggregator.search(limit=2, offset=2)
+            facets = aggregator.usage_facets()
+
+        self.assertEqual(len(first_page["rows"]), 2)
+        self.assertTrue(first_page["has_more"])
+        self.assertEqual(first_page["matched_rows"], 4)
+        self.assertFalse(second_page["has_more"])
+        self.assertEqual(len(second_page["rows"]), 2)
+        self.assertTrue(facets["available"])
+        self.assertEqual(facets["records"], 4)
+        self.assertEqual(facets["sessions"], 2)
+        self.assertEqual(facets["models"], ["gpt-5.6-luna", "gpt-5.6-sol"])
+        self.assertEqual(
+            facets["first_at"],
+            _timestamp("2026-08-26T01:00:00Z"),
+        )
+
+    def test_rejects_invalid_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            for kwargs in (
+                {"group": "project"},
+                {"sort": "random"},
+                {"limit": 0},
+                {"limit": 10_000},
+                {"offset": -1},
+            ):
+                with self.assertRaises(ValueError):
+                    aggregator.search(**kwargs)
+
+    def test_empty_index_reports_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = UsageAggregator(
+                cache_path=Path(temporary_directory) / "state" / "usage-index.sqlite3"
+            )
+
+            result = aggregator.search()
+            facets = aggregator.usage_facets()
+            empty = UsageAggregator.empty_search()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["matched_rows"], 0)
+        self.assertFalse(facets["available"])
+        self.assertEqual(facets["models"], [])
+        self.assertFalse(empty["available"])
+        self.assertEqual(empty["rows"], [])
+
+
+class SessionUsageTests(unittest.TestCase):
+    """验证会话轮数、上下文汇总和切换新会话提醒。"""
+
+    _SESSION = "55555555-5555-4555-8555-555555555555"
+
+    def _aggregator(self, root: Path) -> tuple[UsageAggregator, Path]:
+        """建立一个两轮、上下文 300k 的会话索引。"""
+
+        home = root / ".codex"
+        path = (
+            home
+            / "sessions"
+            / "2026"
+            / "08"
+            / "27"
+            / f"rollout-2026-08-27T01-00-00-{self._SESSION}.jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in (
+                    {
+                        "timestamp": "2026-08-27T01:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"cwd": "/home/dev/theta"},
+                    },
+                    {
+                        "timestamp": "2026-08-27T02:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "thread_settings": {"model": "gpt-5.6-luna"},
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1_000_000,
+                                    "total_tokens": 1_000_000,
+                                }
+                            },
+                        },
+                    },
+                    {
+                        "timestamp": "2026-08-27T03:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "thread_settings": {"model": "gpt-5.6-luna"},
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1_300_000,
+                                    "total_tokens": 1_300_000,
+                                }
+                            },
+                        },
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        aggregator = UsageAggregator(
+            discovery_interval=0.01,
+            refresh_interval=0.01,
+            cache_path=root / "state" / "usage-index.sqlite3",
+        )
+        aggregator.snapshot(
+            {"codex": MultiSessionRegistry(root / "state")},
+            account_metadata={
+                "codex": {
+                    "account_id": "account-personal",
+                    "profile_name": "codex",
+                    "codex_home": str(home),
+                }
+            },
+            now=_timestamp("2026-08-27T12:00:00Z"),
+        )
+        return aggregator, path
+
+    def test_session_usages_reports_turns_and_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator, path = self._aggregator(Path(temporary_directory))
+
+            usages = aggregator.session_usages([str(path)])
+            missing = aggregator.session_usages([str(path.parent / "other.jsonl")])
+            empty = aggregator.session_usages([])
+
+        usage = usages[str(path)]
+        self.assertEqual(usage.turns, 2)
+        self.assertEqual(usage.context_tokens, 300_000)
+        self.assertEqual(usage.total_tokens, 1_300_000)
+        self.assertEqual(usage.model, "gpt-5.6-luna")
+        self.assertEqual(usage.session_id, self._SESSION)
+        self.assertIsNotNone(usage.estimated_cost_usd)
+        payload = usage.to_dict()
+        self.assertEqual(payload["turns"], 2)
+        self.assertEqual(payload["context_tokens"], 300_000)
+        self.assertEqual(missing, {})
+        self.assertEqual(empty, {})
+
+    def test_reminder_triggers_on_turns_and_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator, path = self._aggregator(Path(temporary_directory))
+
+            usage = aggregator.session_usages([str(path)])[str(path)]
+            default = usage.reminder(SessionSwitchThresholds())
+            by_turns = usage.reminder(
+                SessionSwitchThresholds(turn_warn=2, context_warn_tokens=10**9)
+            )
+            quiet = usage.reminder(
+                SessionSwitchThresholds(turn_warn=99, context_warn_tokens=10**9)
+            )
+
+        self.assertIsNotNone(default)
+        self.assertEqual(default["kind"], "session")
+        self.assertIn("300,000", default["message"])
+        self.assertEqual(by_turns["reasons"], ["已进行 2 轮"])
+        self.assertIsNone(quiet)
+
+    def test_thresholds_are_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            SessionSwitchThresholds(turn_warn=0)
+        with self.assertRaises(ValueError):
+            SessionSwitchThresholds(context_warn_tokens=0)
+        self.assertEqual(
+            SessionSwitchThresholds(turn_warn=5, context_warn_tokens=10).to_dict(),
+            {"turn_warn": 5, "context_warn_tokens": 10},
+        )
 
 
 if __name__ == "__main__":

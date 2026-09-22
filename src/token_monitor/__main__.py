@@ -1,4 +1,4 @@
-"""支持 ``python -m codex_reset_monitor`` 启动 CLI。"""
+"""支持 ``python -m token_monitor`` 启动 CLI。"""
 
 from .cli import main
 

@@ -20,11 +20,19 @@ from types import FrameType
 from typing import Any, ClassVar
 
 from .accounts import build_account_specs
+from .alerts import DEFAULT_RETENTION_DAYS as DEFAULT_ALERT_RETENTION_DAYS
+from .housekeeping import DEFAULT_SINGLE_WARN_GIB, DEFAULT_TOTAL_WARN_GIB
 from .monitor import MonitorConfig
 from .multi_account import MultiAccountMonitor
+from .usage import (
+    DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
+    DEFAULT_SESSION_TURN_WARN,
+)
 
 
-SERVICE_NAME = "codex-reset-monitor.service"
+SERVICE_NAME = "token-monitor.service"
+# 改名前的单元名：只用于识别旧安装，便于清理和兼容查询，新安装一律用 SERVICE_NAME。
+LEGACY_SERVICE_NAME = "codex-reset-monitor.service"
 
 
 class ServiceError(RuntimeError):
@@ -51,11 +59,17 @@ class ServiceConfig:
     grok_homes: tuple[Path, ...]
     kimi_homes: tuple[Path, ...] = ()
     dsh_homes: tuple[Path, ...] = ()
+    commandcode_homes: tuple[Path, ...] = ()
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
     upload_burst_danger_mb: float = 32.0
     upload_window_warn_mb: float = 64.0
     upload_window_danger_mb: float = 256.0
+    alert_retention_days: float = DEFAULT_ALERT_RETENTION_DAYS
+    session_turn_warn: int = DEFAULT_SESSION_TURN_WARN
+    session_context_warn_tokens: int = DEFAULT_SESSION_CONTEXT_WARN_TOKENS
+    disk_warn_gb: float = DEFAULT_SINGLE_WARN_GIB
+    disk_total_warn_gb: float = DEFAULT_TOTAL_WARN_GIB
 
     def __post_init__(self) -> None:
         """校验服务配置，并复用运行时配置的边界检查。"""
@@ -80,6 +94,11 @@ class ServiceConfig:
             self,
             "dsh_homes",
             tuple(_absolute_path(path) for path in self.dsh_homes),
+        )
+        object.__setattr__(
+            self,
+            "commandcode_homes",
+            tuple(_absolute_path(path) for path in self.commandcode_homes),
         )
         if self.session_root is not None:
             object.__setattr__(
@@ -107,6 +126,11 @@ class ServiceConfig:
             upload_burst_danger_mb=self.upload_burst_danger_mb,
             upload_window_warn_mb=self.upload_window_warn_mb,
             upload_window_danger_mb=self.upload_window_danger_mb,
+            alert_retention_days=self.alert_retention_days,
+            session_turn_warn=self.session_turn_warn,
+            session_context_warn_tokens=self.session_context_warn_tokens,
+            disk_warn_gb=self.disk_warn_gb,
+            disk_total_warn_gb=self.disk_total_warn_gb,
         )
 
     @property
@@ -136,11 +160,19 @@ class ServiceConfig:
             "grok_homes": [str(path) for path in self.grok_homes],
             "kimi_homes": [str(path) for path in self.kimi_homes],
             "dsh_homes": [str(path) for path in self.dsh_homes],
+            "commandcode_homes": [
+                str(path) for path in self.commandcode_homes
+            ],
             "budget_usd": self.budget_usd,
             "upload_burst_warn_mb": self.upload_burst_warn_mb,
             "upload_burst_danger_mb": self.upload_burst_danger_mb,
             "upload_window_warn_mb": self.upload_window_warn_mb,
             "upload_window_danger_mb": self.upload_window_danger_mb,
+            "alert_retention_days": self.alert_retention_days,
+            "session_turn_warn": self.session_turn_warn,
+            "session_context_warn_tokens": self.session_context_warn_tokens,
+            "disk_warn_gb": self.disk_warn_gb,
+            "disk_total_warn_gb": self.disk_total_warn_gb,
         }
 
     def save(self) -> None:
@@ -215,6 +247,9 @@ class ServiceConfig:
             grok_homes=_optional_path_tuple(raw_payload, "grok_homes"),
             kimi_homes=_optional_path_tuple(raw_payload, "kimi_homes"),
             dsh_homes=_optional_path_tuple(raw_payload, "dsh_homes"),
+            commandcode_homes=_optional_path_tuple(
+                raw_payload, "commandcode_homes"
+            ),
             budget_usd=_optional_float(raw_payload, "budget_usd"),
             upload_burst_warn_mb=_optional_float(
                 raw_payload, "upload_burst_warn_mb"
@@ -232,6 +267,24 @@ class ServiceConfig:
                 raw_payload, "upload_window_danger_mb"
             )
             or 256.0,
+            alert_retention_days=_optional_float(
+                raw_payload, "alert_retention_days"
+            )
+            or DEFAULT_ALERT_RETENTION_DAYS,
+            session_turn_warn=int(
+                _optional_float(raw_payload, "session_turn_warn")
+                or DEFAULT_SESSION_TURN_WARN
+            ),
+            session_context_warn_tokens=int(
+                _optional_float(raw_payload, "session_context_warn_tokens")
+                or DEFAULT_SESSION_CONTEXT_WARN_TOKENS
+            ),
+            disk_warn_gb=_optional_float(raw_payload, "disk_warn_gb")
+            or DEFAULT_SINGLE_WARN_GIB,
+            disk_total_warn_gb=_optional_float(
+                raw_payload, "disk_total_warn_gb"
+            )
+            or DEFAULT_TOTAL_WARN_GIB,
         )
 
     def build_monitor(self) -> MultiAccountMonitor:
@@ -255,6 +308,11 @@ class ServiceConfig:
             upload_burst_danger_mb=self.upload_burst_danger_mb,
             upload_window_warn_mb=self.upload_window_warn_mb,
             upload_window_danger_mb=self.upload_window_danger_mb,
+            alert_retention_days=self.alert_retention_days,
+            session_turn_warn=self.session_turn_warn,
+            session_context_warn_tokens=self.session_context_warn_tokens,
+            disk_warn_gb=self.disk_warn_gb,
+            disk_total_warn_gb=self.disk_total_warn_gb,
         )
         return MultiAccountMonitor(
             accounts=accounts,
@@ -263,6 +321,7 @@ class ServiceConfig:
             grok_homes=self.grok_homes,
             kimi_homes=self.kimi_homes,
             dsh_homes=self.dsh_homes,
+            commandcode_homes=self.commandcode_homes,
         )
 
 
@@ -320,7 +379,7 @@ class UserServiceManager:
         arguments = (
             str(self.python_executable),
             "-m",
-            "codex_reset_monitor",
+            "token_monitor",
             "--state-dir",
             str(self.state_dir),
             "service",
@@ -329,7 +388,7 @@ class UserServiceManager:
         exec_start = " ".join(_systemd_quote(item) for item in arguments)
         return (
             "[Unit]\n"
-            "Description=Codex Reset Monitor background daemon\n"
+            "Description=Token Monitor background daemon\n"
             "StartLimitIntervalSec=60\n"
             "StartLimitBurst=5\n"
             "\n"
@@ -363,12 +422,22 @@ class UserServiceManager:
         self._systemctl("daemon-reload")
         self._systemctl("restart", SERVICE_NAME)
 
+    @property
+    def active_service_name(self) -> str:
+        """返回当前生效的单元名，改名后仍能查询旧的单元。"""
+
+        if self.unit_path.exists():
+            return SERVICE_NAME
+        if (self.unit_dir / LEGACY_SERVICE_NAME).exists():
+            return LEGACY_SERVICE_NAME
+        return SERVICE_NAME
+
     def status(self) -> int:
         """显示 systemd 状态并返回 systemctl 状态码。"""
 
         return self._systemctl(
             "status",
-            SERVICE_NAME,
+            self.active_service_name,
             "--no-pager",
             check=False,
         )
@@ -382,7 +451,7 @@ class UserServiceManager:
             "journalctl",
             "--user",
             "--unit",
-            SERVICE_NAME,
+            self.active_service_name,
             "--lines",
             str(lines),
             "--no-pager",
@@ -398,6 +467,17 @@ class UserServiceManager:
     def uninstall(self) -> None:
         """停止并移除服务定义；监控数据库和历史记录继续保留。"""
 
+        legacy_unit = self.unit_dir / LEGACY_SERVICE_NAME
+        if not self.unit_path.exists() and legacy_unit.exists():
+            # 改名前的安装：停掉并移除旧单元，避免遗留后台进程。
+            self._systemctl("disable", "--now", LEGACY_SERVICE_NAME, check=False)
+            try:
+                legacy_unit.unlink(missing_ok=True)
+            except OSError as error:
+                raise ServiceError(f"无法移除旧版后台服务文件: {error}") from error
+            self._systemctl("daemon-reload")
+            self._systemctl("reset-failed", LEGACY_SERVICE_NAME, check=False)
+            return
         self._systemctl(
             "disable",
             "--now",

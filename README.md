@@ -1,12 +1,27 @@
-# codex-reset-monitor
+# token-monitor
 
-本地 code agent 监控器。它读取 Codex / Grok / Kimi 账号额度、扫描正在运行的
-Codex session JSONL，并在网页中展示账号、额度窗口、活动会话、用量估算，以及
-Codex CLI、Grok CLI、Kimi Code、DeepSeek Harness、Claude Code、OpenCode
-等进程的异常流量。超出阈值的异常大上传会在 Dashboard 顶部告警。
+本地 code agent 监控器。它读取 Codex / Grok / Kimi / Command Code 账号额度、
+扫描正在运行的 Codex session JSONL，并在网页中展示账号、额度窗口、活动会话、
+用量估算，以及 Codex CLI、Grok CLI、Kimi Code、DeepSeek Harness、
+Command Code、Claude Code、OpenCode 等进程的异常流量。超出阈值的异常大上传
+会在 Dashboard 顶部告警，并落盘为可检索、可标记已读的历史告警。
 
 当前版本只负责观察和统计，不会因为额度状态启动新的 Codex 任务，也不提供
 额度中断后的自动处理入口。
+
+## 从 codex-reset-monitor 改名
+
+项目原名 `codex-reset-monitor`，现改名为 `token-monitor`：仓库目录、Python 包
+（`token_monitor`）、命令行程序、conda 环境和 systemd 单元都使用新名字。升级时：
+
+- 后台服务需要重新安装一次，单元名才会换成 `token-monitor.service`：
+  `token-monitor --state-dir "$HOME/.token-monitor" service install ...`。
+  在重新安装之前，`service status` / `service logs` / `service uninstall`
+  仍会自动识别并操作旧的 `codex-reset-monitor.service`。
+- 状态目录默认使用 `~/.token-monitor`；如果该目录还不存在而旧的
+  `~/.codex-reset-monitor` 存在，会继续使用旧目录，额度快照、会话记录和用量
+  索引都不会丢失。想迁移时把旧目录改名或复制为 `~/.token-monitor` 即可。
+- 旧的可执行文件 `codex-reset-monitor` 会被移除，改用 `token-monitor`。
 
 ## 安装
 
@@ -14,39 +29,64 @@ Codex CLI、Grok CLI、Kimi Code、DeepSeek Harness、Claude Code、OpenCode
 
 ```bash
 conda env create -f environment.yml
-conda activate codex-reset-monitor
+conda activate token-monitor
 ```
 
 也可以直接使用当前 Python：
 
 ```bash
-conda run -n codex-reset-monitor python -m pip install -e .
+conda run -n token-monitor python -m pip install -e .
 ```
 
 ## 使用
 
-全局参数放在子命令之前。默认状态目录是 `~/.codex-reset-monitor`，默认账号是
+全局参数放在子命令之前。默认状态目录是 `~/.token-monitor`，默认账号是
 `~/.codex`。`--codex-home` 可以重复传入多个账号。
 
 ```bash
 # 查看当前账号额度
-codex-reset-monitor \
-  --state-dir "$HOME/.codex-reset-monitor" \
+token-monitor \
+  --state-dir "$HOME/.token-monitor" \
   quota --json
 
 # 单次发现活动会话
-codex-reset-monitor \
-  --state-dir "$HOME/.codex-reset-monitor" \
+token-monitor \
+  --state-dir "$HOME/.token-monitor" \
   sessions --json
 
 # 扫描本机 code agent 异常流量（两次采样之间默认隔 1 秒）
-codex-reset-monitor traffic --json
+token-monitor traffic --json
+
+# 查询已落盘的历史异常流量告警（默认最近 7 天、未读、最多 50 条）
+token-monitor --state-dir "$HOME/.token-monitor" alerts --days 7 --unread
+
+# 历史告警的已读与清理
+token-monitor --state-dir "$HOME/.token-monitor" alerts --ack-all
+token-monitor --state-dir "$HOME/.token-monitor" alerts --clear-before 30 --dry-run
+token-monitor --state-dir "$HOME/.token-monitor" alerts --prune
+
+# 检索 token 用量历史（按日期、模型、会话）
+token-monitor --state-dir "$HOME/.token-monitor" usage --days 30 --limit 20
+token-monitor --state-dir "$HOME/.token-monitor" usage --days 0 --session 01a0c7ed --json
+token-monitor --state-dir "$HOME/.token-monitor" usage --days 90 --group model --sort tokens
+
+# 查看 agent 数据目录占用、磁盘提醒和可归档会话
+token-monitor --state-dir "$HOME/.token-monitor" disk --days 30
+
+# 会话归档（先预览，加 --yes 才执行）与恢复
+token-monitor --state-dir "$HOME/.token-monitor" --codex-home "$HOME/.codex" \
+  sessions --archive --older-than 30
+token-monitor --state-dir "$HOME/.token-monitor" --codex-home "$HOME/.codex" \
+  sessions --archive --older-than 30 --yes
+token-monitor --state-dir "$HOME/.token-monitor" \
+  sessions --restore "$HOME/.token-monitor/archives/codex-sessions-20260922-170000.tar.gz"
 
 # 持续监控两个账号并启动网页 Dashboard
-codex-reset-monitor \
-  --state-dir "$HOME/.codex-reset-monitor" \
+token-monitor \
+  --state-dir "$HOME/.token-monitor" \
   --codex-home "$HOME/.codex" \
   --codex-home "$HOME/.codex-work" \
+  --commandcode-home "$HOME/.commandcode" \
   daemon \
   --dashboard \
   --dashboard-host 0.0.0.0 \
@@ -59,6 +99,10 @@ WSL 时，可以使用 `--dashboard-host 0.0.0.0`；这会让网页可被网络�
 
 Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独启动前端
 开发服务器。网页端口就是 `--dashboard-port` 指定的端口。
+
+「告警历史」「用量检索」「磁盘与会话管理」属于按需查看的功能：默认折叠并排在页面
+最后，折叠时只显示一行关键结论（未读数、索引规模、目录占用与可归档数量），展开或
+点击侧边栏「按需查看」里的入口时才会拉取明细，展开状态记在浏览器本地。
 
 「账号与额度」区以看板卡片并列展示各账号的额度窗口；卡片内的活动会话默认
 折叠为摘要按钮，点击「展开 N 个活动会话」再展开完整会话表，「收起会话列表」
@@ -99,8 +143,23 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
   （`~/.kimi-code/oauth/kimi-code.lock`）刷新并原子写回凭据，读取失败时
   只展示账号身份与登录状态，不影响本地用量统计。配额结果带缓存
   （成功 60 秒、失败 15 秒），避免 Dashboard 轮询反复请求接口。
-- 异常流量监控扫描本机 `codex` / `grok` / `kimi` / `dsh` / `claude` /
-  `opencode` 等进程及其子进程的已建立 TCP 连接，使用内核 `tcp_info` 的
+- `--commandcode-home` 可重复传入多个 Command Code 数据目录（默认在存在时
+  使用 `~/.commandcode` 或 `COMMANDCODE_HOME`）；订阅额度通过与官方 CLI 相同
+  的后台接口读取：`/alpha/whoami`（身份与组织）、`/alpha/billing/credits`
+  （套餐名额余额、5 小时与每周窗口）、`/alpha/billing/subscriptions`
+  （套餐、订阅状态与账期）和 `/alpha/usage/summary`（本账期请求数与扣费），
+  请求带官方 CLI 相同的 `User-Agent` 与版本头，缺少时服务端会返回 403。
+  `auth.json` 中的 API Key 只用于鉴权请求，不写入返回值、日志或 Dashboard；
+  读取失败时只展示账号身份与登录状态。配额结果带缓存（成功 60 秒、
+  失败 15 秒），避免 Dashboard 轮询反复请求接口。
+- Command Code 账号卡片展示账号 ID、Profile、套餐（如 GOAT / Pro / Teams Pro）、
+  登录状态，以及 5-hour / Weekly / monthly 三个额度窗口；用量区额外给出本月
+  订阅真实扣费、剩余名额、请求数和账期重置天数，与本地 API 等价估算并排对账。
+- Command Code 活动会话以进程实际打开的 `projects/<项目>/<session>.jsonl` 为准；
+  工作目录取会话头 `type: "session"` 记录的 `cwd`，模型取同目录
+  `<session>.meta.json`，不读取对话正文或工具输出。
+- 异常流量监控扫描本机 `codex` / `grok` / `kimi` / `dsh` / `command-code` /
+  `claude` / `opencode` 等进程及其子进程的已建立 TCP 连接，使用内核 `tcp_info` 的
   `bytes_sent` 计算外发增量。回环地址（本机 Web UI）不计入外发告警；
   新连接第一次只记基线，避免把监控启动前的历史流量当成突发上传。
   DeepSeek Harness 的 Web UI（默认 `:3080`）把会话推给浏览器也不计入外发告警。
@@ -108,6 +167,48 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
   256 MiB 同样分级。可用 `--upload-warn-mb`、`--upload-alert-mb`、
   `--upload-window-warn-mb`、`--upload-window-alert-mb` 调整。只记录
   进程、工作目录、对端地址和字节数，不读取连接内容。
+- 异常流量告警会落盘到状态目录的 `traffic-alerts.sqlite3`，daemon 重启后仍可
+  查询。同一进程、同一触发规则、同一级别的重复告警在 5 分钟合并窗口内合并为
+  一条记录（`count` 累计、`peak_bytes` 取峰值、重新变为未读）；`--alert-retention-days`
+  （daemon 和 service install 均支持，默认 30 天）控制保留天数，daemon 按小时
+  自动清理过期记录。
+- Dashboard 的「异常流量监控」区展示实时进程表，「告警历史」区按时间段、
+  级别、触发规则、已读状态和关键词检索历史告警，可逐条或一键标记已读，
+  并按当前时间范围删除历史告警（删除前会提示影响条数）。「近 15 秒外发」卡片
+  显示未读告警数。历史页面只展示进程、目录、对端和字节数等元数据。
+- `token-monitor alerts` 在命令行查询同一份历史：`--days` / `--since` /
+  `--until` 控制时间范围，`--level`、`--kind`、`--product`、`--query` 筛选，
+  `--unread` / `--read` 过滤已读状态，`--json` 输出机器可读结果，`--stats`
+  只看统计，`--quiet` 只用一个退出码表示「是否存在未读告警」（有未读时为 1）。
+  `--ack`、`--ack-all` 标记已读，`--clear`、`--clear-before`、`--clear-all`
+  删除历史（`--clear-all` 必须同时加 `--yes`），`--dry-run` 预览清理条数。
+- 「用量检索」区直接检索用量索引里的 token 历史记录：时间范围（近 7 / 30 / 90 天、
+  全部历史或自定义起止日期）、模型、关键词（会话 ID、JSONL 文件名、项目路径、模型）
+  三个维度筛选，可切换「会话明细 / 按日期汇总 / 按模型汇总」三种视图，并按
+  最近活动、token 用量或估算金额排序，支持翻页和点击会话 ID 下钻。
+  `GET /api/usage/search` 提供同样的能力，`days=0` 表示不限时间；
+  单次检索最多扫描 20 万条原始记录，命中上限时返回 `truncated`。
+- 活动会话的轮数和最新上下文会与用量索引对照：轮数达到 `--session-turn-warn`
+  （默认 100，与习惯分析的「超长对话」口径一致）或最近一次上下文达到
+  `--session-context-warn-tokens`（默认 200000）时，Dashboard 顶部提示、
+  「账号与额度」的会话表标出「建议开新会话」，daemon 日志也会提醒。
+  超长会话每一轮都按全量上下文重新计费，任务收尾后让模型总结再开新会话更省 token。
+- `token-monitor disk` 统计 Codex / Grok / Kimi / DeepSeek Harness / Command Code
+  数据目录和监控状态目录的占用（含一级子目录排行与会话文件占比）：单个目录超过
+  `--disk-warn-gb`（默认 5 GiB）或合计超过 `--disk-total-warn-gb`（默认 10 GiB）
+  时提醒；daemon 每 60 秒复查一次，并按 30 分钟冷却写日志，Dashboard 顶部同步提示。
+- 会话归档与清理只针对 Codex `<CODEX_HOME>/sessions/**/rollout-*.jsonl`；
+  其他 agent 目录只统计和提醒。`sessions --archive --older-than N --yes` 会先把
+  选中的会话打包成 tar.gz 并写入 manifest（含文件清单、大小、sha256 和会话用量摘要），
+  校验通过后才删除原文件；`sessions --clean` 直接删除；两者缺省都只预览，
+  并始终跳过仍在运行的会话、10 分钟内修改过的文件和小于 `--min-size-mb` 的文件。
+  Dashboard 的「磁盘与会话管理」区提供同样的预览、归档、清理按钮，并可从归档
+  恢复到原路径；归档默认放在状态目录的 `archives/` 下。
+- `token-monitor usage` 在命令行检索同一份索引：`--days`（0 表示全部历史）或
+  `--from` / `--to` 指定日期，`--model`（可重复）、`--session`、`--project`、
+  `--query` 筛选，`--group` 选择分组，`--sort` 选择排序，`--limit` / `--offset`
+  翻页，`--json` 输出机器可读结果。检索只读状态目录里的用量索引，
+  不会触发重新扫描 JSONL，也不会读取对话内容。
 
 金额是 OpenAI API 等价值估算，不代表 Plus 或其他订阅的实际账单。模型没有已知
 API 单价时仍展示 token，但不会计入金额合计。
@@ -117,8 +218,8 @@ API 单价时仍展示 token，但不会计入金额合计。
 在已启用 systemd 的 WSL2 中，可以把监控器安装为当前用户的后台服务：
 
 ```bash
-codex-reset-monitor \
-  --state-dir "$HOME/.codex-reset-monitor" \
+token-monitor \
+  --state-dir "$HOME/.token-monitor" \
   --codex-home "$HOME/.codex" \
   service install \
   --dashboard \
@@ -129,26 +230,43 @@ codex-reset-monitor \
 常用管理命令：
 
 ```bash
-codex-reset-monitor --state-dir "$HOME/.codex-reset-monitor" service status
-codex-reset-monitor --state-dir "$HOME/.codex-reset-monitor" service logs --lines 100
-codex-reset-monitor --state-dir "$HOME/.codex-reset-monitor" service restart
-codex-reset-monitor --state-dir "$HOME/.codex-reset-monitor" service stop
-codex-reset-monitor --state-dir "$HOME/.codex-reset-monitor" service start
-codex-reset-monitor --state-dir "$HOME/.codex-reset-monitor" service uninstall
+token-monitor --state-dir "$HOME/.token-monitor" service status
+token-monitor --state-dir "$HOME/.token-monitor" service logs --lines 100
+token-monitor --state-dir "$HOME/.token-monitor" service restart
+token-monitor --state-dir "$HOME/.token-monitor" service stop
+token-monitor --state-dir "$HOME/.token-monitor" service start
+token-monitor --state-dir "$HOME/.token-monitor" service uninstall
 ```
 
-服务配置保存在 `~/.codex-reset-monitor/service.json`，systemd 单元保存在
-`~/.config/systemd/user/codex-reset-monitor.service`。卸载服务不会删除监控数据库
-或用量索引。
+服务配置保存在 `~/.token-monitor/service.json`，systemd 单元保存在
+`~/.config/systemd/user/token-monitor.service`。卸载服务不会删除监控数据库
+或用量索引。状态目录内各文件的用途：
+
+| 文件 | 内容 |
+| --- | --- |
+| `monitor.sqlite3` | 会话登记、额度快照和恢复记录 |
+| `usage-index.sqlite3` | 用量索引与增量读取检查点 |
+| `traffic-alerts.sqlite3` | 异常流量告警历史（保留天数由 `--alert-retention-days` 控制） |
+| `service.json` | `service install` 保存的 daemon 配置 |
+| `archives/` | 会话归档：`codex-sessions-*.tar.gz` 及其 `.manifest.json` |
+
+Dashboard 除页面和只读接口（`/api/state`、`/api/usage`、`/api/usage/search`、
+`/api/insights`、`/api/alerts`、`/api/housekeeping`）外，只额外接受两个写接口：
+`POST /api/alerts`（标记已读、删除历史告警）和 `POST /api/housekeeping`
+（`archive`、`clean`、`restore`，必须带 `confirm: true`，恢复只接受归档目录内的
+文件名）。两者都要求 `Content-Type: application/json` 并限制请求体大小；
+其余路径的 POST 仍返回 405。
+由于页面默认没有鉴权，使用 `--dashboard-host 0.0.0.0` 暴露到局域网时，
+应确认网络内的其他设备可信。
 
 ## DevDeck
 
 DevDeck 可以将本项目配置为一个后端服务。工作目录填写项目根目录，启动命令使用：
 
 ```bash
-PYTHONPATH=/path/to/codex-reset-monitor/src \
-python -u -m codex_reset_monitor \
-  --state-dir "$HOME/.codex-reset-monitor" \
+PYTHONPATH=/path/to/token-monitor/src \
+python -u -m token_monitor \
+  --state-dir "$HOME/.token-monitor" \
   --codex-home "$HOME/.codex" \
   daemon \
   --codex /home/yourname/.local/bin/codex \

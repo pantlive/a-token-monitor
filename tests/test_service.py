@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from token_monitor.service import (
+    LEGACY_SERVICE_NAME,
     SERVICE_NAME,
     ServiceConfig,
     ServiceError,
@@ -61,6 +62,54 @@ class ServiceTests(unittest.TestCase):
 
             self.assertEqual(loaded, config)
             self.assertEqual(loaded.kimi_homes, (root / ".kimi-code",))
+
+    def test_config_round_trip_with_commandcode_homes(self) -> None:
+        """Command Code 数据目录应随服务配置完整往返。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = ServiceConfig(
+                state_dir=root / "state",
+                codex_homes=(root / ".codex",),
+                session_root=None,
+                verbose=False,
+                codex_path=str(root / "bin" / "codex"),
+                scan_interval=2.0,
+                reconcile_interval=30.0,
+                quota_interval=300.0,
+                dashboard=False,
+                dashboard_host="127.0.0.1",
+                dashboard_port=8765,
+                grok_homes=(),
+                commandcode_homes=(root / ".commandcode",),
+            )
+
+            config.save()
+            loaded = ServiceConfig.load(config.config_path)
+
+            self.assertEqual(loaded, config)
+            self.assertEqual(
+                loaded.commandcode_homes,
+                (root / ".commandcode",),
+            )
+
+    def test_legacy_config_without_commandcode_homes_loads(self) -> None:
+        """缺少 commandcode_homes 键的旧配置应加载为空列表。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = self._config(root)
+            config.save()
+            payload = json.loads(config.config_path.read_text(encoding="utf-8"))
+            payload.pop("commandcode_homes", None)
+            config.config_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            loaded = ServiceConfig.load(config.config_path)
+
+            self.assertEqual(loaded.commandcode_homes, ())
 
     def test_legacy_config_without_kimi_homes_loads(self) -> None:
         """缺少 kimi_homes 键的旧配置应加载为空列表。"""
@@ -237,6 +286,94 @@ class ServiceTests(unittest.TestCase):
                     ["systemctl", "--user", "daemon-reload"],
                     ["systemctl", "--user", "enable", SERVICE_NAME],
                     ["systemctl", "--user", "restart", SERVICE_NAME],
+                ],
+            )
+
+    @patch("token_monitor.service._run_command", return_value=0)
+    def test_status_and_logs_fall_back_to_legacy_unit(
+        self,
+        run_command: Mock,
+    ) -> None:
+        """改名前的旧单元仍应能被查询，避免升级后看不到后台服务。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            (unit_dir / LEGACY_SERVICE_NAME).write_text("", encoding="utf-8")
+            manager = UserServiceManager(
+                state_dir=root / "state",
+                unit_dir=unit_dir,
+            )
+
+            self.assertEqual(manager.active_service_name, LEGACY_SERVICE_NAME)
+            manager.status()
+            manager.logs(lines=10, follow=False)
+
+            status_command = run_command.call_args_list[0].args[0]
+            self.assertEqual(
+                status_command,
+                ["systemctl", "--user", "status", LEGACY_SERVICE_NAME, "--no-pager"],
+            )
+            logs_command = run_command.call_args_list[1].args[0]
+            self.assertIn(LEGACY_SERVICE_NAME, logs_command)
+
+    @patch("token_monitor.service._run_command", return_value=0)
+    def test_new_unit_takes_precedence_over_legacy(
+        self,
+        run_command: Mock,
+    ) -> None:
+        """新旧单元同时存在时，只操作新单元。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            (unit_dir / SERVICE_NAME).write_text("", encoding="utf-8")
+            (unit_dir / LEGACY_SERVICE_NAME).write_text("", encoding="utf-8")
+            manager = UserServiceManager(
+                state_dir=root / "state",
+                unit_dir=unit_dir,
+            )
+
+            self.assertEqual(manager.active_service_name, SERVICE_NAME)
+            manager.status()
+
+            self.assertEqual(
+                run_command.call_args_list[0].args[0],
+                ["systemctl", "--user", "status", SERVICE_NAME, "--no-pager"],
+            )
+
+    @patch("token_monitor.service._run_command", return_value=0)
+    def test_uninstall_removes_legacy_unit(
+        self,
+        run_command: Mock,
+    ) -> None:
+        """卸载应识别旧安装并移除旧单元文件。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            legacy_unit = unit_dir / LEGACY_SERVICE_NAME
+            legacy_unit.write_text("", encoding="utf-8")
+            manager = UserServiceManager(
+                state_dir=root / "state",
+                unit_dir=unit_dir,
+            )
+
+            manager.uninstall()
+
+            self.assertFalse(legacy_unit.exists())
+            commands = [call.args[0] for call in run_command.call_args_list]
+            self.assertEqual(
+                commands[0],
+                [
+                    "systemctl",
+                    "--user",
+                    "disable",
+                    "--now",
+                    LEGACY_SERVICE_NAME,
                 ],
             )
 

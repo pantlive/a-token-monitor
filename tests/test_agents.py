@@ -23,6 +23,9 @@ class AgentIdentificationTests(unittest.TestCase):
                 "dsh",
             ),
             (("python3", "/opt/kimi-code/bin/kimi"), "python3", "kimi"),
+            (("command-code",), "command-code", "command-code"),
+            (("cmdc", "login"), "cmdc", "command-code"),
+            (("commandcode", "--version"), "commandcode", "command-code"),
         )
         for command, comm, expected in cases:
             with self.subTest(command=command):
@@ -40,13 +43,14 @@ class AgentIdentificationTests(unittest.TestCase):
             )
         )
         self.assertIsNone(
-            identify_agent(("codex-reset-monitor", "daemon"), "codex-reset-monitor")
+            identify_agent(("token-monitor", "daemon"), "token-monitor")
         )
 
     def test_product_labels_cover_requested_agents(self) -> None:
         self.assertEqual(product_label("dsh"), "DeepSeek Harness")
         self.assertEqual(product_label("kimi"), "Kimi Code")
         self.assertEqual(product_label("grok"), "Grok CLI")
+        self.assertEqual(product_label("command-code"), "Command Code")
 
 
 if __name__ == "__main__":

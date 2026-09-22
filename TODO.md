@@ -8,12 +8,6 @@
   - 接入 Dashboard 的用量趋势与习惯分析。
   - 支持断点续扫、日志轮转，并补充脱敏样本测试。
 
-- [ ] 异常流量告警落盘与 Web 通知
-  - 持久化异常流量告警，服务重启后仍可查询。
-  - Dashboard 展示实时通知和历史告警。
-  - 支持已读状态、筛选、清理、冷却期及重复告警合并。
-  - 暂不接入邮件、Telegram、企业微信等外部通知渠道。
-
 - [ ] Grok 活动会话与 Kimi / DSH 对齐
   - 根据 Grok CLI 进程实际打开的日志识别活动会话。
   - 关联账号、项目目录和 session，并处理多进程、退出及日志轮转。
@@ -31,6 +25,8 @@
   - 提供清理预览，明确将删除的数据范围和预计释放空间。
   - 支持安全清理与索引压缩，不影响仍在活动的会话和增量读取检查点。
   - 后台自动清理失败时记录原因并在 Dashboard 提示。
+  - 说明：告警历史的保留天数（`--alert-retention-days`）和删除前条数预览已完成，
+    用量与会话历史的保留策略仍待实现。
 
 - [ ] Daemon 健康检查
   - 提供轻量的 `/healthz` 存活检查和 `/readyz` 就绪检查端点。
@@ -46,10 +42,55 @@
   - 无法唯一匹配时明确展示候选会话或“未关联”，避免错误归属。
   - 仅保存关联所需元数据，不读取或保存网络传输内容及对话正文。
 
+- [ ] Web 端自定义扫描目录
+  - 在 Dashboard 中查看、添加、编辑和移除 Codex 扫描目录，例如 `~/.codex`、`~/.codex-work`。
+  - 后续可复用同一界面管理 Grok、Kimi 和 DSH 的数据目录。
+  - 校验目录是否存在、是否可读及是否符合对应 provider 的目录结构。
+  - 将配置持久化到状态目录，并明确区分命令行参数与 Web 配置的优先级。
+  - 修改后安全重载相关 provider，无需重启整个 daemon，且不丢失索引检查点。
+  - 限制可配置路径和敏感信息回显，避免通过 Web 任意浏览服务器文件系统。
+
 ## 基础架构
 
 - [ ] 统一 Agent 会话模型
-  - 为 Codex、Grok、Claude Code、Kimi 和 DSH 定义统一的会话结构。
+  - 为 Codex、Grok、Claude Code、Kimi、DSH 和 Command Code 定义统一的会话结构。
   - 统一账号、项目、模型、状态、token、开始时间和最后活动时间等字段。
   - 将 provider 特有的发现和解析逻辑放入适配器，公共聚合与 Dashboard 只依赖统一模型。
   - 在实现 Grok 活动会话和 Claude Code 用量索引时同步接入，避免产生新的平行数据结构。
+
+## 已完成
+
+- [x] 会话卫生：长会话提醒、磁盘占用提醒、归档与清理
+  - 活动会话轮数 ≥ 100 或最近一次上下文 ≥ 200k token 时提醒切换新会话，
+    Dashboard 告警区与活动会话表、`token-monitor sessions` 和 daemon 日志同步提示；
+    阈值可用 `--session-turn-warn` / `--session-context-warn-tokens` 调整。
+  - 统计 Codex / Grok / Kimi / DeepSeek Harness / Command Code 数据目录和状态目录
+    占用（含一级子目录排行），单目录 5 GiB / 合计 10 GiB 阈值提醒并可配置。
+  - 会话归档打包 tar.gz + manifest（含 sha256 与用量摘要）后删除原文件，可恢复；
+    也支持直接清理；两者都先预览、显式确认，并跳过活动会话与过新文件。
+  - Dashboard「磁盘与会话管理」区、`token-monitor disk` 与
+    `sessions --archive/--clean/--restore` 提供同样的能力。
+  - v1 只归档/清理 Codex session JSONL；其他 agent 目录只统计和提醒。
+
+- [x] token 用量历史检索
+  - 直接检索用量索引里的 token 记录，按日期、模型、会话（含项目路径关键词）筛选。
+  - Dashboard 新增「用量检索」区：会话明细 / 按日期汇总 / 按模型汇总三种视图，
+    支持最近活动、token 用量、估算金额排序与翻页，可点击会话 ID 下钻。
+  - `GET /api/usage/search` 提供同等的查询能力，单次扫描上限 20 万条并返回截断标记。
+  - `token-monitor usage` 命令行支持 `--days` / `--from` / `--to` / `--model` /
+    `--session` / `--project` / `--query` / `--group` / `--sort` / `--json`。
+  - 只读取 token 元数据，不读取提示词或工具输出等对话内容。
+
+- [x] 异常流量告警落盘与 Web 通知
+  - 告警写入状态目录的 `traffic-alerts.sqlite3`，daemon 重启后仍可查询。
+  - Dashboard 新增「告警历史」区，展示实时通知与历史告警，KPI 卡片显示未读数。
+  - 支持已读状态、时间段 / 级别 / 规则 / 关键词筛选、单条与批量清理，以及
+    5 分钟合并窗口内的重复告警合并；`--alert-retention-days` 控制保留天数。
+  - `token-monitor alerts` 提供同等的命令行查询、已读和清理能力。
+  - 暂不接入邮件、Telegram、企业微信等外部通知渠道。
+
+- [x] Command Code 订阅额度与账号管理
+  - 通过官方后台接口读取身份、套餐、5 小时 / 每周窗口和本月订阅扣费。
+  - 支持 `--commandcode-home` 多数据目录，并随 `service install` 持久化。
+  - Dashboard 展示 Command Code 账号卡片、额度窗口、活动会话与用量对账。
+  - API Key 只用于鉴权请求，不写入返回值、日志或 Dashboard。

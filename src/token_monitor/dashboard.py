@@ -1,4 +1,4 @@
-"""本地只读 Dashboard：展示额度、活动会话和本地用量。"""
+"""本地 Dashboard：展示额度、活动会话、本地用量和历史告警。"""
 
 from __future__ import annotations
 
@@ -6,12 +6,31 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from .alerts import (
+    MAX_QUERY_LIMIT,
+    AlertQuery,
+    AlertStoreError,
+    TrafficAlertStore,
+)
+from .housekeeping import (
+    CleanupCriteria,
+    HousekeepingError,
+    HousekeepingMonitor,
+    empty_housekeeping_report,
+)
+from .commandcode import (
+    list_commandcode_active_sessions,
+    read_commandcode_account,
+    read_commandcode_quota,
+    resolve_commandcode_homes,
+)
 from .dsh import (
     list_dsh_active_sessions,
     read_dsh_account,
@@ -29,8 +48,15 @@ from .multi_models import TrackedSession
 from .quota import QuotaSnapshot
 from .registry import MultiSessionRegistry, RegistryError
 from .traffic import TrafficMonitor, TrafficSnapshot, empty_traffic_snapshot
-from .usage import UsageAggregator
+from .usage import (
+    DEFAULT_SEARCH_DAYS,
+    SessionSwitchThresholds,
+    UsageAggregator,
+)
 
+
+# 中文注释：告警历史的写接口只接受小请求体，避免 Dashboard 被当成通用上传入口。
+_MAX_REQUEST_BYTES = 64 * 1024
 
 _DASHBOARD_HTML = r"""<!doctype html>
 <html lang="zh-CN">
@@ -38,7 +64,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Codex Reset Monitor</title>
+  <title>Token Monitor</title>
   <style>
     :root {
       color-scheme: dark;
@@ -363,6 +389,21 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .kpi-foot { display: flex; align-items: center; gap: 5px; margin-top: 9px; color: var(--muted); font-size: 11px; }
     .kpi-foot strong { color: var(--muted-strong); font-weight: 600; }
     .section-block { margin-top: 24px; padding: 21px; overflow: hidden; }
+    .section-toggle { display: flex; align-items: flex-start; gap: 11px; width: 100%; padding: 0; border: 0; color: inherit; background: none; cursor: pointer; font: inherit; text-align: left; }
+    .section-toggle-text { display: block; min-width: 0; }
+    .section-toggle-title { display: block; margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+    .section-toggle:hover .section-toggle-title { color: var(--cyan); }
+    .section-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; border-radius: 6px; }
+    .section-toggle .chevron { width: 15px; height: 15px; margin-top: 5px; flex: 0 0 auto; color: var(--muted); transition: transform .16s ease; transform: rotate(90deg); }
+    .section-block.is-collapsed .section-toggle .chevron { transform: rotate(0deg); }
+    .section-toggle .section-kicker { display: block; }
+    .section-toggle .section-description { display: block; }
+    .section-block.is-collapsed .section-toggle .section-description { display: none; }
+    .section-summary { display: none; margin-top: 6px; color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; }
+    .section-block.is-collapsed .section-summary { display: block; }
+    .section-block.is-collapsed { padding-bottom: 18px; }
+    .section-block.is-collapsed .section-body { display: none; }
+    .section-body { margin-top: 2px; }
     .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 19px; }
     .section-description { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
     .section-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
@@ -434,12 +475,33 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .usage-number { white-space: nowrap; }
     #alert-list { display: grid; gap: 8px; margin-bottom: 20px; }
     #alert-list:empty { display: none; }
+    .alert-head { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+    .alert-head-spacer { flex: 1 1 auto; }
+    .alert-row { display: grid; grid-template-columns: 3px minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
+    .alert-row .alert-accent { width: 3px; align-self: stretch; border-radius: 99px; background: var(--blue); }
+    .alert-row.warn .alert-accent { background: var(--yellow); }
+    .alert-row.danger .alert-accent { background: var(--red); }
+    .alert-row .alert-body { min-width: 0; }
+    .alert-row .alert-title { color: var(--text); font-size: 12.5px; font-weight: 650; overflow-wrap: anywhere; }
+    .alert-row .alert-detail { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .alert-row .alert-link { color: var(--cyan); font-size: 11px; text-decoration: none; white-space: nowrap; }
+    .alert-row .alert-link:hover { text-decoration: underline; }
     .alert-list { display: grid; gap: 8px; }
     .alert-banner { padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted-strong); background: var(--surface-raised); font-size: 12px; }
     .alert-banner.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
     .alert-banner.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
     .alert-banner.tip { border-color: #2c4a78; color: #93c5fd; background: var(--blue-soft); }
     .alert-banner.info { border-color: var(--line); color: var(--muted-strong); background: var(--surface-raised); }
+    .alert-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
+    .alert-filter { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+    .alert-filter select, .alert-filter input { min-width: 150px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); }
+    .alert-filter select { padding-right: 30px; cursor: pointer; }
+    .alert-filter input:focus, .alert-filter select:focus { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    .alert-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+    .alert-history-table table { min-width: 1120px; }
+    .alert-row-unread { font-weight: 600; }
+    .alert-ack-button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted-strong); background: var(--panel); cursor: pointer; font-size: 11px; }
+    .alert-ack-button:hover { border-color: var(--violet); color: var(--text); }
     .suggestion-saving { float: right; margin-left: 10px; color: var(--green); font-weight: 700; white-space: nowrap; }
     .insights-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 14px; }
     .observation-list { margin: 0; padding-left: 18px; color: var(--muted-strong); font-size: 12px; }
@@ -459,6 +521,75 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .top-project-value { color: var(--text); font-size: 12px; font-weight: 650; white-space: nowrap; }
     .top-project .bar { margin: 6px 0 0; }
     .empty-state { padding: 26px 12px; color: var(--muted); text-align: center; }
+    .empty-state .empty-title { display: block; color: var(--muted-strong); font-weight: 650; }
+    .empty-state .empty-hint { display: block; margin-top: 5px; font-size: 11px; }
+    /* 统计小块：区块顶部的关键数字，避免把结论埋进表格。 */
+    .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; margin: 0 0 14px; }
+    .stat { padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .stat-label { color: var(--muted); font-size: 11px; letter-spacing: .02em; }
+    .stat-value { margin-top: 4px; font-size: 21px; font-weight: 750; letter-spacing: -.035em; }
+    .stat-value.warn { color: var(--yellow); }
+    .stat-value.danger { color: var(--red); }
+    .stat-value.ok { color: var(--green); }
+    .stat-foot { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    /* 工具栏与表单控件：统一深色输入框，替换浏览器默认外观。 */
+    .toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px 13px; margin: 0 0 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .field { display: grid; gap: 5px; min-width: 0; }
+    .field-label { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+    .field select, .field input { min-width: 128px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 12px; }
+    .field select { padding-right: 28px; cursor: pointer; }
+    .field input::placeholder { color: #6c8098; }
+    .field.wide select, .field.wide input { min-width: 208px; }
+    .field input[type="date"] { color-scheme: dark; }
+    .field select:focus, .field input:focus { border-color: var(--cyan); outline: 2px solid rgba(34, 211, 238, .35); outline-offset: 1px; }
+    .toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+    .toolbar-note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+    /* 按钮：一个基础样式加少量语义变体，替换此前到处复用的 .refresh-button。 */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+    .btn:hover { border-color: #3d5670; color: var(--text); background: var(--surface-hover); }
+    .btn.primary { border-color: #2a6f86; color: #a5f3fc; background: var(--cyan-soft); }
+    .btn.primary:hover { border-color: var(--cyan); background: #16404f; }
+    .btn.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
+    .btn.warn:hover { border-color: var(--yellow); }
+    .btn.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .btn.danger:hover { border-color: var(--red); }
+    .btn.mini { padding: 6px 10px; font-size: 11px; }
+    .btn[disabled] { opacity: .55; cursor: not-allowed; }
+    .btn:focus-visible, .chip-button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    .table-actions { display: flex; justify-content: center; margin-top: 12px; }
+    /* 表格：紧凑两行单元格 + 数字对齐 + 截断长路径。 */
+    table.tight { min-width: 0; }
+    table.tight th, table.tight td { padding: 10px 12px; }
+    table.tight td { font-size: 12px; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .cell-main { color: var(--muted-strong); font-size: 12px; }
+    .cell-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .truncate { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-unread td:first-child { box-shadow: inset 2px 0 0 var(--cyan); }
+    .row-unread .cell-main { color: var(--text); font-weight: 650; }
+    .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); background: var(--panel); font-size: 11px; white-space: nowrap; }
+    .chip.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
+    .chip.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .chip.ok { border-color: #1f6f52; color: #6ee7b7; background: var(--green-soft); }
+    .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .chip-button { padding: 0; border: 0; color: var(--cyan); background: none; cursor: pointer; font: inherit; font-size: 11px; text-align: left; }
+    .chip-button:hover { text-decoration: underline; }
+    /* 目录与归档卡片。 */
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .mini-card { padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .mini-card-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .mini-card-title { color: var(--text); font-size: 13px; font-weight: 700; }
+    .mini-card-path { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .mini-card-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 13px; }
+    .metric-label { color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+    .metric-value { margin-top: 2px; font-size: 14px; font-weight: 700; }
+    .ratio { display: flex; height: 6px; margin-top: 11px; border-radius: 99px; background: #202e3d; overflow: hidden; }
+    .ratio span { display: block; height: 100%; }
+    .ratio .ratio-sessions { background: var(--violet); }
+    .ratio .ratio-other { background: #2f4a63; }
+    .criteria-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 12px; }
+    .action-result { margin: 0 0 12px; }
     @media (max-width: 1100px) {
       main { padding-right: 28px; padding-left: 28px; }
       .sidebar { width: 208px; }
@@ -491,6 +622,11 @@ _DASHBOARD_HTML = r"""<!doctype html>
       .account-heading { flex-direction: column; }
       .account-side { justify-items: start; text-align: left; }
       .usage-summary { grid-template-columns: 1fr; }
+      .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { align-items: stretch; }
+      .field, .field select, .field input, .field.wide select, .field.wide input { width: 100%; min-width: 0; }
+      .toolbar-actions { margin-left: 0; }
+      .mini-card-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .usage-filter, .usage-filter select { width: 100%; min-width: 0; }
     }
     @media (max-width: 430px) {
@@ -507,25 +643,31 @@ _DASHBOARD_HTML = r"""<!doctype html>
       <div class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5h10v15H7z"/><path d="M10 8h4M10 12h4M10 16h2"/></svg>
       </div>
-      <div><div class="brand-name">Codex <span>Monitor</span></div><small>本地运维控制台</small></div>
+      <div><div class="brand-name">Token <span>Monitor</span></div><small>本地 code agent 控制台</small></div>
     </div>
     <div class="sidebar-label">工作台</div>
     <nav>
-      <a class="sidebar-link" data-nav-target="traffic" href="#traffic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16"/><path d="M13 5l7 7-7 7"/></svg><span>异常流量监控</span></a>
       <a class="sidebar-link active" data-nav-target="overview" href="#overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg><span>总览</span></a>
+      <a class="sidebar-link" data-nav-target="traffic" href="#traffic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16"/><path d="M13 5l7 7-7 7"/></svg><span>异常流量监控</span></a>
       <a class="sidebar-link" data-nav-target="accounts" href="#accounts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.8-3.4 3.1-5 7-5s6.2 1.6 7 5"/></svg><span>账号与额度</span></a>
       <a class="sidebar-link" data-nav-target="usage" href="#usage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19V9M12 19V5M19 19v-7"/><path d="M3 19h18"/></svg><span>用量与费用</span></a>
       <a class="sidebar-link" data-nav-target="insights" href="#insights"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6M10 21.5h4"/><path d="M12 3a6 6 0 0 0-3.3 11.1c.8.5 1.3 1.3 1.3 2.2v.7h4v-.7c0-.9.5-1.7 1.3-2.2A6 6 0 0 0 12 3z"/></svg><span>习惯分析</span></a>
     </nav>
+    <div class="sidebar-label">按需查看</div>
+    <nav>
+      <a class="sidebar-link" data-nav-target="alert-history" href="#alert-history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/></svg><span>告警历史</span></a>
+      <a class="sidebar-link" data-nav-target="usage-search" href="#usage-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 20 20"/></svg><span>用量检索</span></a>
+      <a class="sidebar-link" data-nav-target="housekeeping" href="#housekeeping"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span>磁盘与会话管理</span></a>
+    </nav>
     <div class="sidebar-bottom">
       <div class="service-state"><span id="service-dot" class="status-dot"></span><span id="service-state">监控服务在线</span></div>
-      <div class="sidebar-foot">状态每 5 秒同步 · 只读模式</div>
+      <div class="sidebar-foot">状态每 5 秒同步 · 只记录元数据</div>
     </div>
   </aside>
 
   <main>
     <header class="topbar">
-      <div class="breadcrumb"><span>Codex Monitor</span><span class="breadcrumb-separator">/</span><strong>Dashboard</strong></div>
+      <div class="breadcrumb"><span>Token Monitor</span><span class="breadcrumb-separator">/</span><strong>Dashboard</strong></div>
       <div class="topbar-actions">
         <div class="live-indicator"><span class="status-dot"></span><span id="service-sync">等待首次同步</span></div>
         <button id="refresh-button" class="refresh-button" type="button" aria-label="立即刷新状态"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
@@ -534,9 +676,9 @@ _DASHBOARD_HTML = r"""<!doctype html>
 
     <section id="overview" class="page-hero">
       <div>
-        <div class="eyebrow">实时监控 · Codex Plus</div>
+        <div class="eyebrow">实时监控 · Codex / Grok / Kimi / DSH / Command Code</div>
         <h1>运行概览</h1>
-        <p class="hero-description">实时查看账号额度、活动会话、本地用量，以及异常流量监控。</p>
+        <p class="hero-description">实时查看账号额度、活动会话、本地用量与 token 历史，掌握异常流量告警，并管理磁盘占用和历史会话的归档与清理。</p>
       </div>
       <div class="hero-context"><span class="scope-badge"><span class="scope-dot"></span><span id="quota-source">正在识别账号</span></span></div>
     </section>
@@ -545,7 +687,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
     <div id="alert-list"></div>
 
     <section class="kpi-grid" aria-label="监控摘要">
-      <article class="kpi-card accent-cyan"><div class="kpi-top"><span class="kpi-label">近 15 秒外发</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16M13 5l7 7-7 7"/></svg></span></div><div id="upload-burst-count" class="kpi-value">—</div><div class="kpi-foot"><strong id="upload-alert-count">—</strong> 条异常流量告警</div></article>
+      <article class="kpi-card accent-cyan"><div class="kpi-top"><span class="kpi-label">近 15 秒外发</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16M13 5l7 7-7 7"/></svg></span></div><div id="upload-burst-count" class="kpi-value">—</div><div class="kpi-foot"><strong id="upload-alert-count">—</strong> 条未读告警 · <a href="#alert-history">历史</a></div></article>
       <article class="kpi-card accent-violet"><div class="kpi-top"><span class="kpi-label">活动会话</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.8-3.4 3.1-5 7-5s6.2 1.6 7 5"/></svg></span></div><div id="active-count" class="kpi-value">—</div><div class="kpi-foot"><strong id="process-count">—</strong> 个有进程证据</div></article>
       <article class="kpi-card accent-yellow"><div class="kpi-top"><span class="kpi-label">额度窗口</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg></span></div><div id="quota-window-count" class="kpi-value">—</div><div class="kpi-foot">当前账号可见的额度窗口</div></article>
       <article class="kpi-card accent-cyan"><div class="kpi-top"><span class="kpi-label">监控账号</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg></span></div><div id="accounts-online" class="kpi-value">—</div><div class="kpi-foot">按真实账号 ID 归组</div></article>
@@ -575,8 +717,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <div id="usage-content"><div class="empty-state">为避免周期读取大量历史 JSONL，用量统计改为按需加载。</div></div>
     </section>
-    <section id="insights" class="panel section-block">
-      <div class="panel-heading">
+    <section id="insights" class="panel section-block">      <div class="panel-heading">
         <div><div class="section-kicker">Insights</div><h2>习惯分析与省 token 建议</h2><p class="section-description">基于已索引对话的 token 元数据提炼使用习惯，可按时间段切换；不读取对话内容。</p></div>
         <div class="section-meta"><span class="section-count">按需分析 · 基于用量索引</span><button id="insights-load-button" class="refresh-button" type="button">生成分析</button></div>
       </div>
@@ -586,6 +727,123 @@ _DASHBOARD_HTML = r"""<!doctype html>
         <button class="usage-tab" type="button" data-insights-days="30">近 30 天</button>
       </div>
       <div id="insights-content"><div class="empty-state">点击「生成分析」，对已索引的对话做使用习惯画像并给出省 token 建议。</div></div>
+    </section>
+    <section id="alert-history" class="panel section-block is-collapsed">
+      <div class="panel-heading">
+        <button class="section-toggle" type="button" data-section-toggle="alert-history" aria-expanded="false" aria-controls="alert-history-body">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          <span class="section-toggle-text">
+            <span class="section-kicker">Alert history</span>
+            <span class="section-toggle-title">告警历史</span>
+            <span class="section-description">异常流量告警已落盘到状态目录，daemon 重启后仍可查询；按时间、级别、规则和已读状态筛选，可逐条或一键标记已读。只保存进程、目录、对端和字节数等元数据。</span>
+            <span class="section-summary" id="alert-history-summary">展开查看详情</span>
+          </span>
+        </button>
+        <div class="section-meta"><span class="section-count" id="alert-history-count">等待加载</span><button id="alert-history-load-button" class="btn primary" type="button">加载告警</button></div>
+      </div>
+      <div class="section-body" id="alert-history-body">
+      <div class="stat-row" id="alert-history-stats"></div>
+      <div class="toolbar">
+        <label class="field">时间范围<select id="alert-range-filter">
+          <option value="1">近 24 小时</option>
+          <option value="7" selected>近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="">全部</option>
+        </select></label>
+        <label class="field">级别<select id="alert-level-filter">
+          <option value="">全部级别</option>
+          <option value="danger">红色 · 异常大上传</option>
+          <option value="warn">黄色 · 偏高</option>
+        </select></label>
+        <label class="field">规则<select id="alert-kind-filter">
+          <option value="">全部规则</option>
+          <option value="burst">突发窗口</option>
+          <option value="window">累计窗口</option>
+        </select></label>
+        <label class="field">状态<select id="alert-ack-filter">
+          <option value="unread" selected>未读</option>
+          <option value="read">已读</option>
+          <option value="">全部</option>
+        </select></label>
+        <label class="field wide">关键词<input id="alert-keyword-filter" type="search" placeholder="Agent / 目录 / 对端"></label>
+        <div class="toolbar-actions">
+          <button id="alert-ack-all-button" class="btn" type="button">全部标为已读</button>
+          <button id="alert-clear-button" class="btn danger" type="button">清理…</button>
+        </div>
+      </div>
+      <div id="alert-history-content"><div class="empty-state"><span class="empty-title">还没有加载告警</span><span class="empty-hint">点击「加载告警」，读取已落盘的历史告警。</span></div></div>
+      </div>
+    </section>
+    <section id="usage-search" class="panel section-block is-collapsed">
+      <div class="panel-heading">
+        <button class="section-toggle" type="button" data-section-toggle="usage-search" aria-expanded="false" aria-controls="usage-search-body">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          <span class="section-toggle-text">
+            <span class="section-kicker">Usage search</span>
+            <span class="section-toggle-title">用量检索</span>
+            <span class="section-description">按日期、模型和会话检索已索引的 token 历史记录，可切换会话明细、按日期和按模型三种视图；支持按 token 总量或估算金额排序。只读取 token 元数据，不读取对话内容。</span>
+            <span class="section-summary" id="usage-search-summary">展开查看详情</span>
+          </span>
+        </button>
+        <div class="section-meta"><span class="section-count" id="usage-search-count">等待检索</span><button id="usage-search-load-button" class="btn primary" type="button">检索</button></div>
+      </div>
+      <div class="section-body" id="usage-search-body">
+      <div class="stat-row" id="usage-search-stats"></div>
+      <div class="toolbar">
+        <label class="field">时间范围<select id="usage-search-range">
+          <option value="7">近 7 天</option>
+          <option value="30" selected>近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="0">全部历史</option>
+        </select></label>
+        <label class="field">起始日期<input id="usage-search-from" type="date"></label>
+        <label class="field">结束日期<input id="usage-search-to" type="date"></label>
+        <label class="field">模型<select id="usage-search-model"><option value="">全部模型</option></select></label>
+        <label class="field wide">关键词<input id="usage-search-keyword" type="search" placeholder="会话 ID / 项目路径 / 模型"></label>
+        <label class="field">排序<select id="usage-search-sort">
+          <option value="recent" selected>最近活动</option>
+          <option value="tokens">token 用量</option>
+          <option value="cost">估算金额</option>
+        </select></label>
+        <div class="toolbar-actions">
+          <button id="usage-search-refresh-button" class="btn" type="button">刷新</button>
+        </div>
+      </div>
+      <div class="usage-tabs" id="usage-search-group-tabs">
+        <button class="usage-tab selected" type="button" data-usage-search-group="session">会话明细</button>
+        <button class="usage-tab" type="button" data-usage-search-group="date">按日期汇总</button>
+        <button class="usage-tab" type="button" data-usage-search-group="model">按模型汇总</button>
+      </div>
+      <div id="usage-search-content"><div class="empty-state"><span class="empty-title">还没有检索</span><span class="empty-hint">点击「检索」，按日期、模型或会话查找历史 token 用量。</span></div></div>
+      </div>
+    </section>
+    <section id="housekeeping" class="panel section-block is-collapsed">
+      <div class="panel-heading">
+        <button class="section-toggle" type="button" data-section-toggle="housekeeping" aria-expanded="false" aria-controls="housekeeping-body">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          <span class="section-toggle-text">
+            <span class="section-kicker">Housekeeping</span>
+            <span class="section-toggle-title">磁盘与会话管理</span>
+            <span class="section-description">统计 Codex / Kimi / DeepSeek Harness / Grok / Command Code 等 agent 数据目录的占用，超过阈值时提醒；可按最后修改时间把不再需要的 Codex 会话压缩归档（tar.gz + manifest，可恢复）或直接清理，两者都会跳过仍在运行的会话。</span>
+            <span class="section-summary" id="housekeeping-summary">展开查看详情</span>
+          </span>
+        </button>
+        <div class="section-meta"><span class="section-count" id="housekeeping-count">等待扫描</span><button id="housekeeping-scan-button" class="btn primary" type="button">重新扫描</button></div>
+      </div>
+      <div class="section-body" id="housekeeping-body">
+      <div class="stat-row" id="housekeeping-stats"></div>
+      <div id="housekeeping-content"><div class="empty-state"><span class="empty-title">正在统计目录占用…</span></div></div>
+      <div class="criteria-row">
+        <label class="field">保留天数<input id="housekeeping-days" type="number" min="1" max="3650" value="30"></label>
+        <label class="field">最小体积 MiB<input id="housekeeping-min-size" type="number" min="0" value="0"></label>
+        <div class="toolbar-actions">
+          <button id="housekeeping-preview-button" class="btn" type="button">预览可归档会话</button>
+          <button id="housekeeping-archive-button" class="btn warn" type="button">压缩归档</button>
+          <button id="housekeeping-clean-button" class="btn danger" type="button">直接清理</button>
+        </div>
+      </div>
+      <div id="housekeeping-actions"></div>
+      </div>
     </section>
   </main>
 </div>
@@ -602,6 +860,12 @@ _DASHBOARD_HTML = r"""<!doctype html>
     if (seconds === null || seconds === undefined) return '未知';
     return new Date(Number(seconds) * 1000).toLocaleString();
   };
+  const formatDay = (seconds) => {
+    if (seconds === null || seconds === undefined) return '未知';
+    const moment = new Date(Number(seconds) * 1000);
+    const pad = (value) => String(value).padStart(2, '0');
+    return `${moment.getFullYear()}-${pad(moment.getMonth() + 1)}-${pad(moment.getDate())}`;
+  };
   const formatReset = (seconds) => {
     if (seconds === null || seconds === undefined) return '未知';
     const remaining = Math.round(Number(seconds) - Date.now() / 1000);
@@ -610,6 +874,13 @@ _DASHBOARD_HTML = r"""<!doctype html>
   };
   const formatPercent = (value) => value === null || value === undefined ? '未知' : `${Number(value).toFixed(1)}%`;
   const formatNumber = (value) => Number(value || 0).toLocaleString('zh-CN');
+  const formatTokens = (value) => {
+    const amount = Number(value || 0);
+    if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}B`;
+    if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}M`;
+    if (amount >= 1e3) return `${(amount / 1e3).toFixed(1)}K`;
+    return String(amount);
+  };
   const formatBytes = (value) => `${(Number(value || 0) / 1024 / 1024).toFixed(1)} MiB`;
   const formatDataSize = (value) => {
     const amount = Math.max(0, Number(value || 0));
@@ -649,10 +920,19 @@ _DASHBOARD_HTML = r"""<!doctype html>
       const cssStatus = statusClass(session.status);
       const pids = session.pids && session.pids.length ? session.pids.join(', ') : '无';
       const detail = session.last_error || '—';
+      const usage = session.usage || {};
+      const turns = usage.turns === undefined || usage.turns === null ? null : Number(usage.turns);
+      const advice = usage.reminder
+        ? `<div><span class="pill warn">建议开新会话</span></div>`
+        : '';
+      const usageCell = turns === null
+        ? '<span class="muted">—</span>'
+        : `${escapeHtml(String(turns))} 轮<div class="muted">上下文 ${escapeHtml(formatDataSize(usage.context_tokens || 0))} · 累计 ${escapeHtml(formatDataSize(usage.total_tokens || 0))}</div>${advice}`;
       return `<tr>
         <td><div class="session-id">${escapeHtml(session.session_id || session.thread_id)}</div><div class="muted">${escapeHtml(session.source)}</div></td>
         <td><span class="pill ${cssStatus}">${status}</span></td>
         <td>${escapeHtml(pids)}<div class="muted">${session.process_backed ? '已绑定 JSONL' : '无进程证据'}</div></td>
+        <td class="usage-number">${usageCell}</td>
         <td class="cwd">${escapeHtml(session.cwd || '未知')}</td>
         <td class="event">${escapeHtml(session.last_event_type || '未知')}<div class="muted">${escapeHtml(formatTime(session.last_event_at))}</div></td>
         <td class="error-text">${escapeHtml(detail)}</td>
@@ -660,7 +940,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
     };
     const expanded = expandedSessionTables.has(accountKey);
     return `<div class="session-collapsible"${expanded ? '' : ' style="display:none"'}><div class="table-wrap session-table"><table>
-      <thead><tr><th>会话</th><th>状态</th><th>进程</th><th>工作目录</th><th>最近事件</th><th>说明</th></tr></thead>
+      <thead><tr><th>会话</th><th>状态</th><th>进程</th><th>轮数 / 上下文</th><th>工作目录</th><th>最近事件</th><th>说明</th></tr></thead>
       <tbody>${sessions.map(renderRow).join('')}</tbody>
     </table></div></div>
     <button class="session-toggle" type="button" data-session-toggle="${escapeHtml(accountKey)}" aria-expanded="${expanded}">${expanded ? '收起会话列表' : `展开 ${sessions.length} 个活动会话`}</button>`;
@@ -674,9 +954,63 @@ _DASHBOARD_HTML = r"""<!doctype html>
   let latestInsightsState = null;
   let insightsPollTimer = 0;
   let insightsPeriodDays = '';
+  // 低频分区默认折叠：状态记在 localStorage，展开时才加载明细。
+  const COLLAPSED_SECTIONS_KEY = 'token-monitor-collapsed-sections';
+  const DEFAULT_COLLAPSED = ['alert-history', 'usage-search', 'housekeeping'];
+  const readCollapsedSections = () => {
+    try {
+      const stored = window.localStorage.getItem(COLLAPSED_SECTIONS_KEY);
+      if (stored === null) return new Set(DEFAULT_COLLAPSED);
+      const parsed = JSON.parse(stored);
+      return new Set(Array.isArray(parsed) ? parsed : DEFAULT_COLLAPSED);
+    } catch (error) {
+      return new Set(DEFAULT_COLLAPSED);
+    }
+  };
+  const collapsedSections = readCollapsedSections();
+  const loadedSections = new Set();
+  const sectionLoaders = {
+    'alert-history': () => refreshAlertHistory(),
+    'usage-search': () => refreshUsageSearch(),
+    'housekeeping': () => refreshHousekeeping()
+  };
+  const persistCollapsedSections = () => {
+    try {
+      window.localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsedSections]));
+    } catch (error) {
+      /* 隐私模式下忽略存储失败 */
+    }
+  };
+  const applySectionState = (id) => {
+    const section = document.getElementById(id);
+    const toggle = document.querySelector(`[data-section-toggle="${id}"]`);
+    if (!section) return;
+    const collapsed = collapsedSections.has(id);
+    section.classList.toggle('is-collapsed', collapsed);
+    if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  };
+  const setSectionCollapsed = (id, collapsed) => {
+    if (collapsed) {
+      collapsedSections.add(id);
+    } else {
+      collapsedSections.delete(id);
+    }
+    applySectionState(id);
+    persistCollapsedSections();
+    if (!collapsed && sectionLoaders[id] && !loadedSections.has(id)) {
+      loadedSections.add(id);
+      sectionLoaders[id]();
+    }
+  };
+  const ensureSectionLoaded = (id) => {
+    if (!collapsedSections.has(id) && sectionLoaders[id] && !loadedSections.has(id)) {
+      loadedSections.add(id);
+      sectionLoaders[id]();
+    }
+  };
   const navLinks = [...document.querySelectorAll('[data-nav-target]')];
   const updateActiveNav = () => {
-    const current = ['insights', 'usage', 'accounts', 'overview'].find((id) => {
+    const current = ['housekeeping', 'usage-search', 'alert-history', 'insights', 'usage', 'accounts', 'traffic', 'overview'].find((id) => {
       const target = document.getElementById(id);
       return target && target.getBoundingClientRect().top <= 120;
     }) || 'overview';
@@ -753,6 +1087,35 @@ _DASHBOARD_HTML = r"""<!doctype html>
     return value > 0 ? value : null;
   };
   // 配额耗尽 / 超 90% 与预算超 80% 的告警横幅，随 5 秒状态轮询刷新。
+  // 折叠状态下也能看到关键结论，不必展开分区。
+  const renderSectionSummaries = (state) => {
+    const alertHistory = (state && state.alert_history) || {};
+    const alertSummary = document.getElementById('alert-history-summary');
+    if (alertSummary) {
+      alertSummary.textContent = alertHistory.available
+        ? `未读 ${formatNumber(alertHistory.unread)} 条 · 共 ${formatNumber(alertHistory.total)} 条 · 最近 ${formatTime(alertHistory.last_alert_at)}`
+        : '告警历史暂不可用（监控进程未启用落盘）';
+    }
+    const usageIndex = (state && state.usage_index) || {};
+    const usageSummary = document.getElementById('usage-search-summary');
+    if (usageSummary) {
+      usageSummary.textContent = usageIndex.available
+        ? `索引 ${formatNumber(usageIndex.records)} 条记录 / ${formatNumber(usageIndex.sessions)} 个会话 · ${formatNumber(usageIndex.models)} 个模型 · ${formatDay(usageIndex.first_at)} ~ ${formatDay(usageIndex.last_at)}`
+        : '用量索引还是空的，先让 daemon 完成一次索引';
+    }
+    const housekeeping = (state && state.housekeeping) || {};
+    const housekeepingSummary = document.getElementById('housekeeping-summary');
+    if (housekeepingSummary) {
+      const totals = housekeeping.totals || {};
+      const preview = housekeeping.preview || {};
+      housekeepingSummary.textContent = housekeeping.available
+        ? `合计 ${formatDataSize(totals.bytes || 0)} · 会话文件 ${formatDataSize(totals.session_bytes || 0)}（${formatNumber(totals.session_files || 0)} 个）· ${formatNumber(preview.count || 0)} 个可归档 · ${formatNumber((housekeeping.reminders || []).length)} 条磁盘提醒`
+        : '磁盘统计不可用（监控进程未启动扫描）';
+    }
+  };
+  // 顶部关注区：把额度、流量、预算、磁盘和长会话提醒收敛成可跳转的紧凑行。
+  const ALERT_VISIBLE_ROWS = 3;
+  let expandedAlerts = false;
   const renderAlerts = () => {
     const container = document.getElementById('alert-list');
     if (!container) return;
@@ -764,16 +1127,34 @@ _DASHBOARD_HTML = r"""<!doctype html>
         const label = `${account} · ${window.limit_id}/${window.name}`;
         const percent = Number(window.used_percent);
         if (window.is_exhausted) {
-          alerts.push({ level: 'danger', text: `${label} 已耗尽，重置时间 ${formatReset(window.resets_at)}` });
+          alerts.push({
+            level: 'danger',
+            title: `${label} 额度已耗尽`,
+            detail: `重置时间 ${formatReset(window.resets_at)}`,
+            href: '#accounts',
+            link: '查看额度'
+          });
         } else if (window.used_percent !== null && window.used_percent !== undefined && !Number.isNaN(percent) && percent >= 90) {
-          alerts.push({ level: 'warn', text: `${label} 已使用 ${percent.toFixed(1)}%，接近上限` });
+          alerts.push({
+            level: 'warn',
+            title: `${label} 已使用 ${percent.toFixed(1)}%`,
+            detail: '接近额度上限，注意剩余用量',
+            href: '#accounts',
+            link: '查看额度'
+          });
         }
       });
     });
-    const traffic = latestState.traffic || {};
+    const traffic = (latestState && latestState.traffic) || {};
     (traffic.alerts || []).forEach((alert) => {
       if (!alert || !alert.message) return;
-      alerts.push({ level: alert.level === 'danger' ? 'danger' : 'warn', text: alert.message });
+      alerts.push({
+        level: alert.level === 'danger' ? 'danger' : 'warn',
+        title: alert.message,
+        detail: `${alert.kind === 'burst' ? '突发窗口' : '累计窗口'} · 对端 ${alert.remote || '未知'}`,
+        href: '#alert-history',
+        link: '查看告警历史'
+      });
     });
     const budget = budgetUsd();
     if (budget !== null && latestUsageState && latestUsageState.usage) {
@@ -781,13 +1162,54 @@ _DASHBOARD_HTML = r"""<!doctype html>
       if (spent !== null) {
         const ratio = (spent / budget) * 100;
         if (ratio >= 100) {
-          alerts.push({ level: 'danger', text: `本月 API 等价金额 ${formatUsdCompact(spent)} 已超过月预算 ${formatUsdCompact(budget)}（${ratio.toFixed(0)}%）` });
+          alerts.push({ level: 'danger', title: `本月 API 等价金额 ${formatUsdCompact(spent)} 已超预算`, detail: `月预算 ${formatUsdCompact(budget)}（${ratio.toFixed(0)}%）`, href: '#usage', link: '查看用量' });
         } else if (ratio >= 80) {
-          alerts.push({ level: 'warn', text: `本月 API 等价金额 ${formatUsdCompact(spent)} 已达月预算 ${formatUsdCompact(budget)} 的 ${ratio.toFixed(0)}%` });
+          alerts.push({ level: 'warn', title: `本月 API 等价金额 ${formatUsdCompact(spent)} 已达预算 ${ratio.toFixed(0)}%`, detail: `月预算 ${formatUsdCompact(budget)}`, href: '#usage', link: '查看用量' });
         }
       }
     }
-    container.innerHTML = alerts.map((alert) => `<div class="alert-banner ${alert.level}" role="status">${escapeHtml(alert.text)}</div>`).join('');
+    const housekeeping = (latestState && latestState.housekeeping) || {};
+    (housekeeping.reminders || []).forEach((reminder) => {
+      alerts.push({
+        level: reminder.level === 'danger' ? 'danger' : 'warn',
+        title: reminder.title || reminder.message,
+        detail: reminder.detail || '',
+        href: '#housekeeping',
+        link: '查看磁盘与会话管理'
+      });
+    });
+    const sessionAdvice = (latestState && latestState.session_advice) || {};
+    (sessionAdvice.sessions || []).forEach((reminder) => {
+      alerts.push({
+        level: 'warn',
+        title: reminder.title || reminder.message,
+        detail: reminder.detail || '',
+        href: '#accounts',
+        link: '查看会话'
+      });
+    });
+    if (alerts.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    const visible = expandedAlerts ? alerts : alerts.slice(0, ALERT_VISIBLE_ROWS);
+    const rows = visible.map((alert) => `<div class="alert-row ${alert.level}" role="status">
+        <span class="alert-accent" aria-hidden="true"></span>
+        <div class="alert-body">
+          <div class="alert-title">${escapeHtml(alert.title)}</div>
+          ${alert.detail ? `<div class="alert-detail">${escapeHtml(alert.detail)}</div>` : ''}
+        </div>
+        ${alert.href ? `<a class="alert-link" href="${escapeHtml(alert.href)}">${escapeHtml(alert.link || '查看')}</a>` : ''}
+      </div>`).join('');
+    const rest = alerts.length - visible.length;
+    const toggle = alerts.length > ALERT_VISIBLE_ROWS
+      ? `<button id="alert-toggle-button" class="btn mini" type="button">${rest > 0 ? `展开其余 ${rest} 条` : '收起'}</button>`
+      : '';
+    container.innerHTML = `<div class="alert-head"><span>需要关注</span><span class="section-count">${alerts.length} 条</span><span class="alert-head-spacer"></span>${toggle}</div>${rows}`;
+    document.getElementById('alert-toggle-button')?.addEventListener('click', () => {
+      expandedAlerts = !expandedAlerts;
+      renderAlerts();
+    });
   };
   const renderTrend = (daily) => {
     if (!Array.isArray(daily) || !daily.length) return '';
@@ -843,6 +1265,25 @@ _DASHBOARD_HTML = r"""<!doctype html>
         ? ` · 本地 API 等价估算 ${formatUsdCompact(accountUsage.estimated_cost_usd)}`
         : '';
       return `<div class="usage-note">Kimi 对账 · ${escapeHtml(quota.account || 'kimi')}：本月 booster 真实扣费 ${escapeHtml(formatMoney(meta.booster_monthly_used_cents))}${escapeHtml(limitText)}，余额 ${escapeHtml(formatMoney(meta.booster_balance_cents))}${escapeHtml(estimate)}</div>`;
+    }).filter((line) => line);
+    return lines.join('');
+  };
+  // Command Code 订阅返回真实名额扣费（美元），与本地 API 等价估算并排展示。
+  const renderCommandCodeReconciliation = (periods) => {
+    if (!latestState || !Array.isArray(latestState.quotas)) return '';
+    const month = (periods || []).find((period) => period.key === 'month');
+    const monthAccounts = month && Array.isArray(month.accounts) ? month.accounts : [];
+    const lines = latestState.quotas.filter((quota) => quota.product === 'command-code').map((quota) => {
+      const meta = quota.metadata || {};
+      if (meta.period_credits_spent === undefined) return '';
+      const parts = [`本月订阅扣费 $${meta.period_credits_spent}`, `剩余名额 $${meta.monthly_credits_remaining || '0.00'}`];
+      if (meta.period_requests !== undefined) parts.push(`${meta.period_requests} 次请求`);
+      if (meta.days_left !== undefined) parts.push(`${meta.days_left} 天后重置`);
+      const accountUsage = monthAccounts.find((account) => account.account === quota.account);
+      const estimate = accountUsage && accountUsage.estimated_cost_usd !== null && accountUsage.estimated_cost_usd !== undefined
+        ? ` · 本地 API 等价估算 ${formatUsdCompact(accountUsage.estimated_cost_usd)}`
+        : '';
+      return `<div class="usage-note">Command Code 对账 · ${escapeHtml(quota.account || 'command-code')}：${escapeHtml(parts.join('，'))}${escapeHtml(estimate)}</div>`;
     }).filter((line) => line);
     return lines.join('');
   };
@@ -929,7 +1370,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
         </tr>`;
       }).join('');
     container.innerHTML = `${renderTrend(usage.daily)}<div class="usage-tabs">${tabs}</div>
-      ${filterControls}${summary}${renderTopProjects(accounts)}<div class="usage-note">${indexingNote}${escapeHtml(note)} 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}
+      ${filterControls}${summary}${renderTopProjects(accounts)}<div class="usage-note">${indexingNote}${escapeHtml(note)} 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}${renderCommandCodeReconciliation(periods)}
       <div class="table-wrap usage-table"><table>
         <thead><tr><th>账号 / Profile</th><th>调用模型</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="10" class="empty-state">这个时间范围没有匹配的模型或项目</td></tr>'}</tbody>
@@ -1154,6 +1595,473 @@ _DASHBOARD_HTML = r"""<!doctype html>
         <tbody>${rows}</tbody>
       </table></div>`;
   };
+  // 告警历史：读取落盘告警，支持筛选、已读和清理。
+  let alertHistoryState = null;
+  let alertHistoryLimit = 50;
+  const alertFilterValue = (id) => {
+    const element = document.getElementById(id);
+    return element ? String(element.value || '') : '';
+  };
+  const alertQueryString = () => {
+    const params = new URLSearchParams();
+    const days = alertFilterValue('alert-range-filter');
+    if (days) params.set('days', days);
+    const level = alertFilterValue('alert-level-filter');
+    if (level) params.set('level', level);
+    const kind = alertFilterValue('alert-kind-filter');
+    if (kind) params.set('kind', kind);
+    const ack = alertFilterValue('alert-ack-filter');
+    if (ack) params.set('ack', ack);
+    const keyword = alertFilterValue('alert-keyword-filter').trim();
+    if (keyword) params.set('q', keyword);
+    params.set('limit', String(alertHistoryLimit));
+    return params.toString();
+  };
+  // 告警历史：先给结论（未读/红色/最近），再给可筛选的明细表。
+  const renderAlertStats = (stats, payload) => {
+    const container = document.getElementById('alert-history-stats');
+    if (!container) return;
+    const scope = Number((payload.filters && payload.filters.days) || 0);
+    const unread = Number(stats.unread || 0);
+    container.innerHTML = [
+      `<div class="stat"><div class="stat-label">未读告警</div><div class="stat-value ${unread > 0 ? 'warn' : 'ok'}">${escapeHtml(formatNumber(unread))}</div><div class="stat-foot">共 ${escapeHtml(formatNumber(stats.total || 0))} 条匹配记录</div></div>`,
+      `<div class="stat"><div class="stat-label">红色告警</div><div class="stat-value ${Number(stats.danger || 0) > 0 ? 'danger' : ''}">${escapeHtml(formatNumber(stats.danger || 0))}</div><div class="stat-foot">黄色 ${escapeHtml(formatNumber(stats.warn || 0))} 条</div></div>`,
+      `<div class="stat"><div class="stat-label">最近一次</div><div class="stat-value" style="font-size:15px">${escapeHtml(formatTime(stats.last_alert_at))}</div><div class="stat-foot">${scope ? `统计范围：近 ${escapeHtml(String(scope))} 天` : '统计范围：全部历史'}</div></div>`,
+      `<div class="stat"><div class="stat-label">重复合并窗口</div><div class="stat-value">${escapeHtml(String(Number(payload.merge_window_seconds || 0)))} 秒</div><div class="stat-foot">同进程同规则告警合并为一条</div></div>`
+    ].join('');
+  };
+  const renderAlertHistory = (payload) => {
+    const container = document.getElementById('alert-history-content');
+    const countLabel = document.getElementById('alert-history-count');
+    if (!container) return;
+    alertHistoryState = payload;
+    if (payload.available === false) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">告警历史不可用</span><span class="empty-hint">当前监控进程未启用落盘，或数据库无法读取。</span></div>';
+      if (countLabel) countLabel.textContent = '不可用';
+      return;
+    }
+    const alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
+    const stats = payload.stats || {};
+    renderAlertStats(stats, payload);
+    if (countLabel) {
+      countLabel.textContent = `未读 ${Number(stats.unread || 0)} / 共 ${Number(stats.total || 0)} 条`;
+    }
+    if (alerts.length === 0) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">当前筛选条件下没有历史告警</span><span class="empty-hint">放宽时间范围、级别或已读状态再试。</span></div>';
+      return;
+    }
+    const rows = alerts.map((alert) => {
+      const level = alert.level === 'danger' ? 'danger' : 'warn';
+      const levelText = alert.level === 'danger' ? '异常大上传' : '偏高';
+      const rule = alert.kind === 'burst' ? '突发窗口' : '累计窗口';
+      const repeat = Number(alert.count || 1) > 1 ? `<span class="chip warn">合并 ${Number(alert.count)} 次</span> ` : '';
+      const ackAction = alert.acknowledged ? 'unack' : 'ack';
+      const ackLabel = alert.acknowledged ? '标为未读' : '标为已读';
+      return `<tr class="${alert.acknowledged ? '' : 'row-unread'}">
+        <td><div class="cell-main">${escapeHtml(formatTime(alert.last_seen_at))}</div><div class="cell-sub">首次 ${escapeHtml(formatTime(alert.first_seen_at))}</div></td>
+        <td><span class="pill ${level}">${levelText}</span><div class="cell-sub">#${escapeHtml(alert.id)}</div></td>
+        <td><div class="cell-main">${escapeHtml(alert.product_label || alert.product)}</div><div class="cell-sub">pid ${escapeHtml(alert.pid)}${alert.command ? ` · ${escapeHtml(alert.command)}` : ''}</div></td>
+        <td><span class="truncate" title="${escapeHtml(alert.cwd || '')}">${escapeHtml(alert.cwd || '未知目录')}</span></td>
+        <td><div class="cell-main">${escapeHtml(formatDataSize(alert.peak_bytes || alert.bytes || 0))}</div><div class="cell-sub">${repeat}${escapeHtml(rule)} · ${escapeHtml(String(Number(alert.window_seconds || 0)))} 秒</div></td>
+        <td><span class="mono">${escapeHtml(alert.remote || '—')}</span></td>
+        <td><span class="pill ${alert.acknowledged ? 'other' : 'warn'}">${alert.acknowledged ? '已读' : '未读'}</span></td>
+        <td><button class="btn mini" type="button" data-alert-action="${ackAction}" data-alert-id="${escapeHtml(alert.id)}">${ackLabel}</button></td>
+      </tr>`;
+    }).join('');
+    const more = payload.has_more
+      ? `<div class="table-actions"><button id="alert-load-more-button" class="btn" type="button">加载更多（已显示 ${alerts.length} / ${Number(stats.total || alerts.length)} 条）</button></div>`
+      : '';
+    container.innerHTML = `<div class="table-wrap"><table class="tight alert-history-table">
+        <thead><tr><th>时间</th><th>级别</th><th>Agent / 进程</th><th>工作目录</th><th>外发峰值 / 规则</th><th>主要对端</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>${more}`;
+    container.querySelectorAll('[data-alert-action]').forEach((button) => {
+      button.addEventListener('click', () => mutateAlerts(button.dataset.alertAction, { ids: [Number(button.dataset.alertId)] }));
+    });
+    document.getElementById('alert-load-more-button')?.addEventListener('click', () => {
+      alertHistoryLimit += 50;
+      refreshAlertHistory();
+    });
+  };
+  const refreshAlertHistory = async () => {
+    const container = document.getElementById('alert-history-content');
+    const button = document.getElementById('alert-history-load-button');
+    if (button) {
+      button.disabled = true;
+      button.classList.add('is-spinning');
+    }
+    try {
+      const response = await fetch(`/api/alerts?${alertQueryString()}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      renderAlertHistory(await response.json());
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state">读取告警历史失败：${escapeHtml(error.message)}</div>`;
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.classList.remove('is-spinning');
+      }
+    }
+  };
+  const mutateAlerts = async (action, body) => {
+    try {
+      const response = await fetch('/api/alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...body })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await response.json();
+      await refreshAlertHistory();
+      refresh();
+    } catch (error) {
+      const container = document.getElementById('alert-history-content');
+      if (container) container.innerHTML = `<div class="empty-state">更新告警失败：${escapeHtml(error.message)}</div>`;
+    }
+  };
+  const clearAlertHistory = async () => {
+    const days = Number(alertFilterValue('alert-range-filter') || 0);
+    const total = Number((alertHistoryState && alertHistoryState.stats && alertHistoryState.stats.total) || 0);
+    if (total === 0) {
+      window.alert('当前筛选条件下没有可清理的告警。');
+      return;
+    }
+    const scope = days ? `早于近 ${days} 天的历史告警` : '全部历史告警';
+    if (!window.confirm(`将删除${scope}（当前筛选条件内约 ${total} 条，含已读与未读）。此操作不可撤销，是否继续？`)) return;
+    await mutateAlerts('clear', days ? { before: Date.now() / 1000 - days * 86400 } : { all: true });
+  };
+  // 用量检索：按日期、模型和会话查询已索引的 token 历史。
+  let usageSearchState = null;
+  let usageSearchGroup = 'session';
+  let usageSearchLimit = 50;
+  const usageSearchValue = (id) => {
+    const element = document.getElementById(id);
+    return element ? String(element.value || '') : '';
+  };
+  const usageSearchQueryString = () => {
+    const params = new URLSearchParams();
+    const from = usageSearchValue('usage-search-from');
+    const to = usageSearchValue('usage-search-to');
+    if (from || to) {
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+    } else {
+      params.set('days', usageSearchValue('usage-search-range') || '30');
+    }
+    const model = usageSearchValue('usage-search-model');
+    if (model) params.set('model', model);
+    const keyword = usageSearchValue('usage-search-keyword').trim();
+    if (keyword) params.set('q', keyword);
+    params.set('group', usageSearchGroup);
+    params.set('sort', usageSearchValue('usage-search-sort') || 'recent');
+    params.set('limit', String(usageSearchLimit));
+    return params.toString();
+  };
+  const fillUsageSearchModels = (models) => {
+    const select = document.getElementById('usage-search-model');
+    if (!select) return;
+    const current = select.value;
+    const options = ['<option value="">全部模型</option>'].concat(
+      (models || []).map((model) => `<option value="${escapeHtml(model)}"${model === current ? ' selected' : ''}>${escapeHtml(model)}</option>`)
+    );
+    select.innerHTML = options.join('');
+    select.value = current;
+  };
+  const usageSearchNumber = (value) => Number(value || 0).toLocaleString('zh-CN');
+  const renderUsageSearchStats = (search, facets) => {
+    const container = document.getElementById('usage-search-stats');
+    if (!container) return;
+    const totals = (search && search.totals) || {};
+    const usage = totals.usage || {};
+    const cost = totals.cost_usd;
+    const scope = facets.records
+      ? `索引 ${formatDay(facets.first_at)} ~ ${formatDay(facets.last_at)}`
+      : '索引为空';
+    container.innerHTML = [
+      `<div class="stat"><div class="stat-label">匹配行</div><div class="stat-value">${escapeHtml(formatNumber(search.matched_rows || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.records || 0))} 条原始记录</div></div>`,
+      `<div class="stat"><div class="stat-label">涉及会话</div><div class="stat-value">${escapeHtml(formatNumber(totals.sessions || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.models || 0))} 个模型</div></div>`,
+      `<div class="stat"><div class="stat-label">输入 token</div><div class="stat-value">${escapeHtml(formatTokens(usage.input_tokens || 0))}</div><div class="stat-foot">其中缓存 ${escapeHtml(formatTokens(usage.cached_input_tokens || 0))}</div></div>`,
+      `<div class="stat"><div class="stat-label">输出 token</div><div class="stat-value">${escapeHtml(formatTokens(usage.output_tokens || 0))}</div><div class="stat-foot">推理 ${escapeHtml(formatTokens(usage.reasoning_output_tokens || 0))}</div></div>`,
+      `<div class="stat"><div class="stat-label">合计 token</div><div class="stat-value">${escapeHtml(formatTokens(totals.total_tokens || 0))}</div><div class="stat-foot">${escapeHtml(scope)}</div></div>`,
+      `<div class="stat"><div class="stat-label">API 等价金额</div><div class="stat-value ${cost === null || cost === undefined ? '' : 'ok'}" style="font-size:17px">${cost === null || cost === undefined ? '部分无单价' : escapeHtml(formatUsdCompact(cost))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.records || 0))} 条记录合计</div></div>`
+    ].join('');
+  };
+  const renderUsageSearch = (payload) => {
+    const container = document.getElementById('usage-search-content');
+    const countLabel = document.getElementById('usage-search-count');
+    if (!container) return;
+    usageSearchState = payload;
+    const search = payload.search || {};
+    const facets = payload.facets || {};
+    fillUsageSearchModels(facets.models);
+    renderUsageSearchStats(search, facets);
+    if (search.available === false || facets.available === false) {
+      const scope = facets.records
+        ? `索引覆盖 ${escapeHtml(formatDay(facets.first_at))} ~ ${escapeHtml(formatDay(facets.last_at))}`
+        : '用量索引还是空的，先让 daemon 完成一次索引再检索。';
+      container.innerHTML = `<div class="empty-state"><span class="empty-title">没有可检索的用量索引</span><span class="empty-hint">${scope}</span></div>`;
+      if (countLabel) countLabel.textContent = '索引为空';
+      return;
+    }
+    const rows = Array.isArray(search.rows) ? search.rows : [];
+    const totals = search.totals || {};
+    if (countLabel) {
+      countLabel.textContent = `${formatNumber(search.matched_rows)} 行 · ${formatNumber(totals.total_tokens)} token`;
+    }
+    if (rows.length === 0) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">没有符合条件的用量记录</span><span class="empty-hint">若刚产生用量，索引可能仍在写入，可稍后重试。</span></div>';
+      return;
+    }
+    const group = search.group || usageSearchGroup;
+    const header = group === 'date'
+      ? '<tr><th>日期</th><th>会话 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
+      : group === 'model'
+        ? '<tr><th>模型</th><th>会话</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
+        : '<tr><th>时间</th><th>会话</th><th>模型</th><th>项目 / 工作目录</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>';
+    const body = rows.map((row) => {
+      const usage = row.usage || {};
+      const cost = row.estimated_cost_usd === null || row.estimated_cost_usd === undefined
+        ? '<span class="muted">未计价</span>'
+        : escapeHtml(formatUsdCompact(row.estimated_cost_usd));
+      const tokens = `${escapeHtml(formatNumber(usage.input_tokens))}<div class="cell-sub">缓存 ${escapeHtml(formatNumber(usage.cached_input_tokens))}</div>`;
+      const output = `${escapeHtml(formatNumber(usage.output_tokens))}<div class="cell-sub">推理 ${escapeHtml(formatNumber(usage.reasoning_output_tokens))}</div>`;
+      const total = `${escapeHtml(formatNumber(row.total_tokens))}`;
+      const models = (row.models || []).map((model) => `<span class="chip">${escapeHtml(model)}</span>`).join(' ');
+      if (group === 'date') {
+        return `<tr>
+          <td><div class="cell-main">${escapeHtml(row.date)}</div><div class="cell-sub">最近 ${escapeHtml(formatTime(row.last_at))}</div></td>
+          <td><div class="cell-main">${escapeHtml(formatNumber(row.records))} 条记录</div><div class="cell-sub">${escapeHtml(String((row.models || []).length))} 个模型</div></td>
+          <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
+        </tr>`;
+      }
+      if (group === 'model') {
+        return `<tr>
+          <td><div class="cell-main">${escapeHtml((row.models || ['未知模型'])[0])}</div><div class="cell-sub">最近 ${escapeHtml(formatTime(row.last_at))}</div></td>
+          <td>${escapeHtml(formatNumber(row.records))} 条<div class="cell-sub">${escapeHtml(String((row.models || []).length))} 个会话/模型组合</div></td>
+          <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
+        </tr>`;
+      }
+      const sessionLabel = row.session_id || (row.session_path || '').split('/').pop() || '未知会话';
+      return `<tr>
+        <td><div class="cell-main">${escapeHtml(formatTime(row.last_at))}</div><div class="cell-sub">${escapeHtml(row.date)}</div></td>
+        <td><button class="chip-button" type="button" data-usage-session="${escapeHtml(row.session_id || '')}" title="下钻到该会话">${escapeHtml(String(sessionLabel).slice(0, 12))}</button><div class="cell-sub">${escapeHtml(formatNumber(row.records))} 条</div></td>
+        <td>${escapeHtml(row.model || '—')}</td>
+        <td><span class="truncate" title="${escapeHtml(row.project || '')}">${escapeHtml(row.project || '未知目录')}</span>${models ? `<div class="cell-sub">${models}</div>` : ''}</td>
+        <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
+      </tr>`;
+    }).join('');
+    const more = search.has_more
+      ? `<div class="table-actions"><button id="usage-search-more-button" class="btn" type="button">加载更多（已显示 ${rows.length} / ${formatNumber(search.matched_rows)} 行）</button></div>`
+      : '';
+    container.innerHTML = `<div class="table-wrap"><table class="tight usage-table">
+        <thead>${header}</thead>
+        <tbody>${body}</tbody>
+      </table></div>${more}`;
+    container.querySelectorAll('[data-usage-session]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const value = button.dataset.usageSession || '';
+        if (!value) return;
+        const input = document.getElementById('usage-search-keyword');
+        if (input) input.value = value;
+        usageSearchLimit = 50;
+        refreshUsageSearch();
+      });
+    });
+    document.getElementById('usage-search-more-button')?.addEventListener('click', () => {
+      usageSearchLimit += 50;
+      refreshUsageSearch();
+    });
+  };
+  const refreshUsageSearch = async () => {
+    const container = document.getElementById('usage-search-content');
+    const button = document.getElementById('usage-search-load-button');
+    if (button) {
+      button.disabled = true;
+      button.classList.add('is-spinning');
+    }
+    try {
+      const response = await fetch(`/api/usage/search?${usageSearchQueryString()}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      renderUsageSearch(await response.json());
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state">用量检索失败：${escapeHtml(error.message)}</div>`;
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.classList.remove('is-spinning');
+      }
+    }
+  };
+  // 磁盘与会话管理：目录占用、归档与清理。
+  let housekeepingState = null;
+  const housekeepingValue = (id, fallback) => {
+    const element = document.getElementById(id);
+    if (!element) return fallback;
+    const raw = String(element.value || '').trim();
+    if (!raw) return fallback;
+    const number = Number(raw);
+    return Number.isFinite(number) ? number : fallback;
+  };
+  const housekeepingCriteria = () => ({
+    days: Math.max(1, Math.round(housekeepingValue('housekeeping-days', 30))),
+    min_size_mb: Math.max(0, housekeepingValue('housekeeping-min-size', 0))
+  });
+  const renderHousekeepingStats = (summary, payload) => {
+    const container = document.getElementById('housekeeping-stats');
+    if (!container) return;
+    const totals = summary.totals || {};
+    const preview = (payload && payload.preview) || summary.preview || {};
+    const archives = (payload && payload.archives) || [];
+    const reminderCount = (summary.reminders || []).length;
+    const singleWarn = (summary.thresholds || {}).single_warn_bytes || 0;
+    container.innerHTML = [
+      `<div class="stat"><div class="stat-label">目录合计</div><div class="stat-value">${escapeHtml(formatDataSize(totals.bytes || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.directories || 0))} 个目录 · ${escapeHtml(formatNumber(totals.files || 0))} 个文件</div></div>`,
+      `<div class="stat"><div class="stat-label">会话文件</div><div class="stat-value">${escapeHtml(formatDataSize(totals.session_bytes || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.session_files || 0))} 个 Codex session</div></div>`,
+      `<div class="stat"><div class="stat-label">可归档 / 清理</div><div class="stat-value ${Number(preview.count || 0) > 0 ? 'warn' : 'ok'}">${escapeHtml(formatNumber(preview.count || 0))} 个</div><div class="stat-foot">约 ${escapeHtml(formatDataSize(preview.bytes || 0))} · 跳过活动 ${escapeHtml(formatNumber(preview.skipped_active || 0))} 个</div></div>`,
+      `<div class="stat"><div class="stat-label">已有归档</div><div class="stat-value">${escapeHtml(formatNumber(archives.length))} 份</div><div class="stat-foot">${escapeHtml(summary.archive_dir ? String(summary.archive_dir).split('/').slice(-2).join('/') : '未配置归档目录')}</div></div>`,
+      `<div class="stat"><div class="stat-label">单目录阈值</div><div class="stat-value ${reminderCount ? 'danger' : 'ok'}" style="font-size:17px">${escapeHtml(formatDataSize(singleWarn || 0))}</div><div class="stat-foot">${reminderCount ? `${escapeHtml(formatNumber(reminderCount))} 条磁盘提醒` : '当前未超阈值'}</div></div>`
+    ].join('');
+  };
+  const renderHousekeeping = (state) => {
+    const container = document.getElementById('housekeeping-content');
+    const countLabel = document.getElementById('housekeeping-count');
+    if (!container) return;
+    const summary = (state && state.housekeeping) || {};
+    const directories = Array.isArray(summary.directories) ? summary.directories : [];
+    const totals = summary.totals || {};
+    if (summary.available === false) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">磁盘统计不可用</span><span class="empty-hint">监控进程未启动磁盘扫描，或状态目录不可读。</span></div>';
+      if (countLabel) countLabel.textContent = '不可用';
+      return;
+    }
+    const preview = summary.preview || {};
+    if (countLabel) {
+      countLabel.textContent = `合计 ${formatDataSize(totals.bytes || 0)} · ${Number(preview.count || 0)} 个可归档`;
+    }
+    renderHousekeepingStats(summary, housekeepingState);
+    const reminderBanners = (summary.reminders || []).map((reminder) => (
+      `<div class="alert-banner ${reminder.level === 'danger' ? 'danger' : 'warn'}">${escapeHtml(reminder.message || reminder.title || '')}</div>`
+    )).join('');
+    const cards = directories.map((item) => {
+      const bytes = Number(item.bytes || 0);
+      const sessionBytes = Number(item.session_bytes || 0);
+      const sessionShare = bytes > 0 ? Math.min(100, Math.round(sessionBytes / bytes * 100)) : 0;
+      const ratio = bytes > 0
+        ? `<div class="ratio" title="会话文件占 ${sessionShare}%"><span class="ratio-sessions" style="width:${sessionShare}%"></span><span class="ratio-other" style="width:${100 - sessionShare}%"></span></div>`
+        : '';
+      const children = (item.top_children || []).slice(0, 4).map((child) => (
+        `<span class="chip">${escapeHtml(child.name)} ${escapeHtml(formatDataSize(child.bytes || 0))}</span>`
+      )).join('');
+      return `<article class="mini-card">
+        <div class="mini-card-head">
+          <div><div class="mini-card-title">${escapeHtml(item.label || '未知目录')}</div><div class="mini-card-path" title="${escapeHtml(item.path || '')}">${escapeHtml(item.path || '')}</div></div>
+          <span class="pill ${item.cleanable ? 'ok' : 'other'}">${item.cleanable ? '可归档' : '仅统计'}</span>
+        </div>
+        <div class="mini-card-metrics">
+          <div><div class="metric-label">占用</div><div class="metric-value">${escapeHtml(formatDataSize(bytes))}</div></div>
+          <div><div class="metric-label">会话文件</div><div class="metric-value">${escapeHtml(formatDataSize(sessionBytes))}<div class="cell-sub">${escapeHtml(formatNumber(item.session_files || 0))} 个</div></div></div>
+          <div><div class="metric-label">文件总数</div><div class="metric-value">${escapeHtml(formatNumber(item.files || 0))}</div></div>
+        </div>
+        ${ratio}
+        ${children ? `<div class="chip-list">${children}</div>` : ''}
+      </article>`;
+    }).join('');
+    const scanNote = summary.observed_at
+      ? `上次扫描 ${escapeHtml(formatTime(summary.observed_at))}`
+      : '尚未完成扫描';
+    container.innerHTML = `${reminderBanners}
+      <div class="usage-note">${scanNote}。按当前条件（${escapeHtml(String(preview.criteria ? preview.criteria.older_than_days : 30))} 天前、非活动）可归档或清理 ${escapeHtml(formatNumber(preview.count || 0))} 个文件，约 ${escapeHtml(formatDataSize(preview.bytes || 0))}；过新跳过 ${escapeHtml(formatNumber(preview.skipped_recent || 0))} 个。</div>
+      ${cards ? `<div class="card-grid">${cards}</div>` : '<div class="empty-state"><span class="empty-title">没有需要统计的目录</span></div>'}`;
+  };
+  const renderHousekeepingActions = () => {
+    const container = document.getElementById('housekeeping-actions');
+    if (!container) return;
+    if (!housekeepingState) {
+      container.innerHTML = '';
+      return;
+    }
+    const payload = housekeepingState;
+    const preview = payload.preview || {};
+    const files = Array.isArray(preview.files) ? preview.files : [];
+    const archives = Array.isArray(payload.archives) ? payload.archives : [];
+    const previewRows = files.slice(0, 8);
+    const rows = previewRows.map((item) => `<tr>
+      <td><div class="cell-main">${escapeHtml(formatTime(item.modified_at))}</div><div class="cell-sub">${escapeHtml(String(item.session_id || '').slice(0, 12))}</div></td>
+      <td><span class="truncate" title="${escapeHtml(item.path || '')}">${escapeHtml(item.path || '')}</span></td>
+      <td class="num">${escapeHtml(formatDataSize(item.size || 0))}</td>
+    </tr>`).join('');
+    const archiveCards = archives.map((item) => `<article class="mini-card">
+      <div class="mini-card-head">
+        <div><div class="mini-card-title">${escapeHtml(String(item.archive || '').split('/').pop() || '')}</div><div class="mini-card-path">${escapeHtml(item.created_at ? formatTime(item.created_at) : '时间未知')}</div></div>
+        <button class="btn mini" type="button" data-housekeeping-restore="${escapeHtml(String(item.archive || '').split('/').pop() || '')}">恢复到原路径</button>
+      </div>
+      <div class="mini-card-metrics">
+        <div><div class="metric-label">文件数</div><div class="metric-value">${escapeHtml(item.count === null || item.count === undefined ? '—' : formatNumber(item.count))}</div></div>
+        <div><div class="metric-label">归档大小</div><div class="metric-value">${escapeHtml(formatDataSize(item.bytes || 0))}</div></div>
+      </div>
+    </article>`).join('');
+    container.innerHTML = `<div class="account-subtitle"><span>待处理会话</span><span class="muted">${escapeHtml(formatNumber(preview.count || 0))} 个 · ${escapeHtml(formatDataSize(preview.bytes || 0))}</span></div>
+      <div class="usage-note">归档会先打包 tar.gz 并写 manifest，校验通过后才删除原文件，可随时恢复；直接清理不可撤销。活动会话、10 分钟内改动过的文件会始终跳过。</div>
+      ${rows ? `<div class="table-wrap"><table class="tight"><thead><tr><th>最后修改</th><th>会话文件</th><th class="num">大小</th></tr></thead><tbody>${rows}</tbody></table></div>${files.length > previewRows.length ? `<div class="usage-note">仅列出前 ${previewRows.length} 个，共 ${escapeHtml(formatNumber(preview.count || files.length))} 个待处理文件。</div>` : ''}` : '<div class="empty-state"><span class="empty-title">当前条件下没有可处理的会话</span><span class="empty-hint">放宽保留天数或降低体积下限再试。</span></div>'}
+      ${archives.length ? `<div class="account-subtitle"><span>已有归档</span><span class="muted">${escapeHtml(formatNumber(archives.length))} 份</span></div><div class="card-grid">${archiveCards}</div>` : ''}`;
+    container.querySelectorAll('[data-housekeeping-restore]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const name = button.dataset.housekeepingRestore || '';
+        if (!window.confirm(`确认从归档 ${name} 恢复会话文件到原始路径？`)) return;
+        mutateHousekeeping('restore', { archive: name });
+      });
+    });
+  };
+  const refreshHousekeeping = async () => {
+    const criteria = housekeepingCriteria();
+    const button = document.getElementById('housekeeping-scan-button');
+    if (button) {
+      button.disabled = true;
+      button.classList.add('is-spinning');
+    }
+    try {
+      const response = await fetch(`/api/housekeeping?days=${criteria.days}&min_size_mb=${criteria.min_size_mb}&refresh=1`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      housekeepingState = await response.json();
+      if (latestState) renderHousekeeping(latestState);
+      renderHousekeepingActions();
+      refresh();
+    } catch (error) {
+      const container = document.getElementById('housekeeping-content');
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">磁盘扫描失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.classList.remove('is-spinning');
+      }
+    }
+  };
+  const mutateHousekeeping = async (action, body) => {
+    const criteria = housekeepingCriteria();
+    const container = document.getElementById('housekeeping-actions');
+    try {
+      const response = await fetch('/api/housekeeping', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, days: criteria.days, min_size_mb: criteria.min_size_mb, confirm: true, ...body })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      const changed = (payload.result && payload.result.count) || 0;
+      const freed = (payload.result && payload.result.bytes) || 0;
+      housekeepingState = { ...payload };
+      if (latestState) renderHousekeeping(latestState);
+      renderHousekeepingActions();
+      const note = document.createElement('div');
+      note.className = 'alert-banner info action-result';
+      note.textContent = action === 'restore'
+        ? `已恢复 ${payload.result.restored} 个会话文件到 ${payload.result.destination}。`
+        : `已完成${action === 'archive' ? '归档' : '清理'}：${changed} 个文件，释放 ${formatDataSize(freed)}。`;
+      container.prepend(note);
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">操作失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
   const renderAccounts = (state) => {
     const container = document.getElementById('account-list');
     const quotas = Array.isArray(state.quotas) ? state.quotas : [];
@@ -1177,7 +2085,8 @@ _DASHBOARD_HTML = r"""<!doctype html>
       const accountCounts = account.counts || {};
       const profiles = (account.profiles || []).map((profile) => typeof profile === 'string' ? profile : profile.name).filter((profile) => profile).join(' · ');
       const accountId = account.account_id || name;
-      const product = account.product === 'kimi' || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === 'kimi') ? 'Kimi' : account.product === 'grok' || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === 'grok') ? 'Grok' : account.product === 'dsh' || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === 'dsh') ? 'DeepSeek Harness' : 'Codex';
+      const productLabel = (id, label) => account.product === id || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === id) ? label : null;
+      const product = productLabel('kimi', 'Kimi') || productLabel('grok', 'Grok') || productLabel('dsh', 'DeepSeek Harness') || productLabel('command-code', 'Command Code') || 'Codex';
       const plan = accountQuotas.length ? accountQuotas.map((quota) => quota.plan_type || '未知').join(' · ') : '未知';
       const activeCount = accountCounts.active ?? accountSessions.length;
       const accountSource = accountQuotas.map((quota) => quota.source).filter((source) => source).join(' · ');
@@ -1231,13 +2140,19 @@ _DASHBOARD_HTML = r"""<!doctype html>
       const uploadBurst = document.getElementById('upload-burst-count');
       const uploadAlerts = document.getElementById('upload-alert-count');
       if (uploadBurst) uploadBurst.textContent = formatDataSize(trafficTotals.burst_bytes || 0);
-      if (uploadAlerts) uploadAlerts.textContent = trafficTotals.alert_count ?? 0;
+      if (uploadAlerts) {
+        const alertHistory = state.alert_history || {};
+        uploadAlerts.textContent = alertHistory.available ? (alertHistory.unread ?? 0) : (trafficTotals.alert_count ?? 0);
+      }
       document.getElementById('service-sync').textContent = `已同步 ${formatTime(state.updated_at)}`;
       document.getElementById('service-state').textContent = '监控服务在线';
       document.querySelectorAll('.status-dot').forEach((dot) => dot.classList.remove('error'));
       renderAccounts(state);
       renderTraffic(state);
+      renderHousekeeping(state);
+      renderSectionSummaries(state);
       renderAlerts();
+      if (alertHistoryState) refreshAlertHistory();
       document.getElementById('error').style.display = 'none';
     } catch (error) {
       const box = document.getElementById('error');
@@ -1256,6 +2171,67 @@ _DASHBOARD_HTML = r"""<!doctype html>
   document.getElementById('refresh-button')?.addEventListener('click', refresh);
   document.getElementById('usage-load-button')?.addEventListener('click', refreshUsage);
   document.getElementById('insights-load-button')?.addEventListener('click', refreshInsights);
+  document.getElementById('alert-history-load-button')?.addEventListener('click', () => {
+    alertHistoryLimit = 50;
+    refreshAlertHistory();
+  });
+  ['alert-range-filter', 'alert-level-filter', 'alert-kind-filter', 'alert-ack-filter'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+      alertHistoryLimit = 50;
+      refreshAlertHistory();
+    });
+  });
+  document.getElementById('alert-keyword-filter')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      alertHistoryLimit = 50;
+      refreshAlertHistory();
+    }
+  });
+  document.getElementById('alert-ack-all-button')?.addEventListener('click', () => mutateAlerts('ack', { all: true }));
+  document.getElementById('alert-clear-button')?.addEventListener('click', clearAlertHistory);
+  document.getElementById('usage-search-load-button')?.addEventListener('click', () => {
+    usageSearchLimit = 50;
+    refreshUsageSearch();
+  });
+  document.getElementById('usage-search-refresh-button')?.addEventListener('click', () => {
+    usageSearchLimit = 50;
+    refreshUsageSearch();
+  });
+  document.querySelectorAll('[data-usage-search-group]').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      usageSearchGroup = tab.dataset.usageSearchGroup || 'session';
+      document.querySelectorAll('[data-usage-search-group]').forEach((item) => item.classList.toggle('selected', item === tab));
+      usageSearchLimit = 50;
+      refreshUsageSearch();
+    });
+  });
+  ['usage-search-range', 'usage-search-model', 'usage-search-sort', 'usage-search-from', 'usage-search-to'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+      usageSearchLimit = 50;
+      refreshUsageSearch();
+    });
+  });
+  document.getElementById('usage-search-keyword')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      usageSearchLimit = 50;
+      refreshUsageSearch();
+    }
+  });
+  document.getElementById('housekeeping-scan-button')?.addEventListener('click', refreshHousekeeping);
+  document.getElementById('housekeeping-preview-button')?.addEventListener('click', refreshHousekeeping);
+  document.getElementById('housekeeping-archive-button')?.addEventListener('click', () => {
+    const criteria = housekeepingCriteria();
+    if (!window.confirm(`确认把 ${criteria.days} 天前、非活动的 Codex 会话压缩归档（tar.gz）并删除原文件？归档可在本页恢复。`)) return;
+    mutateHousekeeping('archive');
+  });
+  document.getElementById('housekeeping-clean-button')?.addEventListener('click', () => {
+    const criteria = housekeepingCriteria();
+    if (!window.confirm(`确认直接删除 ${criteria.days} 天前、非活动的 Codex 会话文件？此操作不可撤销，建议先归档。`)) return;
+    mutateHousekeeping('clean');
+  });
+  ['housekeeping-days', 'housekeeping-min-size'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', refreshHousekeeping);
+  });
   document.querySelectorAll('[data-insights-days]').forEach((tab) => {
     tab.addEventListener('click', () => {
       insightsPeriodDays = tab.dataset.insightsDays || '';
@@ -1264,7 +2240,22 @@ _DASHBOARD_HTML = r"""<!doctype html>
       refreshInsights();
     });
   });
+  DEFAULT_COLLAPSED.forEach(applySectionState);
+  collapsedSections.forEach((id) => applySectionState(id));
+  document.querySelectorAll('[data-section-toggle]').forEach((toggle) => {
+    toggle.addEventListener('click', () => {
+      const id = toggle.dataset.sectionToggle;
+      setSectionCollapsed(id, !collapsedSections.has(id));
+    });
+  });
+  navLinks.forEach((link) => {
+    link.addEventListener('click', () => {
+      const id = link.dataset.navTarget;
+      if (collapsedSections.has(id)) setSectionCollapsed(id, false);
+    });
+  });
   refresh();
+  ['alert-history', 'usage-search', 'housekeeping'].forEach(ensureSectionLoaded);
   window.setInterval(refresh, 5000);
 </script>
 </body>
@@ -1299,7 +2290,7 @@ class _DashboardHTTPServer(ThreadingHTTPServer):
 
 
 class DashboardServer:
-    """提供只读 Dashboard 状态和用量数据的后台 HTTP 服务。"""
+    """提供 Dashboard 状态、用量数据和告警历史的本地 HTTP 服务。"""
 
     def __init__(
         self,
@@ -1312,7 +2303,11 @@ class DashboardServer:
         grok_homes: Sequence[Path] | None = None,
         kimi_homes: Sequence[Path] | None = None,
         dsh_homes: Sequence[Path] | None = None,
+        commandcode_homes: Sequence[Path] | None = None,
         traffic_monitor: TrafficMonitor | None = None,
+        alert_store: TrafficAlertStore | None = None,
+        housekeeping: HousekeepingMonitor | None = None,
+        session_thresholds: SessionSwitchThresholds | None = None,
     ) -> None:
         if registries is not None and registry is not None:
             raise ValueError("registry 和 registries 只能传入一个")
@@ -1330,7 +2325,11 @@ class DashboardServer:
         self.grok_homes = resolve_grok_homes(grok_homes)
         self.kimi_homes = resolve_kimi_homes(kimi_homes)
         self.dsh_homes = resolve_dsh_homes(dsh_homes)
+        self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
         self.traffic_monitor = traffic_monitor
+        self.alert_store = alert_store
+        self.housekeeping = housekeeping
+        self.session_thresholds = session_thresholds or SessionSwitchThresholds()
         self.usage_aggregator = usage_aggregator or UsageAggregator(
             grok_homes=self.grok_homes,
             kimi_homes=self.kimi_homes,
@@ -1361,8 +2360,12 @@ class DashboardServer:
             self.grok_homes,
             self.kimi_homes,
             self.dsh_homes,
+            self.commandcode_homes,
             budget_usd=self.config.budget_usd,
             traffic_monitor=self.traffic_monitor,
+            alert_store=self.alert_store,
+            housekeeping=self.housekeeping,
+            session_thresholds=self.session_thresholds,
         )
         server = _DashboardHTTPServer(
             (self.config.host, self.config.port),
@@ -1371,7 +2374,7 @@ class DashboardServer:
         self._server = server
         self._thread = Thread(
             target=server.serve_forever,
-            name="codex-dashboard",
+            name="token-monitor-dashboard",
             daemon=True,
         )
         self._thread.start()
@@ -1450,6 +2453,7 @@ def build_multi_dashboard_state(
     grok_homes: Sequence[Path] | None = None,
     kimi_homes: Sequence[Path] | None = None,
     dsh_homes: Sequence[Path] | None = None,
+    commandcode_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
     traffic: TrafficSnapshot | None = None,
 ) -> dict[str, Any]:
@@ -1665,6 +2669,54 @@ def build_multi_dashboard_state(
                 )
             )
 
+    # Command Code 订阅额度经官方后台接口读取（带缓存）；失败时只展示账号身份。
+    for commandcode_home in commandcode_homes or ():
+        commandcode_account = read_commandcode_account(commandcode_home)
+        commandcode_quota = read_commandcode_quota(commandcode_home)
+        account_key = commandcode_account.account_key
+        account = accounts_by_key.setdefault(
+            account_key,
+            {
+                "name": commandcode_account.display_name,
+                "account_id": commandcode_account.account_id,
+                "product": "command-code",
+                "profiles": [],
+                "quota": None,
+                "counts": {},
+            },
+        )
+        account["product"] = "command-code"
+        profile = {
+            "name": commandcode_account.profile_name,
+            "codex_home": str(commandcode_home),
+        }
+        if profile not in account["profiles"]:
+            account["profiles"].append(profile)
+        if commandcode_quota is not None:
+            quota_with_account = _quota_summary(commandcode_quota)
+            if quota_with_account is not None:
+                quota_with_account["account"] = commandcode_account.display_name
+                quota_with_account["account_id"] = commandcode_account.account_id
+                quota_with_account["profile_name"] = (
+                    commandcode_account.profile_name
+                )
+                quota_with_account["codex_home"] = str(commandcode_home)
+                quota_with_account["product"] = "command-code"
+                quota_by_key[(account_key, "snapshot", "snapshot")] = (
+                    quota_with_account
+                )
+        for session in list_commandcode_active_sessions(commandcode_home):
+            sessions.append(
+                _session_summary(
+                    session,
+                    account_name=commandcode_account.display_name,
+                    account_id=commandcode_account.account_id,
+                    profile_name=commandcode_account.profile_name,
+                    codex_home=str(commandcode_home),
+                    product="command-code",
+                )
+            )
+
     counts: dict[str, int] = {}
     for account in accounts_by_key.values():
         account["counts"] = {}
@@ -1799,6 +2851,7 @@ def _session_summary(
         "process_backed": session.is_process_backed,
         "last_event_at": session.last_event_at,
         "last_event_type": session.last_event_type,
+        "jsonl_path": session.jsonl_path,
         "last_error": _display_session_error(session.last_error),
         "quota_reset_at": session.quota_reset_at,
         "product": product,
@@ -1832,6 +2885,375 @@ def _insights_window_days(query: str) -> int | None:
     return days if 0 < days <= 3660 else None
 
 
+def _usage_search_arguments(raw_query: str) -> dict[str, Any]:
+    """把用量检索查询串解析成 UsageAggregator.search 参数。"""
+
+    params = parse_qs(raw_query)
+
+    def single(name: str) -> str | None:
+        for value in params.get(name) or ():
+            text = value.strip()
+            if text:
+                return text
+        return None
+
+    # 中文注释：days=0 表示不限制时间范围，非法值退回默认天数。
+    days = DEFAULT_SEARCH_DAYS
+    raw_days = single("days")
+    if raw_days is not None:
+        try:
+            parsed_days = int(raw_days)
+        except ValueError:
+            parsed_days = DEFAULT_SEARCH_DAYS
+        days = parsed_days if 0 <= parsed_days <= 3660 else DEFAULT_SEARCH_DAYS
+    since: float | None = None
+    until: float | None = None
+    explicit_from = _day_start(single("from"))
+    explicit_to = _day_end(single("to"))
+    if explicit_from is not None or explicit_to is not None:
+        since, until = explicit_from, explicit_to
+    elif days > 0:
+        since = time.time() - days * 86400
+    group = (single("group") or "session").lower()
+    sort = (single("sort") or "recent").lower()
+    return {
+        "since": since,
+        "until": until,
+        "models": tuple(_split_values(single("model"))),
+        "session": single("session"),
+        "project": single("project"),
+        "keyword": single("q"),
+        "group": group,
+        "sort": sort,
+        "limit": _bounded_int(single("limit"), maximum=500) or 50,
+        "offset": _bounded_int(single("offset"), maximum=1_000_000) or 0,
+    }
+
+
+def _day_start(value: str | None) -> float | None:
+    """把 YYYY-MM-DD 解析为本地当天零点时间戳。"""
+
+    parsed = _parse_day(value)
+    return parsed.timestamp() if parsed is not None else None
+
+
+def _day_end(value: str | None) -> float | None:
+    """把 YYYY-MM-DD 解析为本地当天最后一刻的时间戳。"""
+
+    parsed = _parse_day(value)
+    if parsed is None:
+        return None
+    return parsed.timestamp() + 86400.0 - 1e-6
+
+
+def _parse_day(value: str | None) -> datetime | None:
+    """解析日期参数，非法值按未提供处理。"""
+
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def empty_housekeeping_payload() -> dict[str, Any]:
+    """返回未接入磁盘统计时的空报告。"""
+
+    return empty_housekeeping_report()
+
+
+def _housekeeping_summary(
+    monitor: HousekeepingMonitor | None,
+) -> dict[str, Any]:
+    """返回 /api/state 使用的紧凑磁盘摘要，避免每 5 秒回传完整目录树。"""
+
+    if monitor is None:
+        return {"available": False, "totals": {}, "reminders": [], "preview": None}
+    report = monitor.latest()
+    if report.get("observed_at") is None:
+        # 中文注释：首次访问时补一次扫描；refresh 自带刷新间隔节流。
+        report = monitor.refresh()
+    return {
+        "available": True,
+        "observed_at": report.get("observed_at"),
+        "thresholds": report.get("thresholds", {}),
+        "archive_dir": report.get("archive_dir"),
+        "totals": report.get("totals", {}),
+        "reminders": list(report.get("reminders") or []),
+        "preview": report.get("preview"),
+        "directories": [
+            {
+                "label": item.get("label"),
+                "path": item.get("path"),
+                "bytes": item.get("bytes"),
+                "files": item.get("files"),
+                "session_bytes": item.get("session_bytes"),
+                "session_files": item.get("session_files"),
+                "cleanable": item.get("cleanable"),
+                "top_children": list(item.get("top_children") or [])[:4],
+            }
+            for item in report.get("directories", [])
+        ],
+    }
+
+
+def _usage_index_summary(
+    aggregator: UsageAggregator | None,
+) -> dict[str, Any]:
+    """返回用量索引的紧凑摘要，供折叠状态下的用量检索分区展示。"""
+
+    if aggregator is None:
+        return {
+            "available": False,
+            "records": 0,
+            "sessions": 0,
+            "models": 0,
+            "first_at": None,
+            "last_at": None,
+        }
+    try:
+        facets = aggregator.usage_facets()
+    except (OSError, ValueError):
+        return {
+            "available": False,
+            "records": 0,
+            "sessions": 0,
+            "models": 0,
+            "first_at": None,
+            "last_at": None,
+        }
+    return {
+        "available": bool(facets.get("available")),
+        "records": int(facets.get("records") or 0),
+        "sessions": int(facets.get("sessions") or 0),
+        "models": len(facets.get("models") or ()),
+        "first_at": facets.get("first_at"),
+        "last_at": facets.get("last_at"),
+    }
+
+
+def _attach_session_advice(
+    state: dict[str, Any],
+    aggregator: UsageAggregator | None,
+    thresholds: SessionSwitchThresholds,
+) -> None:
+    """把活动会话的轮数、上下文和长会话提醒并入 /api/state。"""
+
+    sessions = state.get("sessions")
+    payload: dict[str, Any] = {
+        "thresholds": thresholds.to_dict(),
+        "count": 0,
+        "sessions": [],
+    }
+    state["session_advice"] = payload
+    if aggregator is None or not isinstance(sessions, list):
+        return
+    paths = [
+        str(item.get("jsonl_path"))
+        for item in sessions
+        if isinstance(item, dict) and item.get("jsonl_path")
+    ]
+    if not paths:
+        return
+    try:
+        usages = aggregator.session_usages(paths)
+    except (OSError, ValueError):
+        return
+    reminders: list[dict[str, Any]] = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        summary = usages.get(str(session.get("jsonl_path") or ""))
+        if summary is None:
+            continue
+        entry = summary.to_dict()
+        reminder = summary.reminder(thresholds)
+        entry["reminder"] = reminder
+        session["usage"] = entry
+        if reminder is None:
+            continue
+        reminders.append(
+            {
+                **reminder,
+                "thread_id": session.get("thread_id"),
+                "account": session.get("account"),
+                "cwd": session.get("cwd"),
+                "project": session.get("cwd"),
+            }
+        )
+    reminders.sort(key=lambda item: -int(item.get("context_tokens") or 0))
+    payload["count"] = len(reminders)
+    payload["sessions"] = reminders
+
+
+def _housekeeping_arguments(raw_query: str) -> dict[str, Any]:
+    """解析磁盘/会话管理查询串。"""
+
+    params = parse_qs(raw_query)
+
+    def single(name: str) -> str | None:
+        for value in params.get(name) or ():
+            text = value.strip()
+            if text:
+                return text
+        return None
+
+    days = _bounded_int(single("days"), maximum=3650) or 30
+    min_size_mb = _bounded_float(single("min_size_mb"), maximum=1_000_000) or 0.0
+    return {
+        "days": days,
+        "min_bytes": int(min_size_mb * 1024 * 1024),
+        "refresh": single("refresh") not in {None, "0", "false"},
+    }
+
+
+def _archive_path_for(monitor: HousekeepingMonitor, name: str) -> Path:
+    """把请求里的归档名限制在归档目录内，避免任意路径读取。"""
+
+    candidate = Path(name).name
+    if not candidate or candidate != name:
+        raise HousekeepingError("归档名非法")
+    archive_dir = monitor.archive_dir
+    if archive_dir is None:
+        raise HousekeepingError("没有配置归档目录")
+    archive = archive_dir / candidate
+    if not archive.is_file():
+        raise HousekeepingError(f"归档不存在: {candidate}")
+    return archive
+
+
+def empty_alert_history_payload() -> dict[str, Any]:
+    """返回未接入告警落盘时的空历史结构。"""
+
+    return {
+        "available": False,
+        "retention_days": None,
+        "merge_window_seconds": None,
+        "alerts": [],
+        "has_more": False,
+        "stats": {
+            "total": 0,
+            "unread": 0,
+            "danger": 0,
+            "warn": 0,
+            "last_alert_at": None,
+        },
+    }
+
+
+def _alert_query_from_url(raw_query: str) -> AlertQuery:
+    """把 Dashboard 查询串解析为告警筛选条件。"""
+
+    params = parse_qs(raw_query)
+
+    def single(name: str) -> str | None:
+        for value in params.get(name) or ():
+            text = value.strip()
+            if text:
+                return text
+        return None
+
+    days = _bounded_int(single("days"), maximum=3660)
+    since = time.time() - days * 86400 if days else None
+    explicit_since = _bounded_float(single("since"))
+    if explicit_since is not None:
+        since = explicit_since
+    acknowledged: bool | None = None
+    ack_value = (single("ack") or "").lower()
+    if ack_value == "unread":
+        acknowledged = False
+    elif ack_value == "read":
+        acknowledged = True
+    return AlertQuery(
+        since=since,
+        until=_bounded_float(single("until")),
+        levels=tuple(_split_values(single("level"))),
+        kinds=tuple(_split_values(single("kind"))),
+        products=tuple(_split_values(single("product"))),
+        acknowledged=acknowledged,
+        keyword=single("q"),
+        limit=_bounded_int(single("limit"), maximum=MAX_QUERY_LIMIT) or 50,
+        offset=_bounded_int(single("offset"), maximum=1_000_000) or 0,
+    )
+
+
+def _apply_alert_action(
+    store: TrafficAlertStore,
+    action: str,
+    body: Mapping[str, Any],
+) -> int:
+    """执行一次告警历史修改，返回改动条数。"""
+
+    if action == "ack":
+        if body.get("all") is True:
+            return store.acknowledge(all_alerts=True)
+        return store.acknowledge(_alert_ids(body.get("ids")))
+    if action == "unack":
+        return store.unacknowledge(_alert_ids(body.get("ids")))
+    if action == "clear":
+        if body.get("all") is True:
+            return store.clear_all()
+        before = _bounded_float(body.get("before"))
+        if before is not None:
+            return store.clear_before(before)
+        return store.clear(_alert_ids(body.get("ids")))
+    raise AlertStoreError(f"未知告警操作: {action or '(空)'}")
+
+
+def _alert_ids(value: object) -> tuple[int, ...]:
+    """校验告警 ID 列表，拒绝非法值和非正整数。"""
+
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_QUERY_LIMIT:
+        raise AlertStoreError("ids 必须是告警 ID 数组")
+    ids: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise AlertStoreError("ids 只能包含告警 ID 数字")
+        identifier = int(item)
+        if identifier <= 0:
+            raise AlertStoreError("告警 ID 必须是正整数")
+        ids.append(identifier)
+    return tuple(ids)
+
+
+def _bounded_int(value: object, *, maximum: int) -> int | None:
+    """解析 1 到 maximum 之间的整数，非法值返回 None。"""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if 1 <= parsed <= maximum else None
+
+
+def _bounded_float(value: object, *, maximum: float = 1e12) -> float | None:
+    """解析正浮点数，非法值返回 None。"""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0 or parsed > maximum:
+        return None
+    return parsed
+
+
+def _split_values(value: str | None) -> list[str]:
+    """把逗号分隔的筛选值拆成去重后的列表。"""
+
+    if not value:
+        return []
+    items = [item.strip() for item in value.split(",")]
+    return [item for index, item in enumerate(items) if item and item not in items[:index]]
+
+
 def _make_handler(
     registries: Mapping[str, MultiSessionRegistry],
     logger: logging.Logger,
@@ -1840,15 +3262,46 @@ def _make_handler(
     grok_homes: Sequence[Path] | None = None,
     kimi_homes: Sequence[Path] | None = None,
     dsh_homes: Sequence[Path] | None = None,
+    commandcode_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
     traffic_monitor: TrafficMonitor | None = None,
+    alert_store: TrafficAlertStore | None = None,
+    housekeeping: HousekeepingMonitor | None = None,
+    session_thresholds: SessionSwitchThresholds | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """为多个注册表创建隔离的 HTTP 请求处理器类型。"""
 
-    class DashboardRequestHandler(BaseHTTPRequestHandler):
-        """处理 Dashboard 页面和只读状态请求。"""
+    thresholds_in_use = session_thresholds or SessionSwitchThresholds()
 
-        server_version = "CodexResetMonitorDashboard/0.9"
+    def alert_stats() -> dict[str, Any]:
+        """返回落盘告警的统计；数据库不可用时降级为空统计。"""
+
+        if alert_store is None:
+            return {
+                "available": False,
+                "total": 0,
+                "unread": 0,
+                "danger": 0,
+                "warn": 0,
+                "last_alert_at": None,
+            }
+        try:
+            return {"available": True, **alert_store.stats()}
+        except AlertStoreError:
+            logger.exception("Dashboard 读取告警统计失败")
+            return {
+                "available": False,
+                "total": 0,
+                "unread": 0,
+                "danger": 0,
+                "warn": 0,
+                "last_alert_at": None,
+            }
+
+    class DashboardRequestHandler(BaseHTTPRequestHandler):
+        """处理 Dashboard 页面、只读状态和告警历史请求。"""
+
+        server_version = "TokenMonitorDashboard/0.9"
 
         def do_GET(self) -> None:
             """返回静态页面或当前监控状态。"""
@@ -1869,6 +3322,7 @@ def _make_handler(
                         grok_homes=grok_homes,
                         kimi_homes=kimi_homes,
                         dsh_homes=dsh_homes,
+                        commandcode_homes=commandcode_homes,
                         budget_usd=budget_usd,
                         traffic=(
                             traffic_monitor.latest()
@@ -1883,7 +3337,53 @@ def _make_handler(
                         payload={"error": "monitor_state_unavailable"},
                     )
                     return
+                state["alert_history"] = alert_stats()
+                _attach_session_advice(
+                    state,
+                    usage_aggregator,
+                    thresholds_in_use,
+                )
+                state["housekeeping"] = _housekeeping_summary(housekeeping)
+                state["usage_index"] = _usage_index_summary(usage_aggregator)
                 self._send_json(status=200, payload=state)
+                return
+            if path == "/api/alerts":
+                if alert_store is None:
+                    self._send_json(
+                        status=200,
+                        payload={
+                            "updated_at": time.time(),
+                            **empty_alert_history_payload(),
+                        },
+                    )
+                    return
+                try:
+                    criteria = _alert_query_from_url(urlsplit(self.path).query)
+                    alerts, has_more = alert_store.query_page(criteria)
+                    stats = alert_store.stats(since=criteria.since)
+                except AlertStoreError as error:
+                    self._send_json(
+                        status=400,
+                        payload={
+                            "error": "invalid_alert_query",
+                            "message": str(error),
+                        },
+                    )
+                    return
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": True,
+                        "retention_days": alert_store.retention_days,
+                        "merge_window_seconds": alert_store.merge_window_seconds,
+                        "alerts": [item.to_dict() for item in alerts],
+                        "stats": stats,
+                        "has_more": has_more,
+                        "limit": criteria.limit,
+                        "offset": criteria.offset,
+                    },
+                )
                 return
             if path == "/api/usage":
                 try:
@@ -1905,6 +3405,90 @@ def _make_handler(
                 self._send_json(
                     status=200,
                     payload={"updated_at": time.time(), "usage": usage},
+                )
+                return
+            if path == "/api/usage/search":
+                try:
+                    arguments = _usage_search_arguments(urlsplit(self.path).query)
+                    result = (
+                        usage_aggregator.search(**arguments)
+                        if usage_aggregator is not None
+                        else UsageAggregator.empty_search(
+                            group=arguments["group"],
+                            sort=arguments["sort"],
+                            limit=arguments["limit"],
+                            offset=arguments["offset"],
+                        )
+                    )
+                    facets = (
+                        usage_aggregator.usage_facets()
+                        if usage_aggregator is not None
+                        else {
+                            "available": False,
+                            "records": 0,
+                            "sessions": 0,
+                            "models": [],
+                            "first_at": None,
+                            "last_at": None,
+                        }
+                    )
+                except ValueError as error:
+                    self._send_json(
+                        status=400,
+                        payload={
+                            "error": "invalid_usage_search",
+                            "message": str(error),
+                        },
+                    )
+                    return
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "search": result,
+                        "facets": facets,
+                    },
+                )
+                return
+            if path == "/api/housekeeping":
+                if housekeeping is None:
+                    self._send_json(
+                        status=200,
+                        payload={
+                            "updated_at": time.time(),
+                            "available": False,
+                            "report": empty_housekeeping_payload(),
+                            "preview": None,
+                            "archives": [],
+                        },
+                    )
+                    return
+                try:
+                    arguments = _housekeeping_arguments(urlsplit(self.path).query)
+                    criteria = CleanupCriteria(
+                        older_than_days=arguments["days"],
+                        min_bytes=arguments["min_bytes"],
+                    )
+                    report = housekeeping.refresh(force=arguments["refresh"])
+                    preview = housekeeping.preview(criteria)
+                except (HousekeepingError, ValueError) as error:
+                    self._send_json(
+                        status=400,
+                        payload={
+                            "error": "invalid_housekeeping_query",
+                            "message": str(error),
+                        },
+                    )
+                    return
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": True,
+                        "report": report,
+                        "preview": preview,
+                        "archives": list(housekeeping.restores()),
+                    },
                 )
                 return
             if path == "/api/insights":
@@ -1953,6 +3537,7 @@ def _make_handler(
                         grok_homes=grok_homes,
                         kimi_homes=kimi_homes,
                         dsh_homes=dsh_homes,
+                        commandcode_homes=commandcode_homes,
                         budget_usd=budget_usd,
                         traffic=(
                             traffic_monitor.latest()
@@ -1968,9 +3553,29 @@ def _make_handler(
                         include_body=False,
                     )
                     return
+                state["alert_history"] = alert_stats()
+                _attach_session_advice(
+                    state,
+                    usage_aggregator,
+                    thresholds_in_use,
+                )
+                state["housekeeping"] = _housekeeping_summary(housekeeping)
+                state["usage_index"] = _usage_index_summary(usage_aggregator)
                 self._send_json(
                     status=200,
                     payload=state,
+                    include_body=False,
+                )
+                return
+            if path == "/api/alerts":
+                # 中文注释：HEAD 只用于健康检查，不返回告警明细。
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": alert_store is not None,
+                        "stats": alert_stats(),
+                    },
                     include_body=False,
                 )
                 return
@@ -1983,6 +3588,43 @@ def _make_handler(
                 self._send_json(
                     status=200,
                     payload={"updated_at": time.time(), "usage": usage},
+                    include_body=False,
+                )
+                return
+            if path == "/api/usage/search":
+                # 中文注释：HEAD 只用于健康检查，不触发一次完整用量检索。
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "search": UsageAggregator.empty_search(),
+                        "facets": {
+                            "available": usage_aggregator is not None,
+                            "records": 0,
+                            "sessions": 0,
+                            "models": [],
+                            "first_at": None,
+                            "last_at": None,
+                        },
+                    },
+                    include_body=False,
+                )
+                return
+            if path == "/api/housekeeping":
+                # 中文注释：HEAD 只用于健康检查，不触发一次目录扫描。
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": housekeeping is not None,
+                        "report": (
+                            housekeeping.latest()
+                            if housekeeping is not None
+                            else empty_housekeeping_payload()
+                        ),
+                        "preview": None,
+                        "archives": [],
+                    },
                     include_body=False,
                 )
                 return
@@ -2004,9 +3646,124 @@ def _make_handler(
             )
 
         def do_POST(self) -> None:
-            """Dashboard 只读，不接受任何状态修改请求。"""
+            """只接受告警历史的状态修改，其余路径仍为只读。"""
 
-            self._send_json(status=405, payload={"error": "read_only"})
+            path = urlsplit(self.path).path
+            if path == "/api/housekeeping":
+                self._handle_housekeeping_post(housekeeping)
+                return
+            if path != "/api/alerts":
+                self._send_json(status=405, payload={"error": "read_only"})
+                return
+            if alert_store is None:
+                self._send_json(
+                    status=503,
+                    payload={"error": "alert_history_unavailable"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+                action = str(body.get("action") or "").strip()
+                changed = _apply_alert_action(alert_store, action, body)
+            except AlertStoreError as error:
+                self._send_json(
+                    status=400,
+                    payload={"error": "invalid_alert_action", "message": str(error)},
+                )
+                return
+            self._send_json(
+                status=200,
+                payload={
+                    "ok": True,
+                    "action": action,
+                    "changed": changed,
+                    "stats": alert_stats(),
+                },
+            )
+
+        def _handle_housekeeping_post(
+            self,
+            monitor: HousekeepingMonitor | None,
+        ) -> None:
+            """处理会话归档、清理和恢复请求；必须显式确认。"""
+
+            if monitor is None:
+                self._send_json(
+                    status=503,
+                    payload={"error": "housekeeping_unavailable"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+                action = str(body.get("action") or "").strip()
+                days = _bounded_int(body.get("days"), maximum=3650) or 30
+                min_bytes = int(
+                    float(body.get("min_size_mb") or 0) * 1024 * 1024
+                )
+                criteria = CleanupCriteria(
+                    older_than_days=days,
+                    min_bytes=max(0, min_bytes),
+                )
+                if action == "archive":
+                    if body.get("confirm") is not True:
+                        raise HousekeepingError("归档需要确认")
+                    result = monitor.archive(criteria, confirm=True)
+                elif action == "clean":
+                    if body.get("confirm") is not True:
+                        raise HousekeepingError("清理需要确认")
+                    result = monitor.clean(criteria, confirm=True)
+                elif action == "restore":
+                    archive = _archive_path_for(
+                        monitor,
+                        str(body.get("archive") or ""),
+                    )
+                    result = monitor.restore(archive)
+                else:
+                    raise HousekeepingError(f"未知操作: {action or '(空)'}")
+            except (HousekeepingError, ValueError) as error:
+                self._send_json(
+                    status=400,
+                    payload={"error": "invalid_housekeeping_action", "message": str(error)},
+                )
+                return
+            report = monitor.refresh(force=True)
+            self._send_json(
+                status=200,
+                payload={
+                    "ok": True,
+                    "action": action,
+                    "result": result,
+                    "report": report,
+                    "preview": monitor.preview(criteria),
+                    "archives": list(monitor.restores()),
+                },
+            )
+
+        def _read_json_body(self) -> dict[str, Any]:
+            """读取并校验 JSON 请求体，限制大小和内容类型。"""
+
+            content_type = (
+                (self.headers.get("Content-Type") or "")
+                .split(";")[0]
+                .strip()
+                .lower()
+            )
+            if content_type != "application/json":
+                raise AlertStoreError("请求体必须是 application/json")
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError as error:
+                raise AlertStoreError("Content-Length 非法") from error
+            if length <= 0 or length > _MAX_REQUEST_BYTES:
+                raise AlertStoreError("请求体大小非法")
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise AlertStoreError(f"请求体不是合法 JSON: {error}") from error
+            if not isinstance(payload, dict):
+                raise AlertStoreError("请求体顶层必须是 JSON 对象")
+            return payload
 
         def log_message(self, format: str, *args: object) -> None:
             """把 HTTP 访问日志交给监控器日志，不污染标准输出。"""

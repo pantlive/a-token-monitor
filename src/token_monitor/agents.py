@@ -12,7 +12,7 @@ from typing import Sequence
 
 
 # 中文注释：监控器自身命令行里会出现这些标记，不能当成被监控的 Codex。
-_MONITOR_MARKERS = ("codex_reset_monitor", "codex-reset-monitor")
+_MONITOR_MARKERS = ("token_monitor", "token-monitor")
 
 _INTERPRETERS = {
     "node",
@@ -47,6 +47,9 @@ _AGENT_BINARIES = {
     "dsh": "dsh",
     "deepseek-harness": "dsh",
     "deepseek": "dsh",
+    "command-code": "command-code",
+    "commandcode": "command-code",
+    "cmdc": "command-code",
     "claude": "claude",
     "opencode": "opencode",
     "cursor-agent": "cursor",
@@ -61,6 +64,7 @@ PRODUCT_LABELS = {
     "grok": "Grok CLI",
     "kimi": "Kimi Code",
     "dsh": "DeepSeek Harness",
+    "command-code": "Command Code",
     "claude": "Claude Code",
     "opencode": "OpenCode",
     "cursor": "Cursor Agent",
