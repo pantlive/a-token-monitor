@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from codex_reset_monitor.accounts import build_account_specs
-from codex_reset_monitor.cli import build_parser, main
-from codex_reset_monitor.quota import QuotaSnapshot, QuotaWindow
+from token_monitor.accounts import build_account_specs
+from token_monitor.cli import build_parser, main
+from token_monitor.quota import QuotaSnapshot, QuotaWindow
 
 
 class CliTests(unittest.TestCase):
@@ -201,13 +201,13 @@ class CliTests(unittest.TestCase):
                 raw_limit_ids=("kimi",),
             )
             with (
-                mock.patch("codex_reset_monitor.cli._accounts", return_value=()),
+                mock.patch("token_monitor.cli._accounts", return_value=()),
                 mock.patch(
-                    "codex_reset_monitor.cli.resolve_grok_homes",
+                    "token_monitor.cli.resolve_grok_homes",
                     return_value=(),
                 ),
                 mock.patch(
-                    "codex_reset_monitor.cli.read_kimi_quota",
+                    "token_monitor.cli.read_kimi_quota",
                     return_value=snapshot,
                 ),
             ):
@@ -234,13 +234,13 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                mock.patch("codex_reset_monitor.cli._accounts", return_value=()),
+                mock.patch("token_monitor.cli._accounts", return_value=()),
                 mock.patch(
-                    "codex_reset_monitor.cli.resolve_grok_homes",
+                    "token_monitor.cli.resolve_grok_homes",
                     return_value=(),
                 ),
                 mock.patch(
-                    "codex_reset_monitor.cli.read_kimi_quota",
+                    "token_monitor.cli.read_kimi_quota",
                     return_value=None,
                 ),
             ):

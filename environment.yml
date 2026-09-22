@@ -1,4 +1,4 @@
-name: codex-reset-monitor
+name: token-monitor
 channels:
   - conda-forge
 dependencies:

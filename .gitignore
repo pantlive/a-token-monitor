@@ -2,5 +2,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .ruff_cache/
+.token-monitor/
 .codex-reset-monitor/
 .venv/

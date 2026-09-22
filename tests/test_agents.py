@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from codex_reset_monitor.agents import identify_agent, product_label
+from token_monitor.agents import identify_agent, product_label
 
 
 class AgentIdentificationTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class AgentIdentificationTests(unittest.TestCase):
     def test_ignores_the_monitor_process_itself(self) -> None:
         self.assertIsNone(
             identify_agent(
-                ("python", "-m", "codex_reset_monitor", "daemon"),
+                ("python", "-m", "token_monitor", "daemon"),
                 "python",
             )
         )

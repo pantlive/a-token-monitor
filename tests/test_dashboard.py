@@ -10,19 +10,19 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from codex_reset_monitor.dashboard import (
+from token_monitor.dashboard import (
     DashboardConfig,
     DashboardServer,
     build_multi_dashboard_state,
 )
-from codex_reset_monitor.multi_models import (
+from token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
     TrackedSession,
 )
-from codex_reset_monitor.quota import QuotaSnapshot, QuotaWindow
-from codex_reset_monitor.registry import MultiSessionRegistry
-from codex_reset_monitor.usage import UsageAggregator
+from token_monitor.quota import QuotaSnapshot, QuotaWindow
+from token_monitor.registry import MultiSessionRegistry
+from token_monitor.usage import UsageAggregator
 
 
 class DashboardTests(unittest.TestCase):
@@ -339,7 +339,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "codex_reset_monitor.dashboard.read_kimi_quota",
+                    "token_monitor.dashboard.read_kimi_quota",
                     return_value=None,
                 ):
                     with urlopen(
@@ -486,7 +486,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "codex_reset_monitor.dashboard.read_kimi_quota",
+                    "token_monitor.dashboard.read_kimi_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -559,7 +559,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "codex_reset_monitor.dashboard.read_kimi_quota",
+                    "token_monitor.dashboard.read_kimi_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -677,11 +677,11 @@ class DashboardTests(unittest.TestCase):
             )
             with (
                 mock.patch(
-                    "codex_reset_monitor.dashboard.list_kimi_active_sessions",
+                    "token_monitor.dashboard.list_kimi_active_sessions",
                     return_value=(kimi_session,),
                 ),
                 mock.patch(
-                    "codex_reset_monitor.dashboard.list_dsh_active_sessions",
+                    "token_monitor.dashboard.list_dsh_active_sessions",
                     return_value=(dsh_session,),
                 ),
             ):

@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_reset_monitor.models import JobState, JobStatus
-from codex_reset_monitor.storage import StateError, StateStore
+from token_monitor.models import JobState, JobStatus
+from token_monitor.storage import StateError, StateStore
 
 
 class StateStoreTests(unittest.TestCase):

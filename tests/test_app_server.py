@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_reset_monitor.app_server import AppServerClient, AppServerConfig
+from token_monitor.app_server import AppServerClient, AppServerConfig
 
 
 class _FakeProcess:

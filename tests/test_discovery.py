@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_reset_monitor.discovery import JsonlSessionReader, ProcessScanner
+from token_monitor.discovery import JsonlSessionReader, ProcessScanner
 
 
 class DiscoveryTests(unittest.TestCase):

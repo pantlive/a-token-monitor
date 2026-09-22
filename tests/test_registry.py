@@ -7,13 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_reset_monitor.multi_models import (
+from token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
     TrackedSession,
 )
-from codex_reset_monitor.quota import QuotaSnapshot, QuotaWindow
-from codex_reset_monitor.registry import MultiSessionRegistry
+from token_monitor.quota import QuotaSnapshot, QuotaWindow
+from token_monitor.registry import MultiSessionRegistry
 
 
 class RegistryTests(unittest.TestCase):
