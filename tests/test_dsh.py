@@ -7,15 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_reset_monitor.dsh import (
+from token_monitor.dsh import (
     list_dsh_active_sessions,
     parse_dsh_projcache,
     read_dsh_account,
     read_dsh_quota,
     resolve_dsh_homes,
 )
-from codex_reset_monitor.registry import MultiSessionRegistry
-from codex_reset_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
+from token_monitor.registry import MultiSessionRegistry
+from token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 
 class DshAccountTests(unittest.TestCase):

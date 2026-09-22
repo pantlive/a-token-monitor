@@ -9,8 +9,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codex_reset_monitor.registry import MultiSessionRegistry
-from codex_reset_monitor.usage import (
+from token_monitor.registry import MultiSessionRegistry
+from token_monitor.usage import (
     TokenUsage,
     UsageAggregator,
     _estimate_usage,

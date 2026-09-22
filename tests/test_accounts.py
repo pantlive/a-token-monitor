@@ -8,10 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_reset_monitor.accounts import build_account_specs
-from codex_reset_monitor.monitor import MonitorConfig
-from codex_reset_monitor.multi_account import MultiAccountMonitor
-from codex_reset_monitor.quota import QuotaSnapshot, QuotaWindow
+from token_monitor.accounts import build_account_specs
+from token_monitor.monitor import MonitorConfig
+from token_monitor.multi_account import MultiAccountMonitor
+from token_monitor.quota import QuotaSnapshot, QuotaWindow
 
 
 class _FakeAppServer:
@@ -94,7 +94,7 @@ class AccountTests(unittest.TestCase):
             )
             _FakeAppServer.configs = []
             with patch(
-                "codex_reset_monitor.monitor.AppServerClient",
+                "token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(

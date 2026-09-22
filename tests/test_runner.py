@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_reset_monitor.runner import CodexRunner, RunnerConfig
-from codex_reset_monitor.storage import StateStore
+from token_monitor.runner import CodexRunner, RunnerConfig
+from token_monitor.storage import StateStore
 
 
 class FakeProcess:
@@ -52,7 +52,7 @@ class RunnerTests(unittest.TestCase):
             runner = CodexRunner(store, RunnerConfig(reset_grace=0))
 
             with patch(
-                "codex_reset_monitor.runner.subprocess.Popen",
+                "token_monitor.runner.subprocess.Popen",
                 return_value=process,
             ) as popen:
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -109,7 +109,7 @@ class RunnerTests(unittest.TestCase):
             )
 
             with patch(
-                "codex_reset_monitor.runner.subprocess.Popen",
+                "token_monitor.runner.subprocess.Popen",
                 side_effect=[first_process, second_process],
             ) as popen:
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -152,7 +152,7 @@ class RunnerTests(unittest.TestCase):
             runner = CodexRunner(store, RunnerConfig(reset_grace=0))
 
             with patch(
-                "codex_reset_monitor.runner.subprocess.Popen",
+                "token_monitor.runner.subprocess.Popen",
                 return_value=process,
             ) as popen:
                 with contextlib.redirect_stdout(io.StringIO()):

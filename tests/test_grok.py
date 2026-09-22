@@ -7,14 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_reset_monitor.grok import (
+from token_monitor.grok import (
     parse_grok_log_chunk,
     read_grok_account,
     read_grok_quota,
     resolve_grok_homes,
 )
-from codex_reset_monitor.registry import MultiSessionRegistry
-from codex_reset_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
+from token_monitor.registry import MultiSessionRegistry
+from token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 
 class GrokUsageTests(unittest.TestCase):

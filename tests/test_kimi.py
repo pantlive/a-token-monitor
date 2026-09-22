@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from codex_reset_monitor import kimi as kimi_module
-from codex_reset_monitor.kimi import (
+from token_monitor import kimi as kimi_module
+from token_monitor.kimi import (
     _clear_quota_cache,
     kimi_wire_session_id,
     list_kimi_active_sessions,
@@ -23,8 +23,8 @@ from codex_reset_monitor.kimi import (
     read_kimi_quota,
     resolve_kimi_homes,
 )
-from codex_reset_monitor.registry import MultiSessionRegistry
-from codex_reset_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
+from token_monitor.registry import MultiSessionRegistry
+from token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 
 class KimiUsageTests(unittest.TestCase):

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from codex_reset_monitor.service import (
+from token_monitor.service import (
     SERVICE_NAME,
     ServiceConfig,
     ServiceError,
@@ -208,7 +208,7 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("UMask=0077", unit)
             self.assertNotIn(".codex-work", unit)
 
-    @patch("codex_reset_monitor.service._run_command", return_value=0)
+    @patch("token_monitor.service._run_command", return_value=0)
     def test_install_writes_files_and_enables_unit(
         self,
         run_command: Mock,

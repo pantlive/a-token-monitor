@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_reset_monitor.traffic import (
+from token_monitor.traffic import (
     SocketCounters,
     TrafficMonitor,
     TrafficThresholds,
@@ -157,7 +157,7 @@ class TrafficMonitorTests(unittest.TestCase):
                 root,
                 pid=30,
                 comm="python",
-                command=("python", "-m", "codex_reset_monitor", "daemon"),
+                command=("python", "-m", "token_monitor", "daemon"),
             )
             _write_process(
                 root,
