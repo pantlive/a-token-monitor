@@ -399,5 +399,113 @@ class ArchiveAndCleanTests(unittest.TestCase):
         self.assertEqual(monitor.latest()["observed_at"], 1_010.0)
 
 
+class HousekeepingTaskTests(unittest.TestCase):
+    """验证后台归档/清理任务和进度上报。"""
+
+    def test_background_archive_reports_progress_and_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            for index in range(4):
+                _old_session(
+                    home,
+                    f"2026060{index + 1}",
+                    f"{index:08d}-1111-4111-8111-111111111111",
+                    4096,
+                    days_old=100,
+                )
+            monitor = _monitor(root, home)
+
+            task = monitor.start_task(
+                "archive",
+                CleanupCriteria(older_than_days=30),
+            )
+            self.assertEqual(task["state"], "running")
+            self.assertEqual(task["action"], "archive")
+
+            deadline = time.time() + 10
+            latest = task
+            while time.time() < deadline:
+                current = monitor.task(task["id"])
+                if current is None or current["state"] != "running":
+                    latest = current
+                    break
+                latest = current
+                time.sleep(0.05)
+
+            remaining = monitor.sessions()
+            archives = monitor.restores()
+            tasks = monitor.tasks()
+
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["state"], "done")
+        self.assertEqual(latest["result"]["count"], 4)
+        self.assertEqual(latest["result"]["deleted"], 4)
+        self.assertEqual(latest["progress"]["phase"], "done")
+        self.assertEqual(remaining, ())
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(len(tasks), 1)
+
+    def test_background_clean_finishes_and_unknown_action_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(
+                home,
+                "20260601",
+                "bbbb0000-0000-4000-8000-000000000000",
+                1024,
+                days_old=100,
+            )
+            monitor = _monitor(root, home)
+
+            with self.assertRaises(HousekeepingError):
+                monitor.start_task("restore", CleanupCriteria())
+            task = monitor.start_task("clean", CleanupCriteria(older_than_days=30))
+            deadline = time.time() + 10
+            current = monitor.task(task["id"])
+            while (
+                time.time() < deadline
+                and current is not None
+                and current["state"] == "running"
+            ):
+                time.sleep(0.05)
+                current = monitor.task(task["id"])
+            missing = monitor.task("missing")
+
+        self.assertIsNotNone(current)
+        self.assertEqual(current["state"], "done")
+        self.assertEqual(current["result"]["deleted"], 1)
+        self.assertIsNone(missing)
+
+    def test_progress_callback_is_optional_and_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(
+                home,
+                "20260601",
+                "aaaa0000-0000-4000-8000-000000000000",
+                2048,
+                days_old=100,
+            )
+            monitor = _monitor(root, home)
+            events: list[dict[str, object]] = []
+
+            def broken(progress: dict[str, object]) -> None:
+                events.append(dict(progress))
+                raise RuntimeError("进度回调坏了")
+
+            result = monitor.archive(
+                CleanupCriteria(older_than_days=30),
+                confirm=True,
+                progress=broken,
+            )
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertTrue(events)
+        self.assertEqual({event["phase"] for event in events}, {"compress", "verify", "delete"})
+
+
 if __name__ == "__main__":
     unittest.main()

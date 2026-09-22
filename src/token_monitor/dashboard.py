@@ -52,6 +52,7 @@ from .usage import (
     DEFAULT_SEARCH_DAYS,
     SessionSwitchThresholds,
     UsageAggregator,
+    search_since_days,
 )
 
 
@@ -2036,28 +2037,91 @@ _DASHBOARD_HTML = r"""<!doctype html>
       }
     }
   };
+  const housekeepingNote = (text) => {
+    const container = document.getElementById('housekeeping-actions');
+    if (!container) return null;
+    const note = document.createElement('div');
+    note.className = 'alert-banner info action-result';
+    note.id = 'housekeeping-task-note';
+    const previous = document.getElementById('housekeeping-task-note');
+    if (previous) {
+      previous.replaceWith(note);
+    } else {
+      container.prepend(note);
+    }
+    note.textContent = text;
+    return note;
+  };
+  const pollHousekeepingTask = async (taskId, action) => {
+    const label = action === 'archive' ? '归档' : '清理';
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+      let payload = null;
+      try {
+        const response = await fetch(`/api/housekeeping?task=${taskId}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        payload = await response.json();
+      } catch (error) {
+        housekeepingNote(`${label}进度查询失败：${error.message}`);
+        return;
+      }
+      const task = payload.task;
+      if (!task) {
+        housekeepingNote(`${label}任务已结束（任务记录已被清理）。`);
+        refreshHousekeeping();
+        return;
+      }
+      const progress = task.progress || {};
+      if (task.state === 'running') {
+        const phase = progress.phase === 'compress' ? '压缩'
+          : progress.phase === 'verify' ? '校验归档'
+            : progress.phase === 'delete' ? '删除原文件'
+              : '准备文件清单';
+        const percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+        housekeepingNote(`${label}进行中：${phase} ${progress.done}/${progress.total}（${percent}%），已处理 ${formatDataSize(progress.bytes_done || 0)} / ${formatDataSize(progress.total_bytes || 0)}。`);
+        continue;
+      }
+      if (task.state === 'failed') {
+        housekeepingNote(`${label}失败：${task.error || '未知原因'}`);
+        refreshHousekeeping();
+        return;
+      }
+      const result = task.result || {};
+      housekeepingNote(`${label}完成：${result.count || 0} 个文件，释放 ${formatDataSize(result.bytes || 0)}${result.archive ? `，归档 ${String(result.archive).split('/').pop()}` : ''}。`);
+      refreshHousekeeping();
+      return;
+    }
+    housekeepingNote(`${label}仍在后台执行，可稍后刷新查看结果。`);
+    refreshHousekeeping();
+  };
   const mutateHousekeeping = async (action, body) => {
     const criteria = housekeepingCriteria();
     const container = document.getElementById('housekeeping-actions');
+    const background = action === 'archive' || action === 'clean';
     try {
       const response = await fetch('/api/housekeeping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, days: criteria.days, min_size_mb: criteria.min_size_mb, confirm: true, ...body })
+        body: JSON.stringify({ action, days: criteria.days, min_size_mb: criteria.min_size_mb, confirm: true, async: background, ...body })
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      if (background && payload.task) {
+        housekeepingNote(`${action === 'archive' ? '归档' : '清理'}已提交到后台执行…`);
+        await pollHousekeepingTask(payload.task.id, action);
+        return;
+      }
       const changed = (payload.result && payload.result.count) || 0;
       const freed = (payload.result && payload.result.bytes) || 0;
       housekeepingState = { ...payload };
       if (latestState) renderHousekeeping(latestState);
       renderHousekeepingActions();
-      const note = document.createElement('div');
-      note.className = 'alert-banner info action-result';
-      note.textContent = action === 'restore'
-        ? `已恢复 ${payload.result.restored} 个会话文件到 ${payload.result.destination}。`
-        : `已完成${action === 'archive' ? '归档' : '清理'}：${changed} 个文件，释放 ${formatDataSize(freed)}。`;
-      container.prepend(note);
+      housekeepingNote(
+        action === 'restore'
+          ? `已恢复 ${payload.result.restored} 个会话文件到 ${payload.result.destination}。`
+          : `已完成${action === 'archive' ? '归档' : '清理'}：${changed} 个文件，释放 ${formatDataSize(freed)}。`
+      );
     } catch (error) {
       if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">操作失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
     }
@@ -2221,12 +2285,12 @@ _DASHBOARD_HTML = r"""<!doctype html>
   document.getElementById('housekeeping-preview-button')?.addEventListener('click', refreshHousekeeping);
   document.getElementById('housekeeping-archive-button')?.addEventListener('click', () => {
     const criteria = housekeepingCriteria();
-    if (!window.confirm(`确认把 ${criteria.days} 天前、非活动的 Codex 会话压缩归档（tar.gz）并删除原文件？归档可在本页恢复。`)) return;
+    if (!window.confirm(`确认把 ${criteria.days} 天前、非活动的 Codex 会话压缩归档（tar.gz）并删除原文件？归档在后台执行，可在本页恢复。`)) return;
     mutateHousekeeping('archive');
   });
   document.getElementById('housekeeping-clean-button')?.addEventListener('click', () => {
     const criteria = housekeepingCriteria();
-    if (!window.confirm(`确认直接删除 ${criteria.days} 天前、非活动的 Codex 会话文件？此操作不可撤销，建议先归档。`)) return;
+    if (!window.confirm(`确认直接删除 ${criteria.days} 天前、非活动的 Codex 会话文件？删除在后台执行且不可撤销，建议先归档。`)) return;
     mutateHousekeeping('clean');
   });
   ['housekeeping-days', 'housekeeping-min-size'].forEach((id) => {
@@ -2913,7 +2977,7 @@ def _usage_search_arguments(raw_query: str) -> dict[str, Any]:
     if explicit_from is not None or explicit_to is not None:
         since, until = explicit_from, explicit_to
     elif days > 0:
-        since = time.time() - days * 86400
+        since = search_since_days(days)
     group = (single("group") or "session").lower()
     sort = (single("sort") or "recent").lower()
     return {
@@ -3101,10 +3165,12 @@ def _housekeeping_arguments(raw_query: str) -> dict[str, Any]:
 
     days = _bounded_int(single("days"), maximum=3650) or 30
     min_size_mb = _bounded_float(single("min_size_mb"), maximum=1_000_000) or 0.0
+    task = single("task")
     return {
         "days": days,
         "min_bytes": int(min_size_mb * 1024 * 1024),
         "refresh": single("refresh") not in {None, "0", "false"},
+        "task": task if task and task.isalnum() else None,
     }
 
 
@@ -3465,6 +3531,17 @@ def _make_handler(
                     return
                 try:
                     arguments = _housekeeping_arguments(urlsplit(self.path).query)
+                    if arguments["task"]:
+                        self._send_json(
+                            status=200,
+                            payload={
+                                "updated_at": time.time(),
+                                "available": True,
+                                "task": housekeeping.task(arguments["task"]),
+                                "tasks": list(housekeeping.tasks()),
+                            },
+                        )
+                        return
                     criteria = CleanupCriteria(
                         older_than_days=arguments["days"],
                         min_bytes=arguments["min_bytes"],
@@ -3488,6 +3565,7 @@ def _make_handler(
                         "report": report,
                         "preview": preview,
                         "archives": list(housekeeping.restores()),
+                        "tasks": list(housekeeping.tasks()),
                     },
                 )
                 return
@@ -3704,6 +3782,38 @@ def _make_handler(
                     older_than_days=days,
                     min_bytes=max(0, min_bytes),
                 )
+                if action == "archive" and body.get("async") is True:
+                    if body.get("confirm") is not True:
+                        raise HousekeepingError("归档需要确认")
+                    task = monitor.start_task("archive", criteria)
+                    self._send_json(
+                        status=200,
+                        payload={
+                            "ok": True,
+                            "action": action,
+                            "task": task,
+                            "report": monitor.latest(),
+                            "preview": monitor.preview(criteria),
+                            "archives": list(monitor.restores()),
+                        },
+                    )
+                    return
+                if action == "clean" and body.get("async") is True:
+                    if body.get("confirm") is not True:
+                        raise HousekeepingError("清理需要确认")
+                    task = monitor.start_task("clean", criteria)
+                    self._send_json(
+                        status=200,
+                        payload={
+                            "ok": True,
+                            "action": action,
+                            "task": task,
+                            "report": monitor.latest(),
+                            "preview": monitor.preview(criteria),
+                            "archives": list(monitor.restores()),
+                        },
+                    )
+                    return
                 if action == "archive":
                     if body.get("confirm") is not True:
                         raise HousekeepingError("归档需要确认")

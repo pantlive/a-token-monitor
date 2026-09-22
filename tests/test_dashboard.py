@@ -1494,6 +1494,53 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertEqual(escaping.exception.code, 400)
         self.assertEqual(unknown.exception.code, 400)
 
+    def test_async_archive_returns_task_and_progress(self) -> None:
+        """归档接口支持后台任务，返回可轮询的任务 id 和进度。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with self._post(
+                    f"{base_url}/api/housekeeping",
+                    {
+                        "action": "archive",
+                        "days": 30,
+                        "confirm": True,
+                        "async": True,
+                    },
+                ) as response:
+                    started = json.load(response)
+                task_id = started["task"]["id"]
+                deadline = time.time() + 10
+                status = None
+                while time.time() < deadline:
+                    with urlopen(
+                        f"{base_url}/api/housekeeping?task={task_id}",
+                        timeout=5,
+                    ) as response:
+                        status = json.load(response)
+                    if status["task"]["state"] != "running":
+                        break
+                    time.sleep(0.05)
+                with urlopen(
+                    f"{base_url}/api/housekeeping?days=30",
+                    timeout=5,
+                ) as response:
+                    refreshed = json.load(response)
+            finally:
+                server.close()
+
+        self.assertEqual(started["task"]["state"], "running")
+        self.assertIsNotNone(status)
+        self.assertEqual(status["task"]["state"], "done")
+        self.assertEqual(status["task"]["result"]["count"], 1)
+        self.assertTrue(status["tasks"])
+        self.assertEqual(refreshed["preview"]["count"], 0)
+        self.assertEqual(len(refreshed["archives"]), 1)
+
     def test_page_contains_housekeeping_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -15,6 +16,8 @@ from token_monitor.usage import (
     TokenUsage,
     UsageAggregator,
     _estimate_usage,
+    _UsageIndexStore,
+    search_since_days,
 )
 
 
@@ -1720,6 +1723,175 @@ class SessionUsageTests(unittest.TestCase):
             SessionSwitchThresholds(turn_warn=5, context_warn_tokens=10).to_dict(),
             {"turn_warn": 5, "context_warn_tokens": 10},
         )
+
+
+class UsageSearchAggregationTests(unittest.TestCase):
+    """验证 SQL 聚合路径与逐条扫描路径结果一致。"""
+
+    def _aggregator(self, root: Path) -> UsageAggregator:
+        """建立一个含长/短上下文与已定价/未定价模型的索引。"""
+
+        home = root / ".codex"
+        session = (
+            home
+            / "sessions"
+            / "2026"
+            / "08"
+            / "27"
+            / "rollout-2026-08-27T01-00-00-99999999-9999-4999-8999-999999999999.jsonl"
+        )
+        session.parent.mkdir(parents=True, exist_ok=True)
+        events = [
+            {
+                "timestamp": "2026-08-27T01:00:00Z",
+                "type": "session_meta",
+                "payload": {"cwd": "/home/dev/omega"},
+            },
+            # 短上下文：gpt-5.6-luna（阈值取全局 272k）
+            self._usage_event("2026-08-27T02:00:00Z", "gpt-5.6-luna", 100_000, 150_000),
+            # 长上下文：单条就超过模型阈值
+            self._usage_event("2026-08-27T03:00:00Z", "gpt-5.6-luna", 700_000, 750_000),
+            # 未定价模型
+            self._usage_event("2026-08-27T04:00:00Z", "codex-auto-review", 800_000, 810_000),
+        ]
+        session.write_text(
+            "\n".join(json.dumps(event) for event in events) + "\n",
+            encoding="utf-8",
+        )
+        aggregator = UsageAggregator(
+            discovery_interval=0.01,
+            refresh_interval=0.01,
+            cache_path=root / "state" / "usage-index.sqlite3",
+        )
+        aggregator.snapshot(
+            {"codex": MultiSessionRegistry(root / "state")},
+            account_metadata={
+                "codex": {
+                    "account_id": "account-personal",
+                    "profile_name": "codex",
+                    "codex_home": str(home),
+                }
+            },
+            now=_timestamp("2026-08-27T12:00:00Z"),
+        )
+        return aggregator
+
+    @staticmethod
+    def _usage_event(
+        when: str,
+        model: str,
+        total: int,
+        cached: int,
+    ) -> dict[str, object]:
+        return {
+            "timestamp": when,
+            "type": "event_msg",
+            "payload": {
+                "thread_settings": {"model": model},
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": total,
+                        "cached_input_tokens": cached,
+                        "output_tokens": 1_000,
+                        "total_tokens": total,
+                    }
+                },
+            },
+        }
+
+    def test_grouped_and_scanned_paths_agree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+            store = aggregator._persistent
+            assert store is not None
+
+            self.assertTrue(store.supports_json_aggregation())
+            self.assertFalse(store.has_pending_long_context())
+            grouped = aggregator.search(group="session")
+            scanned = aggregator._search_scan(store, group="session")
+            by_model_grouped = aggregator.search(group="model", sort="tokens")
+            by_model_scanned = aggregator._search_scan(
+                store,
+                group="model",
+                sort="tokens",
+            )
+
+        self.assertEqual(
+            grouped["totals"]["usage"],
+            scanned["totals"]["usage"],
+        )
+        self.assertEqual(
+            grouped["totals"]["total_tokens"],
+            scanned["totals"]["total_tokens"],
+        )
+        self.assertEqual(
+            grouped["totals"]["records"],
+            scanned["totals"]["records"],
+        )
+        self.assertEqual(
+            [row["total_tokens"] for row in grouped["rows"]],
+            [row["total_tokens"] for row in scanned["rows"]],
+        )
+        self.assertEqual(
+            [row["estimated_cost_usd"] for row in grouped["rows"]],
+            [row["estimated_cost_usd"] for row in scanned["rows"]],
+        )
+        self.assertEqual(
+            [row["estimated_cost_usd"] for row in by_model_grouped["rows"]],
+            [row["estimated_cost_usd"] for row in by_model_scanned["rows"]],
+        )
+        # 长上下文分桶必须保留：luna 的两条记录一条短路一条长路
+        luna = next(
+            row for row in by_model_grouped["rows"] if row["models"] == ["gpt-5.6-luna"]
+        )
+        self.assertIsNotNone(luna["estimated_cost_usd"])
+
+    def test_search_results_are_cached_and_expire(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            first = aggregator.search(group="session")
+            second = aggregator.search(group="session")
+            aggregator._search_cache.clear()
+            third = aggregator.search(group="session")
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, third)
+        self.assertEqual(first["totals"], third["totals"])
+
+    def test_derived_since_is_aligned_for_cache_hits(self) -> None:
+        """同一「近 N 天」筛选取到的起始时间必须一致，否则缓存永不命中。"""
+
+        first = search_since_days(30, now=1_700_000_010.0)
+        second = search_since_days(30, now=1_700_000_020.0)
+        third = search_since_days(30, now=1_700_000_040.0)
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(second, third)
+        self.assertEqual(third - first, 60.0)
+
+    def test_legacy_rows_are_backfilled_with_long_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aggregator = self._aggregator(root)
+            store = aggregator._persistent
+            assert store is not None
+            index = root / "state" / "usage-index.sqlite3"
+
+            # 模拟旧索引：把标记清空后重新打开，应当自动回填。
+            connection = sqlite3.connect(index)
+            connection.execute("UPDATE usage_delta SET long_context = NULL")
+            connection.commit()
+            connection.close()
+            reopened = _UsageIndexStore(index)
+            pending = reopened.has_pending_long_context()
+            flags = sqlite3.connect(index).execute(
+                "SELECT long_context FROM usage_delta ORDER BY rowid"
+            ).fetchall()
+
+        self.assertFalse(pending)
+        # 第一条 100k（短）、第二条增量 600k（长）、第三条未定价模型（按短路处理）
+        self.assertEqual([row[0] for row in flags], [0, 1, 0])
 
 
 if __name__ == "__main__":
