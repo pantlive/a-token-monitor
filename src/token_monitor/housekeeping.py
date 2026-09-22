@@ -18,6 +18,7 @@ import os
 import tarfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -36,6 +37,8 @@ _TOP_CHILDREN = 6
 _REFRESH_INTERVAL_SECONDS = 60.0
 _SESSION_GLOB = "rollout-*.jsonl"
 _ARCHIVE_PREFIX = "codex-sessions"
+# 中文注释：后台任务只保留最近若干条，供网页轮询进度。
+_MAX_TASKS = 10
 _MANIFEST_SUFFIX = ".manifest.json"
 
 
@@ -233,6 +236,8 @@ class HousekeepingMonitor:
         self.refresh_interval = float(refresh_interval)
         self.logger = logger or logging.getLogger(__name__)
         self._lock = threading.Lock()
+        self._task_lock = threading.Lock()
+        self._tasks: dict[str, dict[str, Any]] = {}
         self._report: dict[str, Any] | None = None
         self._reported_at = 0.0
 
@@ -274,7 +279,7 @@ class HousekeepingMonitor:
         directories: list[dict[str, Any]] = []
         cleanable: list[SessionFile] = []
         for target in self.targets:
-            size, files = _walk_usage(target.path)
+            size, files, top_children = _walk_usage(target.path)
             sessions = scan_session_files(target)
             cleanable.extend(sessions)
             directories.append(
@@ -284,7 +289,7 @@ class HousekeepingMonitor:
                     "files": files,
                     "session_bytes": sum(item.size for item in sessions),
                     "session_files": len(sessions),
-                    "top_children": _top_children(target.path),
+                    "top_children": top_children,
                     "exists": True,
                 }
             )
@@ -442,6 +447,7 @@ class HousekeepingMonitor:
         now: float | None = None,
         confirm: bool = False,
         usage: Mapping[str, SessionUsage] | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """把符合条件的会话打包成 tar.gz 后删除原文件。"""
 
@@ -466,8 +472,26 @@ class HousekeepingMonitor:
         temporary = archive_path.with_name(archive_path.name + ".tmp")
         try:
             with tarfile.open(temporary, "w:gz") as handle:
-                for item in plan.files:
+                for index, item in enumerate(plan.files, start=1):
                     handle.add(str(item.path), arcname=str(item.path).lstrip("/"))
+                    _report_progress(
+                        progress,
+                        phase="compress",
+                        done=index,
+                        total=plan.count,
+                        bytes_done=sum(
+                            entry.size for entry in plan.files[:index]
+                        ),
+                        total_bytes=plan.total_bytes,
+                    )
+            _report_progress(
+                progress,
+                phase="verify",
+                done=plan.count,
+                total=plan.count,
+                bytes_done=plan.total_bytes,
+                total_bytes=plan.total_bytes,
+            )
             missing = _missing_members(temporary, plan.files)
             if missing:
                 raise HousekeepingError(
@@ -478,7 +502,7 @@ class HousekeepingMonitor:
         except (OSError, tarfile.TarError) as error:
             temporary.unlink(missing_ok=True)
             raise HousekeepingError(f"归档失败: {error}") from error
-        deleted, failed = _delete_files(plan.files)
+        deleted, failed = _delete_files(plan.files, progress=progress, total=plan.count)
         manifest = {
             "created_at": observed_at,
             "action": "archive",
@@ -521,6 +545,7 @@ class HousekeepingMonitor:
         *,
         now: float | None = None,
         confirm: bool = False,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """直接删除符合条件的会话文件；操作前必须显式确认。"""
 
@@ -528,7 +553,11 @@ class HousekeepingMonitor:
             raise HousekeepingError("清理会删除会话文件，需要显式确认")
         observed_at = time.time() if now is None else float(now)
         plan = self.plan(criteria, now=observed_at)
-        deleted, failed = _delete_files(plan.files)
+        deleted, failed = _delete_files(
+            plan.files,
+            progress=progress,
+            total=plan.count,
+        )
         if plan.count:
             self.logger.info(
                 "已清理 %d 个会话文件（%s）",
@@ -605,6 +634,125 @@ class HousekeepingMonitor:
             "manifest": manifest if manifest is not None else None,
         }
 
+    # ------------------------------------------------------- 后台任务
+
+    def start_task(
+        self,
+        action: str,
+        criteria: CleanupCriteria | None = None,
+        *,
+        now: float | None = None,
+        usage: Mapping[str, SessionUsage] | None = None,
+    ) -> dict[str, Any]:
+        """在后台线程执行归档或清理，立即返回可轮询的任务信息。"""
+
+        if action not in {"archive", "clean"}:
+            raise HousekeepingError(f"未知操作: {action}")
+        selected = criteria or CleanupCriteria()
+        task_id = uuid.uuid4().hex[:12]
+        task: dict[str, Any] = {
+            "id": task_id,
+            "action": action,
+            "state": "running",
+            "criteria": selected.to_dict(),
+            "started_at": time.time() if now is None else float(now),
+            "finished_at": None,
+            "progress": {
+                "phase": "plan",
+                "done": 0,
+                "total": 0,
+                "bytes_done": 0,
+                "total_bytes": 0,
+            },
+            "result": None,
+            "error": None,
+        }
+        with self._task_lock:
+            self._tasks[task_id] = task
+            self._trim_tasks_locked()
+
+        def update(progress: dict[str, Any]) -> None:
+            with self._task_lock:
+                entry = self._tasks.get(task_id)
+                if entry is not None:
+                    entry["progress"] = progress
+
+        def run() -> None:
+            try:
+                if action == "archive":
+                    result = self.archive(
+                        selected,
+                        now=task["started_at"],
+                        confirm=True,
+                        usage=usage,
+                        progress=update,
+                    )
+                else:
+                    result = self.clean(
+                        selected,
+                        now=task["started_at"],
+                        confirm=True,
+                        progress=update,
+                    )
+            except (HousekeepingError, OSError, ValueError) as error:
+                with self._task_lock:
+                    entry = self._tasks.get(task_id)
+                    if entry is not None:
+                        entry["state"] = "failed"
+                        entry["error"] = str(error)
+                        entry["finished_at"] = time.time()
+                return
+            with self._task_lock:
+                entry = self._tasks.get(task_id)
+                if entry is not None:
+                    entry["state"] = "done"
+                    entry["result"] = result
+                    entry["finished_at"] = time.time()
+                    entry["progress"] = {
+                        "phase": "done",
+                        "done": result.get("deleted", result.get("count", 0)),
+                        "total": result.get("count", 0),
+                        "bytes_done": result.get("bytes", 0),
+                        "total_bytes": result.get("bytes", 0),
+                    }
+
+        threading.Thread(
+            target=run,
+            name=f"token-monitor-{action}",
+            daemon=True,
+        ).start()
+        return dict(task)
+
+    def task(self, task_id: str) -> dict[str, Any] | None:
+        """返回后台任务的最新状态。"""
+
+        with self._task_lock:
+            entry = self._tasks.get(task_id)
+            return dict(entry) if entry is not None else None
+
+    def tasks(self) -> tuple[dict[str, Any], ...]:
+        """返回最近的后台任务（新到旧）。"""
+
+        with self._task_lock:
+            entries = sorted(
+                self._tasks.values(),
+                key=lambda item: float(item["started_at"]),
+                reverse=True,
+            )
+            return tuple(dict(entry) for entry in entries)
+
+    def _trim_tasks_locked(self) -> None:
+        """只保留最近的任务，避免长时间运行后无限增长。"""
+
+        if len(self._tasks) <= _MAX_TASKS:
+            return
+        ordered = sorted(
+            self._tasks,
+            key=lambda item: float(self._tasks[item]["started_at"]),
+        )
+        for stale in ordered[: len(self._tasks) - _MAX_TASKS]:
+            self._tasks.pop(stale, None)
+
     def _archive_paths(self, now: float) -> tuple[Path, Path]:
         """返回本次归档的文件名，避免同一秒内互相覆盖。"""
 
@@ -675,15 +823,23 @@ def scan_session_files(target: AuditTarget) -> tuple[SessionFile, ...]:
     return tuple(files)
 
 
-def _walk_usage(root: Path, max_entries: int = 500_000) -> tuple[int, int]:
-    """递归统计目录占用和文件数；不跟随符号链接。"""
+def _walk_usage(
+    root: Path,
+    max_entries: int = 500_000,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """一次遍历同时得到总占用、文件数和占用最大的若干一级子目录/文件。
+
+    旧实现先整树遍历一次、再对每个一级子目录各遍历一次，等于走两遍；
+    这里按「一级子目录」归账，一次遍历就能给出排行榜。
+    """
 
     total = 0
     files = 0
     seen = 0
-    stack = [root]
+    children: dict[str, int] = {}
+    stack: list[tuple[Path, str | None]] = [(root, None)]
     while stack:
-        current = stack.pop()
+        current, top_name = stack.pop()
         try:
             entries = list(os.scandir(current))
         except OSError:
@@ -691,56 +847,93 @@ def _walk_usage(root: Path, max_entries: int = 500_000) -> tuple[int, int]:
         for entry in entries:
             seen += 1
             if seen > max_entries:
-                return total, files
+                return total, files, _rank_children(children)
+            name = top_name if top_name is not None else entry.name
             try:
                 if entry.is_symlink():
                     continue
                 if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
+                    stack.append((Path(entry.path), name))
                     continue
-                total += entry.stat(follow_symlinks=False).st_size
-                files += 1
+                size = entry.stat(follow_symlinks=False).st_size
             except OSError:
                 continue
-    return total, files
+            total += size
+            files += 1
+            children[name] = children.get(name, 0) + size
+    return total, files, _rank_children(children)
 
 
-def _top_children(root: Path, limit: int = _TOP_CHILDREN) -> list[dict[str, Any]]:
-    """返回占用最大的若干一级子目录/文件。"""
+def _rank_children(
+    children: Mapping[str, int],
+    limit: int = _TOP_CHILDREN,
+) -> list[dict[str, Any]]:
+    """按占用排序一级子目录，返回展示用列表。"""
 
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return []
-    items: list[dict[str, Any]] = []
-    for entry in entries:
-        try:
-            if entry.is_symlink():
-                continue
-            if entry.is_dir(follow_symlinks=False):
-                size, _ = _walk_usage(Path(entry.path))
-            else:
-                size = entry.stat(follow_symlinks=False).st_size
-        except OSError:
-            continue
-        if size > 0:
-            items.append({"name": entry.name, "bytes": size})
-    items.sort(key=lambda item: -int(item["bytes"]))
+    items = [
+        {"name": name, "bytes": size}
+        for name, size in children.items()
+        if size > 0
+    ]
+    items.sort(key=lambda item: (-int(item["bytes"]), str(item["name"])))
     return items[:limit]
 
 
-def _delete_files(files: Sequence[SessionFile]) -> tuple[list[str], list[dict[str, str]]]:
+def _delete_files(
+    files: Sequence[SessionFile],
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    total: int | None = None,
+) -> tuple[list[str], list[dict[str, str]]]:
     """删除文件，返回成功路径和失败原因。"""
 
     deleted: list[str] = []
     failed: list[dict[str, str]] = []
-    for item in files:
+    total_count = total if total is not None else len(files)
+    total_bytes = sum(item.size for item in files)
+    bytes_done = 0
+    for index, item in enumerate(files, start=1):
         try:
             item.path.unlink()
             deleted.append(str(item.path))
         except OSError as error:
             failed.append({"path": str(item.path), "error": str(error)})
+        bytes_done += item.size
+        _report_progress(
+            progress,
+            phase="delete",
+            done=index,
+            total=total_count,
+            bytes_done=bytes_done,
+            total_bytes=total_bytes,
+        )
     return deleted, failed
+
+
+def _report_progress(
+    progress: Callable[[dict[str, Any]], None] | None,
+    *,
+    phase: str,
+    done: int,
+    total: int,
+    bytes_done: int,
+    total_bytes: int,
+) -> None:
+    """把进度回调包在保护里：回调失败不能影响归档本身。"""
+
+    if progress is None:
+        return
+    try:
+        progress(
+            {
+                "phase": phase,
+                "done": done,
+                "total": total,
+                "bytes_done": bytes_done,
+                "total_bytes": total_bytes,
+            }
+        )
+    except Exception:  # noqa: BLE001 - 进度回调只是展示用途
+        return
 
 
 def _missing_members(archive: Path, files: Sequence[SessionFile]) -> set[str]:

@@ -72,6 +72,7 @@ from .usage import (
     SessionSwitchThresholds,
     SessionUsage,
     UsageAggregator,
+    search_since_days,
 )
 
 
@@ -1579,7 +1580,7 @@ def _usage_search_bounds(args: argparse.Namespace) -> tuple[float | None, float 
             _cli_day_end(args.date_to),
         )
     if args.days and args.days > 0:
-        return time.time() - args.days * 86400.0, None
+        return search_since_days(args.days), None
     return None, None
 
 

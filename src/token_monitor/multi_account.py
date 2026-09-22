@@ -108,6 +108,7 @@ class MultiAccountMonitor:
         self._advice_checked_at = 0.0
         self._advice_logged: dict[str, float] = {}
         self._advice_aggregator: UsageAggregator | None = None
+        self._index_thread: threading.Thread | None = None
         self._dashboard: DashboardServer | None = None
         self._stop_event = threading.Event()
         self._started = False
@@ -176,15 +177,11 @@ class MultiAccountMonitor:
                 cache_path=self.state_dir / "usage-index.sqlite3"
             )
             self._advice_aggregator = aggregator
+        # 中文注释：没有 Dashboard 时由后台线程保持用量索引可用，
+        # 主循环只读内存/索引，不做磁盘 I/O。
+        if self._dashboard is None:
+            self._refresh_index_in_background(aggregator, now)
         try:
-            # 中文注释：没有 Dashboard 时由这里保持用量索引可用，
-            # 否则长会话提醒拿不到轮数和上下文。
-            if self._dashboard is None:
-                aggregator.refresh_index(
-                    self.registries,
-                    self.dashboard_account_metadata,
-                    now,
-                )
             usages = aggregator.session_usages(paths)
         except (OSError, ValueError):
             return []
@@ -192,6 +189,35 @@ class MultiAccountMonitor:
             usage.reminder(self.session_thresholds) for usage in usages.values()
         ]
         return [item for item in reminders if item is not None]
+
+    def _refresh_index_in_background(
+        self,
+        aggregator: UsageAggregator,
+        now: float,
+    ) -> None:
+        """在后台线程刷新一轮用量索引，避免监控主循环阻塞在磁盘读取上。"""
+
+        thread = self._index_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        def run() -> None:
+            try:
+                aggregator.refresh_index(
+                    self.registries,
+                    self.dashboard_account_metadata,
+                    now,
+                )
+            except (OSError, ValueError) as error:
+                self.logger.debug("后台用量索引刷新失败: %s", error)
+
+        thread = threading.Thread(
+            target=run,
+            name="token-monitor-usage-index",
+            daemon=True,
+        )
+        self._index_thread = thread
+        thread.start()
 
     def _check_advice(self, now: float) -> None:
         """按节流间隔检查磁盘占用和过长会话，并写日志提醒。"""
@@ -267,6 +293,10 @@ class MultiAccountMonitor:
         """关闭 Dashboard 和所有账号的 App Server，不终止用户任务。"""
 
         self._stop_event.set()
+        thread = self._index_thread
+        self._index_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
         dashboard = self._dashboard
         self._dashboard = None
         if dashboard is not None:
