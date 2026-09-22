@@ -1,0 +1,403 @@
+"""agent 目录占用统计与会话归档/清理测试。"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import tarfile
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from token_monitor.housekeeping import (
+    AuditTarget,
+    CleanupCriteria,
+    DiskThresholds,
+    HousekeepingError,
+    HousekeepingMonitor,
+    empty_housekeeping_report,
+)
+
+
+_MIB = 1024 * 1024
+
+
+def _old_session(
+    home: Path,
+    day: str,
+    session_id: str,
+    size: int,
+    days_old: float,
+) -> Path:
+    """写入一个形状正确的旧 Codex session 文件。"""
+
+    path = (
+        home
+        / "sessions"
+        / day[:4]
+        / day[4:6]
+        / day[6:]
+        / f"rollout-{day[:4]}-{day[4:6]}-{day[6:]}T01-00-00-{session_id}.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    stamp = time.time() - days_old * 86_400
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _monitor(
+    root: Path,
+    home: Path,
+    *,
+    active: set[str] | None = None,
+    thresholds: DiskThresholds | None = None,
+) -> HousekeepingMonitor:
+    """构造一个以临时目录为目标的管家。"""
+
+    return HousekeepingMonitor(
+        targets=(
+            AuditTarget(
+                label="Codex (codex)",
+                product="codex",
+                path=home,
+                sessions_root=home / "sessions",
+            ),
+        ),
+        thresholds=thresholds or DiskThresholds.from_gb(
+            single_warn_gb=1.0,
+            total_warn_gb=2.0,
+        ),
+        archive_dir=root / "archives",
+        active_paths=(lambda: set(active or set())),
+    )
+
+
+class DiskScanTests(unittest.TestCase):
+    """验证目录占用统计和磁盘提醒。"""
+
+    def test_scan_reports_sizes_sessions_and_reminders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(home, "20260601", "aaaa1111-1111-4111-8111-111111111111", 4096, 100)
+            _old_session(home, "20260920", "bbbb2222-2222-4222-8222-222222222222", 2048, 1)
+            (home / "packages").mkdir()
+            (home / "packages" / "cli.tar.gz").write_bytes(b"p" * (2 * _MIB))
+
+            monitor = _monitor(
+                root,
+                home,
+                thresholds=DiskThresholds.from_gb(
+                    single_warn_gb=0.001,
+                    total_warn_gb=0.0001,
+                ),
+            )
+            report = monitor.scan(now=time.time())
+
+        entry = report["directories"][0]
+        self.assertEqual(entry["session_files"], 2)
+        self.assertEqual(entry["session_bytes"], 4096 + 2048)
+        self.assertGreaterEqual(entry["bytes"], 2 * _MIB)
+        self.assertEqual(entry["top_children"][0]["name"], "packages")
+        messages = [item["message"] for item in report["reminders"]]
+        self.assertTrue(any("Codex (codex)" in message for message in messages))
+        self.assertTrue(any("合计" in message for message in messages))
+        self.assertTrue(report["preview"]["count"] >= 1)
+
+    def test_scan_without_threshold_breach_has_no_reminders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(home, "20260601", "cccc3333-3333-4333-8333-333333333333", 512, 100)
+
+            report = _monitor(root, home).scan(now=time.time())
+
+        self.assertEqual(report["reminders"], [])
+
+    def test_missing_target_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor = HousekeepingMonitor(
+                targets=(
+                    AuditTarget("Codex", "codex", root / "missing"),
+                ),
+                archive_dir=root / "archives",
+            )
+
+            report = monitor.scan(now=time.time())
+
+        self.assertEqual(report["directories"], [])
+        self.assertEqual(report["totals"]["bytes"], 0)
+
+    def test_empty_report_is_dashboard_safe(self) -> None:
+        report = empty_housekeeping_report()
+
+        self.assertIsNone(report["observed_at"])
+        self.assertEqual(report["reminders"], [])
+        self.assertEqual(report["preview"]["count"], 0)
+
+
+class CleanupPreviewTests(unittest.TestCase):
+    """验证归档/清理预览的筛选和安全保护。"""
+
+    def test_preview_skips_active_recent_and_small_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            old = _old_session(
+                home,
+                "20260601",
+                "dddd4444-4444-4444-8444-444444444444",
+                4096,
+                100,
+            )
+            active = _old_session(
+                home,
+                "20260602",
+                "eeee5555-5555-4555-8555-555555555555",
+                4096,
+                100,
+            )
+            _old_session(
+                home,
+                "20260921",
+                "ffff6666-6666-4666-8666-666666666666",
+                4096,
+                1,
+            )
+            small = _old_session(
+                home,
+                "20260603",
+                "aaaa7777-7777-4777-8777-777777777777",
+                128,
+                100,
+            )
+            monitor = _monitor(root, home, active={str(active)})
+
+            plan = monitor.plan(CleanupCriteria(older_than_days=30), now=time.time())
+            small_plan = monitor.plan(
+                CleanupCriteria(older_than_days=30, min_bytes=1024),
+                now=time.time(),
+            )
+
+        self.assertEqual(
+            {str(item.path) for item in plan.files},
+            {str(old), str(small)},
+        )
+        self.assertEqual(plan.skipped_active, 1)
+        self.assertEqual(plan.skipped_recent, 1)
+        self.assertEqual([str(item.path) for item in small_plan.files], [str(old)])
+        self.assertEqual(small_plan.skipped_small, 1)
+
+    def test_preview_payload_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            for index in range(3):
+                _old_session(
+                    home,
+                    f"2026060{index + 1}",
+                    f"{index:08d}-1111-4111-8111-111111111111",
+                    2048,
+                    100,
+                )
+            monitor = _monitor(root, home)
+
+            payload = monitor.preview(
+                CleanupCriteria(older_than_days=30),
+                now=time.time(),
+            )
+
+        self.assertEqual(payload["count"], 3)
+        self.assertEqual(len(payload["files"]), 3)
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["bytes"], 3 * 2048)
+
+    def test_invalid_criteria_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            CleanupCriteria(older_than_days=0)
+        with self.assertRaises(ValueError):
+            CleanupCriteria(older_than_days=4000)
+        with self.assertRaises(ValueError):
+            CleanupCriteria(min_bytes=-1)
+        with self.assertRaises(ValueError):
+            DiskThresholds(single_warn_bytes=0)
+        with self.assertRaises(ValueError):
+            DiskThresholds(total_warn_bytes=0)
+
+
+class ArchiveAndCleanTests(unittest.TestCase):
+    """验证压缩归档、直接清理和恢复。"""
+
+    def test_archive_requires_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(
+                home,
+                "20260601",
+                "aaaa8888-8888-4888-8888-888888888888",
+                4096,
+                100,
+            )
+            monitor = _monitor(root, home)
+
+            with self.assertRaises(HousekeepingError):
+                monitor.archive(CleanupCriteria(older_than_days=30))
+
+    def test_archive_then_restore_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            first = _old_session(
+                home,
+                "20260601",
+                "aaaa9999-9999-4999-8999-999999999999",
+                4096,
+                100,
+            )
+            second = _old_session(
+                home,
+                "20260602",
+                "bbbb9999-9999-4999-8999-999999999999",
+                2048,
+                100,
+            )
+            monitor = _monitor(root, home)
+
+            result = monitor.archive(
+                CleanupCriteria(older_than_days=30),
+                confirm=True,
+            )
+            archives = monitor.restores()
+            remaining = monitor.sessions()
+            manifest = json.loads(
+                Path(result["manifest"]).read_text(encoding="utf-8")
+            )
+            restored = monitor.restore(
+                Path(result["archive"]),
+                destination=root / "restore",
+            )
+            restored_files = sorted(
+                (root / "restore").glob("**/rollout-*.jsonl")
+            )
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["deleted"], 2)
+        self.assertEqual(result["failed"], [])
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertEqual(remaining, ())
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0]["count"], 2)
+        self.assertEqual(manifest["count"], 2)
+        self.assertEqual(len(manifest["archive_sha256"]), 64)
+        self.assertEqual(restored["restored"], 2)
+        self.assertEqual(len(restored_files), 2)
+        self.assertEqual({item.name for item in restored_files}, {first.name, second.name})
+
+    def test_archive_skips_active_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            active = _old_session(
+                home,
+                "20260601",
+                "cccc9999-9999-4999-8999-999999999999",
+                4096,
+                100,
+            )
+            monitor = _monitor(root, home, active={str(active)})
+
+            result = monitor.archive(
+                CleanupCriteria(older_than_days=30),
+                confirm=True,
+            )
+            still_there = active.exists()
+
+        self.assertEqual(result["count"], 0)
+        self.assertTrue(still_there)
+
+    def test_clean_requires_confirmation_and_deletes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            old = _old_session(
+                home,
+                "20260601",
+                "dddd9999-9999-4999-8999-999999999999",
+                4096,
+                100,
+            )
+            monitor = _monitor(root, home)
+
+            with self.assertRaises(HousekeepingError):
+                monitor.clean(CleanupCriteria(older_than_days=30))
+            result = monitor.clean(
+                CleanupCriteria(older_than_days=30),
+                confirm=True,
+            )
+
+        self.assertEqual(result["action"], "clean")
+        self.assertEqual(result["deleted"], 1)
+        self.assertFalse(old.exists())
+
+    def test_restore_rejects_unsafe_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(
+                home,
+                "20260601",
+                "eeee9999-9999-4999-8999-999999999999",
+                1024,
+                100,
+            )
+            monitor = _monitor(root, home)
+            malicious = root / "evil.tar.gz"
+            payload = b"owned"
+            with tarfile.open(malicious, "w:gz") as handle:
+                info = tarfile.TarInfo("../escaped.jsonl")
+                info.size = len(payload)
+                handle.addfile(info, io.BytesIO(payload))
+
+            with self.assertRaises(HousekeepingError):
+                monitor.restore(malicious, destination=root / "restore")
+
+        self.assertFalse((root / "escaped.jsonl").exists())
+
+    def test_restore_missing_archive_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor = _monitor(root, root / ".codex")
+
+            with self.assertRaises(HousekeepingError):
+                monitor.restore(root / "archives" / "missing.tar.gz")
+
+    def test_refresh_is_cached_until_forced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _old_session(
+                home,
+                "20260601",
+                "ffff9999-9999-4999-8999-999999999999",
+                1024,
+                100,
+            )
+            monitor = _monitor(root, home)
+
+            first = monitor.refresh(now=1_000.0)
+            cached = monitor.refresh(now=1_010.0)
+            forced = monitor.refresh(now=1_010.0, force=True)
+
+        self.assertIs(first, cached)
+        self.assertEqual(forced["observed_at"], 1_010.0)
+        self.assertEqual(monitor.latest()["observed_at"], 1_010.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

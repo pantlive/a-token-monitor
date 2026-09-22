@@ -30,7 +30,7 @@ class AppServerConfig:
 
     codex_path: str = "codex"
     request_timeout: float = 15.0
-    client_name: str = "codex_reset_monitor"
+    client_name: str = "token_monitor"
     client_version: str = "0.5.0"
     codex_home: Path | None = None
 
@@ -99,7 +99,7 @@ class AppServerClient:
                 {
                     "clientInfo": {
                         "name": self.config.client_name,
-                        "title": "Codex Reset Monitor",
+                        "title": "Token Monitor",
                         "version": self.config.client_version,
                     }
                 },

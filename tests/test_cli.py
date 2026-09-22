@@ -5,14 +5,43 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from token_monitor.accounts import build_account_specs
-from token_monitor.cli import build_parser, main
+from token_monitor.alerts import TrafficAlertStore
+from token_monitor.cli import build_parser, default_state_dir, main
+from token_monitor.housekeeping import DEFAULT_TOTAL_WARN_GIB
+from token_monitor.usage import (
+    DEFAULT_SESSION_TURN_WARN,
+)
 from token_monitor.quota import QuotaSnapshot, QuotaWindow
+from token_monitor.registry import MultiSessionRegistry
+from token_monitor.traffic import TrafficAlert
+from token_monitor.usage import UsageAggregator
+
+
+def _sample_alert(observed_at: float | None = None) -> TrafficAlert:
+    """构造一条用于命令行测试的历史告警。"""
+
+    return TrafficAlert(
+        level="danger",
+        product="codex",
+        pid=9,
+        kind="burst",
+        bytes=40 * 1024 * 1024,
+        window_seconds=15.0,
+        message="codex pid 9 在 15 秒内向外发送 40.0 MiB",
+        observed_at=time.time() if observed_at is None else observed_at,
+        remote="203.0.113.10:443",
+        process_key="codex:9:99",
+        command="codex",
+        cwd="/home/dev/project",
+    )
 
 
 class CliTests(unittest.TestCase):
@@ -103,7 +132,7 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(
             [
                 "--state-dir",
-                "~/.codex-reset-monitor",
+                "~/.token-monitor",
                 "--codex-home",
                 "~/.codex",
                 "--codex-home",
@@ -175,6 +204,35 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parser.parse_args(["daemon", "--budget-usd", invalid])
 
+    def test_default_state_dir_reuses_legacy_directory(self) -> None:
+        """改名后旧状态目录存在时应继续使用，避免升级丢失历史。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            legacy = home / ".codex-reset-monitor"
+            legacy.mkdir()
+            with mock.patch("token_monitor.cli.Path.home", return_value=home):
+                reused = default_state_dir()
+
+            self.assertEqual(reused, legacy)
+
+            # 新建目录后自动切换到新位置。
+            (home / ".token-monitor").mkdir()
+            with mock.patch("token_monitor.cli.Path.home", return_value=home):
+                switched = default_state_dir()
+
+            self.assertEqual(switched, home / ".token-monitor")
+
+    def test_default_state_dir_uses_new_name_by_default(self) -> None:
+        """没有任何历史目录时使用新的 ~/.token-monitor。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            with mock.patch("token_monitor.cli.Path.home", return_value=home):
+                resolved = default_state_dir()
+
+            self.assertEqual(resolved, home / ".token-monitor")
+
     def test_quota_command_prints_kimi_windows(self) -> None:
         """quota 子命令应展示 Kimi /usages 返回的窗口。"""
 
@@ -204,6 +262,10 @@ class CliTests(unittest.TestCase):
                 mock.patch("token_monitor.cli._accounts", return_value=()),
                 mock.patch(
                     "token_monitor.cli.resolve_grok_homes",
+                    return_value=(),
+                ),
+                mock.patch(
+                    "token_monitor.cli.resolve_commandcode_homes",
                     return_value=(),
                 ),
                 mock.patch(
@@ -240,6 +302,10 @@ class CliTests(unittest.TestCase):
                     return_value=(),
                 ),
                 mock.patch(
+                    "token_monitor.cli.resolve_commandcode_homes",
+                    return_value=(),
+                ),
+                mock.patch(
                     "token_monitor.cli.read_kimi_quota",
                     return_value=None,
                 ),
@@ -251,6 +317,655 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("配额暂不可读", buffer.getvalue())
             self.assertNotIn("SECRET-TOKEN", buffer.getvalue())
+
+    def test_parser_accepts_repeated_commandcode_home(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--commandcode-home",
+                "~/.commandcode",
+                "--commandcode-home",
+                "~/.commandcode-work",
+                "daemon",
+            ]
+        )
+
+        self.assertEqual(
+            args.commandcode_homes,
+            [Path("~/.commandcode"), Path("~/.commandcode-work")],
+        )
+
+    def test_quota_command_prints_commandcode_windows(self) -> None:
+        """quota 子命令应展示 Command Code 订阅额度窗口和本月扣费。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".commandcode"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps(
+                    {
+                        "apiKey": "SECRET-API-KEY",
+                        "userId": "a8f7ddce-358a-4441-9d10-de053e64c79f",
+                        "userName": "tester",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot = QuotaSnapshot(
+                observed_at=1_789_490_000.0,
+                windows=(
+                    QuotaWindow(
+                        limit_id="command-code",
+                        name="5-hour",
+                        used_percent=3.85,
+                        window_minutes=300.0,
+                        resets_at=1_789_493_000.0,
+                    ),
+                ),
+                plan_type="GOAT",
+                source="command-code-api",
+                raw_limit_ids=("command-code",),
+                metadata={
+                    "period_credits_spent": "28.69",
+                    "monthly_credits_remaining": "41.63",
+                    "days_left": "17",
+                    "period_requests": "5095",
+                },
+            )
+            with (
+                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch(
+                    "token_monitor.cli.resolve_grok_homes",
+                    return_value=(),
+                ),
+                mock.patch(
+                    "token_monitor.cli.read_commandcode_quota",
+                    return_value=snapshot,
+                ),
+            ):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    exit_code = main(
+                        ["--commandcode-home", str(home), "quota"]
+                    )
+
+            self.assertEqual(exit_code, 0)
+            output = buffer.getvalue()
+            self.assertIn("command-code/5-hour", output)
+            self.assertIn("3.85%", output)
+            self.assertIn("套餐: GOAT", output)
+            self.assertIn("已登录", output)
+            self.assertIn("28.69", output)
+            self.assertNotIn("SECRET-API-KEY", output)
+
+    def test_quota_command_notes_commandcode_quota_failure(self) -> None:
+        """Command Code 配额读取失败时应提示但不影响退出码。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".commandcode"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps({"apiKey": "SECRET-API-KEY", "userName": "tester"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch(
+                    "token_monitor.cli.resolve_grok_homes",
+                    return_value=(),
+                ),
+                mock.patch(
+                    "token_monitor.cli.read_commandcode_quota",
+                    return_value=None,
+                ),
+            ):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    exit_code = main(
+                        ["--commandcode-home", str(home), "quota"]
+                    )
+
+            output = buffer.getvalue()
+            self.assertEqual(exit_code, 0)
+            self.assertIn("配额暂不可读", output)
+            self.assertNotIn("SECRET-API-KEY", output)
+
+    def test_parser_accepts_alerts_command_filters(self) -> None:
+        """alerts 子命令应接受历史和已读相关筛选参数。"""
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "alerts",
+                "--days",
+                "7",
+                "--level",
+                "danger",
+                "--kind",
+                "burst",
+                "--product",
+                "codex",
+                "--unread",
+                "--query",
+                "上传",
+                "--limit",
+                "20",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(args.command, "alerts")
+        self.assertEqual(args.days, 7.0)
+        self.assertEqual(args.level, "danger")
+        self.assertEqual(args.kind, "burst")
+        self.assertEqual(args.product, "codex")
+        self.assertTrue(args.unread)
+        self.assertEqual(args.query, "上传")
+        self.assertEqual(args.limit, 20)
+        self.assertTrue(args.json)
+
+        daemon_args = parser.parse_args(
+            ["daemon", "--alert-retention-days", "14"]
+        )
+        self.assertEqual(daemon_args.alert_retention_days, 14.0)
+        install_args = parser.parse_args(["service", "install"])
+        self.assertEqual(install_args.alert_retention_days, 30.0)
+
+    def test_alerts_command_reads_persisted_history(self) -> None:
+        """alerts 命令应读取落盘告警，并支持标记已读和清理预览。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_dir = Path(temporary_directory)
+            store = TrafficAlertStore(state_dir)
+            store.record([_sample_alert(time.time() - 3 * 86400)], now=time.time())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                listed = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--json",
+                    ]
+                )
+            payload = json.loads(buffer.getvalue())
+
+            self.assertEqual(listed, 1)
+            self.assertEqual(payload["stats"]["total"], 1)
+            self.assertEqual(payload["stats"]["unread"], 1)
+            self.assertEqual(payload["alerts"][0]["process_key"], "codex:9:99")
+            self.assertNotIn("SECRET", buffer.getvalue())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                acked = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--ack-all",
+                    ]
+                )
+            self.assertEqual(acked, 0)
+            self.assertIn("标记为已读", buffer.getvalue())
+            self.assertEqual(store.stats()["unread"], 0)
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                quiet = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--unread",
+                        "--quiet",
+                    ]
+                )
+            self.assertEqual(quiet, 0)
+            self.assertEqual(buffer.getvalue(), "")
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                preview = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--clear-before",
+                        "1",
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(preview, 0)
+            self.assertIn("预览", buffer.getvalue())
+            self.assertEqual(store.stats()["total"], 1)
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                cleared = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--clear-before",
+                        "1",
+                    ]
+                )
+            self.assertEqual(cleared, 0)
+            self.assertEqual(store.stats()["total"], 0)
+
+    def test_alerts_command_requires_confirmation_for_clear_all(self) -> None:
+        """--clear-all 必须显式带上 --yes。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_dir = Path(temporary_directory)
+            store = TrafficAlertStore(state_dir)
+            store.record([_sample_alert()], now=time.time())
+
+            failed = main(["--state-dir", str(state_dir), "alerts", "--clear-all"])
+            self.assertEqual(failed, 2)
+            self.assertEqual(store.stats()["total"], 1)
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                confirmed = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--clear-all",
+                        "--yes",
+                    ]
+                )
+            self.assertEqual(confirmed, 0)
+            self.assertEqual(store.stats()["total"], 0)
+
+
+    def test_usage_command_searches_token_history(self) -> None:
+        """usage 子命令应按日期、模型和会话检索用量索引。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state_dir = root / "state"
+            _write_usage_index(root)
+            aggregator = UsageAggregator(
+                discovery_interval=0.01,
+                refresh_interval=0.01,
+                cache_path=state_dir / "usage-index.sqlite3",
+            )
+            aggregator.snapshot(
+                {"codex": MultiSessionRegistry(state_dir)},
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-personal",
+                        "profile_name": "codex",
+                        "codex_home": str(root / ".codex"),
+                    }
+                },
+                now=time.time(),
+            )
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                listed = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "usage",
+                        "--days",
+                        "0",
+                        "--json",
+                    ]
+                )
+            payload = json.loads(buffer.getvalue())
+
+            self.assertEqual(listed, 0)
+            self.assertTrue(payload["search"]["available"])
+            self.assertEqual(payload["search"]["totals"]["records"], 2)
+            self.assertEqual(payload["search"]["totals"]["total_tokens"], 9_000)
+            self.assertEqual(payload["facets"]["models"], ["gpt-5.6-luna"])
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                filtered = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "usage",
+                        "--days",
+                        "0",
+                        "--session",
+                        "44444444",
+                        "--limit",
+                        "5",
+                    ]
+                )
+            self.assertEqual(filtered, 0)
+            self.assertIn("44444444", buffer.getvalue())
+            self.assertIn("9,000", buffer.getvalue())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                by_model = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "usage",
+                        "--days",
+                        "0",
+                        "--group",
+                        "model",
+                    ]
+                )
+            self.assertEqual(by_model, 0)
+            self.assertIn("gpt-5.6-luna", buffer.getvalue())
+
+    def test_usage_command_without_index_is_empty(self) -> None:
+        """用量索引不存在时给出提示而不是报错。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--state-dir",
+                        str(Path(temporary_directory) / "state"),
+                        "usage",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        self.assertIn("没有可检索的用量索引", buffer.getvalue())
+
+
+    def test_parser_accepts_disk_and_session_cleanup_options(self) -> None:
+        """disk 与 sessions 的归档/清理参数应被解析。"""
+
+        parser = build_parser()
+        disk_args = parser.parse_args(
+            ["disk", "--days", "14", "--disk-warn-gb", "2.5", "--json"]
+        )
+        self.assertEqual(disk_args.command, "disk")
+        self.assertEqual(disk_args.days, 14)
+        self.assertEqual(disk_args.disk_warn_gb, 2.5)
+        self.assertTrue(disk_args.json)
+        self.assertEqual(
+            disk_args.disk_total_warn_gb,
+            DEFAULT_TOTAL_WARN_GIB,
+        )
+
+        session_args = parser.parse_args(
+            [
+                "sessions",
+                "--archive",
+                "--older-than",
+                "7",
+                "--min-size-mb",
+                "1",
+                "--yes",
+            ]
+        )
+        self.assertTrue(session_args.archive)
+        self.assertFalse(session_args.clean)
+        self.assertEqual(session_args.older_than, 7)
+        self.assertEqual(session_args.min_size_mb, 1.0)
+        self.assertTrue(session_args.yes)
+        self.assertEqual(
+            session_args.session_turn_warn,
+            DEFAULT_SESSION_TURN_WARN,
+        )
+
+        restore_args = parser.parse_args(
+            ["sessions", "--restore", "/tmp/a.tar.gz", "--to", "/tmp/out"]
+        )
+        self.assertEqual(restore_args.restore, Path("/tmp/a.tar.gz"))
+        self.assertEqual(restore_args.to, Path("/tmp/out"))
+
+        daemon_args = parser.parse_args(
+            [
+                "daemon",
+                "--session-turn-warn",
+                "50",
+                "--session-context-warn-tokens",
+                "100000",
+                "--disk-warn-gb",
+                "1",
+                "--disk-total-warn-gb",
+                "3",
+            ]
+        )
+        self.assertEqual(daemon_args.session_turn_warn, 50)
+        self.assertEqual(daemon_args.session_context_warn_tokens, 100_000)
+        self.assertEqual(daemon_args.disk_warn_gb, 1.0)
+        self.assertEqual(daemon_args.disk_total_warn_gb, 3.0)
+
+    def test_disk_command_reports_usage_and_preview(self) -> None:
+        """disk 命令应输出目录占用、提醒和清理预览。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _write_stale_session(home, 100)
+
+            buffer = io.StringIO()
+            with (
+                mock.patch(
+                    "token_monitor.cli.resolve_grok_homes",
+                    return_value=(),
+                ),
+                mock.patch(
+                    "token_monitor.cli.resolve_kimi_homes",
+                    return_value=(),
+                ),
+                mock.patch(
+                    "token_monitor.cli.resolve_dsh_homes",
+                    return_value=(),
+                ),
+                mock.patch(
+                    "token_monitor.cli.resolve_commandcode_homes",
+                    return_value=(),
+                ),
+                contextlib.redirect_stdout(buffer),
+            ):
+                code = main(
+                    [
+                        "--state-dir",
+                        str(root / "state"),
+                        "--codex-home",
+                        str(home),
+                        "disk",
+                        "--days",
+                        "30",
+                        "--disk-warn-gb",
+                        "0.000001",
+                        "--disk-total-warn-gb",
+                        "0.000001",
+                    ]
+                )
+
+        output = buffer.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("Codex (codex)", output)
+        self.assertIn("超过单目录", output)
+        self.assertIn("预览", output)
+        self.assertIn("1 个超过 30 天", output)
+
+    def test_sessions_archive_and_restore_round_trip(self) -> None:
+        """sessions --archive 先预览，带 --yes 才归档，并支持恢复。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            session = _write_stale_session(home, 100)
+            state_dir = root / "state"
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                previewed = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--archive",
+                        "--older-than",
+                        "30",
+                    ]
+                )
+            self.assertEqual(previewed, 0)
+            self.assertIn("加上 --yes", buffer.getvalue())
+            self.assertTrue(session.exists())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                archived = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--archive",
+                        "--older-than",
+                        "30",
+                        "--yes",
+                        "--json",
+                    ]
+                )
+            result = json.loads(buffer.getvalue())
+            self.assertEqual(archived, 0)
+            self.assertEqual(result["count"], 1)
+            self.assertFalse(session.exists())
+            archive = Path(result["archive"])
+            self.assertTrue(archive.is_file())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                restored = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--restore",
+                        str(archive),
+                        "--to",
+                        str(root / "restore"),
+                        "--json",
+                    ]
+                )
+            payload = json.loads(buffer.getvalue())
+            self.assertEqual(restored, 0)
+            self.assertEqual(payload["restored"], 1)
+            self.assertEqual(
+                len(list((root / "restore").glob("**/rollout-*.jsonl"))),
+                1,
+            )
+
+    def test_sessions_clean_requires_yes(self) -> None:
+        """没有 --yes 时 sessions --clean 只预览，不删除文件。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            session = _write_stale_session(home, 100)
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--state-dir",
+                        str(root / "state"),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--clean",
+                        "--older-than",
+                        "30",
+                        "--json",
+                    ]
+                )
+            still_there = session.exists()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(buffer.getvalue())["count"], 1)
+        self.assertTrue(still_there)
+
+
+def _write_stale_session(home: Path, days_old: float) -> Path:
+    """写入一个超过保留期的 Codex session 文件。"""
+
+    path = (
+        home
+        / "sessions"
+        / "2026"
+        / "06"
+        / "01"
+        / "rollout-2026-06-01T01-00-00-99999999-9999-4999-8999-999999999999.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * 4096)
+    stamp = time.time() - days_old * 86_400
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _write_usage_index(root: Path) -> None:
+    """写入一个带会话目录的合成用量 JSONL。"""
+
+    session = (
+        root
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "08"
+        / "27"
+        / "rollout-2026-08-27T01-00-00-44444444-4444-4444-8444-444444444444.jsonl"
+    )
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "timestamp": "2026-08-27T01:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"cwd": "/home/dev/delta"},
+                },
+                {
+                    "timestamp": "2026-08-27T02:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "thread_settings": {"model": "gpt-5.6-luna"},
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 4_000,
+                                "total_tokens": 4_000,
+                            }
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-08-27T03:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "thread_settings": {"model": "gpt-5.6-luna"},
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 9_000,
+                                "total_tokens": 9_000,
+                            }
+                        },
+                    },
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

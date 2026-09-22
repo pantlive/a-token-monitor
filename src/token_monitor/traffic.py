@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -24,6 +25,7 @@ from typing import Any, Callable, Mapping, Sequence
 from .agents import identify_agent, product_label
 
 
+_LOGGER = logging.getLogger(__name__)
 _SOCKET_INODE_PATTERN = re.compile(r"^socket:\[(\d+)\]$")
 _MIB = 1024 * 1024
 _MAX_ALERTS = 20
@@ -284,6 +286,9 @@ class TrafficAlert:
     message: str
     observed_at: float
     remote: str | None = None
+    process_key: str = ""
+    command: str | None = None
+    cwd: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为 Dashboard 告警字段。"""
@@ -299,6 +304,9 @@ class TrafficAlert:
             "message": self.message,
             "observed_at": self.observed_at,
             "remote": self.remote,
+            "process_key": self.process_key,
+            "command": self.command,
+            "cwd": self.cwd,
         }
 
 
@@ -380,6 +388,7 @@ class TrafficMonitor:
         proc_root: Path = Path("/proc"),
         ignore_pids: Sequence[int] | None = None,
         socket_reader: SocketStatsReader | None = None,
+        alert_sink: Callable[[Sequence[TrafficAlert]], None] | None = None,
     ) -> None:
         self.thresholds = thresholds or TrafficThresholds()
         self.proc_root = proc_root
@@ -387,6 +396,7 @@ class TrafficMonitor:
             ignore_pids if ignore_pids is not None else (os.getpid(),)
         )
         self._socket_reader = socket_reader or read_tcp_socket_counters
+        self._alert_sink = alert_sink
         self._lock = threading.Lock()
         self._states: dict[str, _ProcessState] = {}
         self._alerts: deque[TrafficAlert] = deque(maxlen=_MAX_ALERTS)
@@ -405,7 +415,7 @@ class TrafficMonitor:
         """扫描一次进程和 TCP 计数，更新增量和告警。"""
 
         observed_at = time.time() if now is None else float(now)
-        processes, source = self._collect(observed_at)
+        processes, source, created = self._collect(observed_at)
         with self._lock:
             interval = (
                 max(0.0, observed_at - self._last_poll_at)
@@ -422,9 +432,24 @@ class TrafficMonitor:
             )
             self._snapshot = snapshot
             self._last_poll_at = observed_at
-            return snapshot
+        if created:
+            self._publish(created)
+        return snapshot
 
-    def _collect(self, now: float) -> tuple[tuple[ProcessTraffic, ...], str]:
+    def _publish(self, alerts: Sequence[TrafficAlert]) -> None:
+        """把本轮新产生的告警交给落盘回调；回调失败不影响监控主循环。"""
+
+        sink = self._alert_sink
+        if sink is None:
+            return
+        try:
+            sink(alerts)
+        except Exception:  # noqa: BLE001 - 落盘失败不能中断流量监控
+            _LOGGER.exception("异常流量告警落盘回调失败")
+
+    def _collect(
+        self, now: float
+    ) -> tuple[tuple[ProcessTraffic, ...], str, tuple[TrafficAlert, ...]]:
         """读取 /proc 与 socket 计数，计算每个 agent 的外发增量。"""
 
         proc_map = _scan_processes(self.proc_root)
@@ -455,6 +480,7 @@ class TrafficMonitor:
             grouped[owner].append(pid)
 
         results: list[ProcessTraffic] = []
+        created: list[TrafficAlert] = []
         seen_keys: set[str] = set()
         with self._lock:
             for owner_pid in sorted(grouped):
@@ -471,7 +497,7 @@ class TrafficMonitor:
                     )
                     self._states[key] = state
                 member_pids = tuple(sorted(grouped[owner_pid]))
-                traffic = self._update_process(
+                traffic, new_alerts = self._update_process(
                     state=state,
                     info=info,
                     member_pids=member_pids,
@@ -480,6 +506,8 @@ class TrafficMonitor:
                     now=now,
                 )
                 results.append(traffic)
+                created.extend(new_alerts)
+                self._alerts.extend(new_alerts)
             stale = [key for key in self._states if key not in seen_keys]
             for key in stale:
                 state = self._states[key]
@@ -493,7 +521,7 @@ class TrafficMonitor:
                 -item.external_upload_delta,
             )
         )
-        return tuple(results), source
+        return tuple(results), source, tuple(created)
 
     def _update_process(
         self,
@@ -503,7 +531,7 @@ class TrafficMonitor:
         sockets_by_pid: Mapping[int, tuple[int, ...]],
         counters: Mapping[int, SocketCounters],
         now: float,
-    ) -> ProcessTraffic:
+    ) -> tuple[ProcessTraffic, tuple[TrafficAlert, ...]]:
         """把本轮 socket 计数转成增量和告警。"""
 
         live: dict[int, SocketCounters] = {}
@@ -580,8 +608,6 @@ class TrafficMonitor:
             connections=connections,
             now=now,
         )
-        for alert in new_alerts:
-            self._alerts.append(alert)
         connections.sort(
             key=lambda item: (
                 1 if item.loopback or item.service else 0,
@@ -589,21 +615,24 @@ class TrafficMonitor:
             )
         )
         display_command = _basename(info.command[0]) if info.command else info.comm
-        return ProcessTraffic(
-            product=state.product,
-            pid=state.pid,
-            start_token=state.start_token,
-            command=display_command,
-            cwd=str(info.cwd) if info.cwd is not None else None,
-            pids=member_pids,
-            external_upload_delta=external_delta,
-            loopback_upload_delta=loopback_delta,
-            observed_external_bytes=state.observed_external_bytes,
-            burst_bytes=burst_bytes,
-            window_bytes=window_bytes,
-            upload_bps=upload_bps,
-            alert_level=alert_level,
-            connections=tuple(connections[:12]),
+        return (
+            ProcessTraffic(
+                product=state.product,
+                pid=state.pid,
+                start_token=state.start_token,
+                command=display_command,
+                cwd=str(info.cwd) if info.cwd is not None else None,
+                pids=member_pids,
+                external_upload_delta=external_delta,
+                loopback_upload_delta=loopback_delta,
+                observed_external_bytes=state.observed_external_bytes,
+                burst_bytes=burst_bytes,
+                window_bytes=window_bytes,
+                upload_bps=upload_bps,
+                alert_level=alert_level,
+                connections=tuple(connections[:12]),
+            ),
+            new_alerts,
         )
 
     def _evaluate_alerts(
@@ -632,6 +661,7 @@ class TrafficMonitor:
         label = product_label(state.product)
         cwd_note = f"，目录 {info.cwd}" if info.cwd is not None else ""
         remote_note = f"，主要对端 {remote}" if remote else ""
+        command = _basename(info.command[0]) if info.command else info.comm
         created: list[TrafficAlert] = []
         for kind, level, amount, window in (
             (
@@ -674,6 +704,9 @@ class TrafficMonitor:
                     message=message,
                     observed_at=now,
                     remote=remote,
+                    process_key=f"{state.product}:{state.pid}:{state.start_token}",
+                    command=command or None,
+                    cwd=str(info.cwd) if info.cwd is not None else None,
                 )
             )
         return alert_level, tuple(created)

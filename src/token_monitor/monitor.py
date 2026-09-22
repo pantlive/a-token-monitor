@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .app_server import AppServerClient, AppServerConfig, AppServerError
+from .alerts import TrafficAlertStore
 from .dashboard import DashboardConfig, DashboardServer
+from .housekeeping import DEFAULT_SINGLE_WARN_GIB, DEFAULT_TOTAL_WARN_GIB
 from .discovery import (
     JsonlSessionReader,
     ProcessObservation,
@@ -33,7 +35,11 @@ from .quota import QuotaSnapshot, merge_sparse_update
 from .quota_fallback import JsonlQuotaFallbackReader, recent_session_paths
 from .registry import MultiSessionRegistry, RegistryError
 from .storage import StateStore
-from .usage import UsageAggregator
+from .usage import (
+    DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
+    DEFAULT_SESSION_TURN_WARN,
+    UsageAggregator,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,11 @@ class MonitorConfig:
     upload_burst_danger_mb: float = 32.0
     upload_window_warn_mb: float = 64.0
     upload_window_danger_mb: float = 256.0
+    alert_retention_days: float = 30.0
+    session_turn_warn: int = DEFAULT_SESSION_TURN_WARN
+    session_context_warn_tokens: int = DEFAULT_SESSION_CONTEXT_WARN_TOKENS
+    disk_warn_gb: float = DEFAULT_SINGLE_WARN_GIB
+    disk_total_warn_gb: float = DEFAULT_TOTAL_WARN_GIB
     codex_home: Path | None = None
     account_name: str = "codex"
     account_id: str | None = None
@@ -107,6 +118,16 @@ class MonitorConfig:
             raise ValueError(
                 "upload_window_danger_mb 不能小于 upload_window_warn_mb"
             )
+        if self.alert_retention_days <= 0:
+            raise ValueError("alert_retention_days 必须大于 0")
+        if self.session_turn_warn <= 0:
+            raise ValueError("session_turn_warn 必须大于 0")
+        if self.session_context_warn_tokens <= 0:
+            raise ValueError("session_context_warn_tokens 必须大于 0")
+        if self.disk_warn_gb <= 0:
+            raise ValueError("disk_warn_gb 必须大于 0")
+        if self.disk_total_warn_gb <= 0:
+            raise ValueError("disk_total_warn_gb 必须大于 0")
 
 
 @dataclass(frozen=True)
@@ -261,6 +282,12 @@ class MultiSessionMonitor:
                         usage_aggregator=UsageAggregator(
                             cache_path=self.registry.state_dir / "usage-index.sqlite3",
                             background_indexing=True,
+                        ),
+                        # 中文注释：单账号进程不扫描流量，但仍展示同一状态目录里
+                        # 已落盘的历史告警，避免和 daemon 的视图不一致。
+                        alert_store=TrafficAlertStore(
+                            self.registry.state_dir,
+                            retention_days=self.config.alert_retention_days,
                         ),
                     )
                     self._dashboard.start()

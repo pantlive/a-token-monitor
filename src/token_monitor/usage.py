@@ -85,6 +85,20 @@ _CODEX_SESSION_ID_PATTERN = re.compile(
     r"[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
     re.IGNORECASE,
 )
+# 中文注释：用量检索分组和分页边界。单次检索最多扫描的原始记录数用于防止
+# 「全部时间」条件下把整份索引读进内存，命中上限时明确返回 truncated。
+_USAGE_SEARCH_GROUPS = ("session", "date", "model")
+_USAGE_SEARCH_SORTS = ("recent", "tokens", "cost")
+_DEFAULT_SEARCH_LIMIT = 50
+_MAX_SEARCH_LIMIT = 500
+_MAX_SEARCH_ROWS = 200_000
+_MAX_SEARCH_KEYWORD_BYTES = 200
+_FACETS_CACHE_SECONDS = 60.0
+# 中文注释：命令行和 Dashboard 默认只检索最近 30 天，0 表示不限时间。
+DEFAULT_SEARCH_DAYS = 30
+# 中文注释：会话过长提醒的默认阈值，与习惯分析的「超长对话」口径保持一致。
+DEFAULT_SESSION_TURN_WARN = 100
+DEFAULT_SESSION_CONTEXT_WARN_TOKENS = 200_000
 
 
 @dataclass(frozen=True)
@@ -453,6 +467,132 @@ class _CachedFile:
         return self.state.project
 
 
+@dataclass(frozen=True)
+class SessionSwitchThresholds:
+    """提醒切换新会话的阈值：会话轮数与最近一次请求的上下文规模。"""
+
+    turn_warn: int = DEFAULT_SESSION_TURN_WARN
+    context_warn_tokens: int = DEFAULT_SESSION_CONTEXT_WARN_TOKENS
+
+    def __post_init__(self) -> None:
+        """拒绝无意义的阈值。"""
+
+        if self.turn_warn <= 0:
+            raise ValueError("turn_warn 必须大于 0")
+        if self.context_warn_tokens <= 0:
+            raise ValueError("context_warn_tokens 必须大于 0")
+
+    def to_dict(self) -> dict[str, int]:
+        """返回 Dashboard / CLI 可展示的阈值。"""
+
+        return {
+            "turn_warn": self.turn_warn,
+            "context_warn_tokens": self.context_warn_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class SessionUsage:
+    """一个会话（JSONL 文件）的 token 汇总，用于长会话提醒。"""
+
+    path: str
+    turns: int
+    total_tokens: int
+    context_tokens: int
+    model: str | None
+    first_at: float | None
+    last_at: float | None
+    estimated_cost_usd: float | None
+    api_pricing_known: bool = True
+
+    @property
+    def session_id(self) -> str:
+        """返回会话展示名：Codex session UUID 或文件名。"""
+
+        return session_id_from_path(Path(self.path))
+
+    def to_dict(self) -> dict[str, Any]:
+        """转换为 Dashboard / CLI 展示字段。"""
+
+        return {
+            "path": self.path,
+            "session_id": self.session_id,
+            "turns": self.turns,
+            "total_tokens": self.total_tokens,
+            "context_tokens": self.context_tokens,
+            "model": self.model,
+            "first_at": self.first_at,
+            "last_at": self.last_at,
+            "estimated_cost_usd": self.estimated_cost_usd,
+            "api_pricing_known": self.api_pricing_known,
+        }
+
+    def reminder(
+        self,
+        thresholds: SessionSwitchThresholds,
+    ) -> dict[str, Any] | None:
+        """轮数或上下文超过阈值时返回切换新会话的提醒。"""
+
+        reasons: list[str] = []
+        if self.turns >= thresholds.turn_warn:
+            reasons.append(f"已进行 {self.turns} 轮")
+        if self.context_tokens >= thresholds.context_warn_tokens:
+            reasons.append(f"最近一次上下文 {self.context_tokens:,} token")
+        if not reasons:
+            return None
+        label = self.session_id
+        model = self.model or "未知模型"
+        return {
+            "level": "warn",
+            "kind": "session",
+            "title": f"会话 {label} 建议切换新会话",
+            "detail": (
+                f"{model} · {'；'.join(reasons)}。超长会话每一轮都按全量上下文"
+                "重新计费；任务做到阶段收尾后让模型总结要点，再开新会话更省 token。"
+            ),
+            "message": (
+                f"会话 {label}（{model}）{'；'.join(reasons)}，建议收尾并开启新会话"
+            ),
+            "session_id": label,
+            "path": self.path,
+            "turns": self.turns,
+            "context_tokens": self.context_tokens,
+            "total_tokens": self.total_tokens,
+            "model": self.model,
+            "reasons": reasons,
+        }
+
+
+@dataclass(frozen=True)
+class _IndexRow:
+    """用量索引中的一条 token 计量记录。"""
+
+    path: str
+    kind: str
+    timestamp: float
+    model: str
+    usage_json: str
+    billing_usage_json: str | None
+    project: str | None
+
+    def delta(self) -> UsageDelta | None:
+        """把索引行还原成 token 增量；损坏记录返回 None。"""
+
+        try:
+            return _delta_from_row(
+                (
+                    self.kind,
+                    self.timestamp,
+                    self.model,
+                    self.usage_json,
+                    self.billing_usage_json,
+                    self.project,
+                )
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+
 class _UsageIndexStore:
     """把已解析的偏移和 token 增量保存到轻量 SQLite 索引。"""
 
@@ -514,6 +654,20 @@ class _UsageIndexStore:
                     """
                     CREATE INDEX IF NOT EXISTS usage_delta_path_index
                     ON usage_delta(path)
+                    """
+                )
+                # 中文注释：用量检索按时间、模型和会话过滤，补上对应索引，
+                # 避免历史记录变多后每次检索都全表扫描。
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS usage_delta_timestamp_index
+                    ON usage_delta(timestamp)
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS usage_delta_model_index
+                    ON usage_delta(model, timestamp)
                     """
                 )
                 connection.execute(
@@ -608,6 +762,160 @@ class _UsageIndexStore:
             sqlite3.DatabaseError,
         ):
             return None
+
+    def search_deltas(
+        self,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        models: Sequence[str] = (),
+        session: str | None = None,
+        project: str | None = None,
+        keyword: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[_IndexRow, ...]:
+        """按时间、模型和会话关键词检索索引里的 token 记录。"""
+
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            parameters.append(float(since))
+        if until is not None:
+            clauses.append("timestamp <= ?")
+            parameters.append(float(until))
+        selected_models = [item for item in models if item]
+        if selected_models:
+            placeholders = ", ".join("?" for _ in selected_models)
+            clauses.append(f"model IN ({placeholders})")
+            parameters.extend(selected_models)
+        session_pattern = _search_pattern(session)
+        if session_pattern is not None:
+            clauses.append("path LIKE ? ESCAPE '\\'")
+            parameters.append(session_pattern)
+        try:
+            with closing(self._connect()) as connection:
+                file_projects = _file_projects(connection)
+                project_pattern = _search_pattern(project)
+                if project_pattern is not None:
+                    clause, clause_parameters = _project_clause(
+                        project_pattern,
+                        file_projects,
+                    )
+                    clauses.append(clause)
+                    parameters.extend(clause_parameters)
+                keyword_pattern = _search_pattern(keyword)
+                if keyword_pattern is not None:
+                    keyword_clause, keyword_parameters = _keyword_clause(
+                        keyword_pattern,
+                        file_projects,
+                    )
+                    clauses.append(keyword_clause)
+                    parameters.extend(keyword_parameters)
+                where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                statement = (
+                    "SELECT path, kind, timestamp, model, usage_json, "
+                    f"billing_usage_json, project FROM usage_delta{where} "
+                    "ORDER BY timestamp DESC, rowid DESC"
+                )
+                if limit is not None:
+                    statement += " LIMIT ?"
+                    parameters.append(int(limit))
+                rows = connection.execute(statement, parameters).fetchall()
+        except sqlite3.DatabaseError:
+            # 中文注释：索引损坏或并发写入冲突时退回空结果，不影响 Dashboard。
+            return ()
+        result: list[_IndexRow] = []
+        for row in rows:
+            timestamp = row[2]
+            model = row[3]
+            usage_json = row[4]
+            if not isinstance(timestamp, (int, float)) or not isinstance(model, str):
+                continue
+            if not isinstance(usage_json, str):
+                continue
+            billing = row[5] if isinstance(row[5], str) else None
+            project = row[6] if isinstance(row[6], str) and row[6] else None
+            if project is None:
+                # 中文注释：索引行本身不带项目时回退到文件级 session 工作目录。
+                project = file_projects.get(str(row[0]))
+            result.append(
+                _IndexRow(
+                    path=str(row[0]),
+                    kind=str(row[1]),
+                    timestamp=float(timestamp),
+                    model=model,
+                    usage_json=usage_json,
+                    billing_usage_json=billing,
+                    project=project,
+                )
+            )
+        return tuple(result)
+
+    def session_rows(self, paths: Sequence[str]) -> tuple[_IndexRow, ...]:
+        """按路径读取会话的索引记录，用于统计轮数、上下文和累计用量。"""
+
+        wanted = [str(path) for path in paths if path][:500]
+        if not wanted:
+            return ()
+        placeholders = ", ".join("?" for _ in wanted)
+        statement = (
+            "SELECT path, kind, timestamp, model, usage_json, "
+            "billing_usage_json, project FROM usage_delta "
+            f"WHERE path IN ({placeholders}) ORDER BY path, timestamp, rowid"
+        )
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(statement, wanted).fetchall()
+        except sqlite3.DatabaseError:
+            return ()
+        result: list[_IndexRow] = []
+        for row in rows:
+            if not isinstance(row[2], (int, float)) or not isinstance(row[3], str):
+                continue
+            if not isinstance(row[4], str):
+                continue
+            result.append(
+                _IndexRow(
+                    path=str(row[0]),
+                    kind=str(row[1]),
+                    timestamp=float(row[2]),
+                    model=str(row[3]),
+                    usage_json=row[4],
+                    billing_usage_json=row[5] if isinstance(row[5], str) else None,
+                    project=row[6] if isinstance(row[6], str) else None,
+                )
+            )
+        return tuple(result)
+
+    def facets(self) -> dict[str, Any]:
+        """返回索引整体的模型列表、会话数量和覆盖时间范围。"""
+
+        try:
+            with closing(self._connect()) as connection:
+                summary = connection.execute(
+                    "SELECT COUNT(*), MIN(timestamp), MAX(timestamp), "
+                    "COUNT(DISTINCT path), COUNT(DISTINCT model) FROM usage_delta"
+                ).fetchone()
+                model_rows = connection.execute(
+                    "SELECT DISTINCT model FROM usage_delta "
+                    "WHERE model <> '' ORDER BY model"
+                ).fetchall()
+        except sqlite3.DatabaseError:
+            return {
+                "records": 0,
+                "sessions": 0,
+                "models": [],
+                "first_at": None,
+                "last_at": None,
+            }
+        return {
+            "records": int(summary[0] or 0),
+            "sessions": int(summary[3] or 0),
+            "models": [str(row[0]) for row in model_rows],
+            "first_at": float(summary[1]) if summary[1] is not None else None,
+            "last_at": float(summary[2]) if summary[2] is not None else None,
+        }
 
     def save(
         self,
@@ -754,6 +1062,230 @@ def _usage_from_object(value: object) -> TokenUsage | None:
     if not isinstance(value, Mapping):
         raise ValueError("持久化 token 用量不是对象")
     return TokenUsage.from_mapping(value)
+
+
+def _search_pattern(value: str | None) -> str | None:
+    """把检索关键词转义成 LIKE 模式；空关键词返回 None。"""
+
+    if value is None:
+        return None
+    text = str(value).strip()[:_MAX_SEARCH_KEYWORD_BYTES]
+    if not text:
+        return None
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _session_usage_from_rows(
+    path: str,
+    rows: Sequence[_IndexRow],
+) -> SessionUsage | None:
+    """把索引行折叠成一个会话的用量汇总。"""
+
+    total_rows = [row for row in rows if row.kind == "total"]
+    selected = total_rows or [row for row in rows if row.kind == "fallback"]
+    deltas: list[UsageDelta] = []
+    for row in selected:
+        delta = row.delta()
+        if delta is not None:
+            deltas.append(delta)
+    return _session_usage_from_deltas(path, tuple(deltas))
+
+
+def _session_usage_from_deltas(
+    path: str,
+    deltas: Sequence[UsageDelta],
+) -> SessionUsage | None:
+    """把会话的 token 增量折叠成轮数、上下文和成本。"""
+
+    if not deltas:
+        return None
+    totals = TokenUsage()
+    cost = _ModelCost()
+    for delta in deltas:
+        totals = totals.add(delta.usage)
+        cost.add(_estimate_usage(delta.billing_usage or delta.usage, delta.model))
+    last = max(deltas, key=lambda item: item.timestamp)
+    return SessionUsage(
+        path=path,
+        turns=len(deltas),
+        total_tokens=totals.total_tokens,
+        # 中文注释：一次增量的 input_tokens 就是该轮请求的上下文规模，
+        # 取最近一轮作为「当前上下文」的近似值。
+        context_tokens=last.usage.input_tokens,
+        model=last.model,
+        first_at=min(item.timestamp for item in deltas),
+        last_at=last.timestamp,
+        estimated_cost_usd=(
+            _round_number(cost.estimated_cost_usd)
+            if cost.estimated_cost_usd is not None
+            else None
+        ),
+        api_pricing_known=cost.api_pricing_known,
+    )
+
+
+def _file_projects(connection: sqlite3.Connection) -> dict[str, str]:
+    """读取每个 JSONL 文件解析出的 session 工作目录。"""
+
+    try:
+        rows = connection.execute(
+            "SELECT path, state_json FROM usage_file_state"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return {}
+    projects: dict[str, str] = {}
+    for path, state_json in rows:
+        if not isinstance(state_json, str):
+            continue
+        try:
+            state = _state_from_json(state_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if state is not None and state.project:
+            projects[str(path)] = state.project
+    return projects
+
+
+def _matching_paths(pattern: str, projects: Mapping[str, str]) -> list[str]:
+    """返回项目路径匹配关键词的文件，用于按项目筛选记录。"""
+
+    matches = [
+        path
+        for path, project in projects.items()
+        if _matches_pattern(project, pattern)
+    ]
+    # 中文注释：极端情况下避免生成过长的 IN 子句。
+    return matches[:500]
+
+
+def _matches_pattern(value: str, pattern: str) -> bool:
+    """按 LIKE 转义规则做一次大小写不敏感匹配。"""
+
+    needle = pattern.strip("%").replace("\\%", "%").replace("\\_", "_")
+    return needle.lower() in value.lower()
+
+
+def _project_clause(
+    pattern: str,
+    projects: Mapping[str, str],
+) -> tuple[str, list[Any]]:
+    """生成项目筛选子句：记录自带项目或文件级项目命中都算匹配。"""
+
+    paths = _matching_paths(pattern, projects)
+    clause = "COALESCE(project, '') LIKE ? ESCAPE '\\'"
+    parameters: list[Any] = [pattern]
+    if paths:
+        placeholders = ", ".join("?" for _ in paths)
+        clause = f"({clause} OR path IN ({placeholders}))"
+        parameters.extend(paths)
+    return clause, parameters
+
+
+def _keyword_clause(
+    pattern: str,
+    projects: Mapping[str, str],
+) -> tuple[str, list[Any]]:
+    """生成关键词子句：匹配会话路径、模型、项目或文件级项目。"""
+
+    paths = _matching_paths(pattern, projects)
+    clause = (
+        "(path LIKE ? ESCAPE '\\' OR COALESCE(project, '') LIKE ? ESCAPE '\\' "
+        "OR model LIKE ? ESCAPE '\\'"
+    )
+    parameters: list[Any] = [pattern, pattern, pattern]
+    if paths:
+        placeholders = ", ".join("?" for _ in paths)
+        clause += f" OR path IN ({placeholders})"
+        parameters.extend(paths)
+    return f"{clause})", parameters
+
+
+def _local_day(timestamp: float) -> str:
+    """把时间戳格式化为本地自然日，与用量趋势的日期口径一致。"""
+
+    return (
+        datetime.fromtimestamp(float(timestamp))
+        .astimezone()
+        .strftime("%Y-%m-%d")
+    )
+
+
+def _search_bucket_key(
+    group: str,
+    date_key: str,
+    row: _IndexRow,
+    model: str,
+) -> tuple[Any, ...]:
+    """返回一个检索分组的键：按会话、按日期或按模型。"""
+
+    if group == "date":
+        return (date_key,)
+    if group == "model":
+        return (model,)
+    return (date_key, row.path, model)
+
+
+def _search_row_to_dict(bucket: Mapping[str, Any]) -> dict[str, Any]:
+    """把一个检索分组转换为 Dashboard / CLI 安全输出。"""
+
+    usage: TokenUsage = bucket["usage"]
+    cost: _ModelCost = bucket["cost"]
+    models = [
+        name
+        for name, _ in sorted(
+            bucket["models"].items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+    payload: dict[str, Any] = {
+        "key": bucket["key"],
+        "date": bucket["date"],
+        "session_id": bucket["session_id"],
+        "session_path": bucket["session_path"],
+        "model": bucket["model"],
+        "models": models[:8],
+        "project": bucket["project"],
+        "usage": usage.to_dict(),
+        "total_tokens": usage.total_tokens,
+        "records": bucket["records"],
+        "first_at": bucket["first_at"],
+        "last_at": bucket["last_at"],
+    }
+    payload.update(cost.to_dict())
+    return payload
+
+
+def _search_sort_key(sort: str) -> Any:
+    """返回检索结果的排序键：最近、token 总量或金额。"""
+
+    if sort == "tokens":
+        return lambda row: (-int(row["total_tokens"]), -float(row["last_at"]))
+    if sort == "cost":
+        return lambda row: (
+            row["estimated_cost_usd"] is None,
+            -float(row["estimated_cost_usd"] or 0.0),
+            -float(row["last_at"]),
+        )
+    return lambda row: (-float(row["last_at"]), -int(row["total_tokens"]))
+
+
+def _empty_search_totals() -> dict[str, Any]:
+    """返回空检索的合计结构。"""
+
+    return {
+        "usage": TokenUsage().to_dict(),
+        "total_tokens": 0,
+        "cost_usd": None,
+        "api_pricing_known": True,
+        "cache_savings_usd": None,
+        "rows": 0,
+        "records": 0,
+        "sessions": 0,
+        "models": 0,
+        "first_at": None,
+        "last_at": None,
+    }
 
 
 def _delta_to_row(path: str, kind: str, delta: UsageDelta) -> tuple[object, ...]:
@@ -974,6 +1506,8 @@ class UsageAggregator:
         self._snapshot_cache: dict[str, Any] | None = None
         self._snapshot_cached_at = 0.0
         self._snapshot_scope: tuple[tuple[str, str, str, str], ...] = ()
+        self._facets_cache: dict[str, Any] | None = None
+        self._facets_cached_at = 0.0
         self._index_cursor = 0
         self._deduplicated_files = 0
         self._deduplicated_bytes = 0
@@ -1250,6 +1784,241 @@ class UsageAggregator:
                 observed_at,
                 window_days=since_days if since is not None else None,
             )
+
+    @staticmethod
+    def empty_search(
+        group: str = "session",
+        sort: str = "recent",
+        limit: int = _DEFAULT_SEARCH_LIMIT,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """返回没有用量索引时仍可被 Dashboard 使用的空检索结构。"""
+
+        return {
+            "available": False,
+            "group": group,
+            "sort": sort,
+            "limit": limit,
+            "offset": offset,
+            "matched_rows": 0,
+            "has_more": False,
+            "truncated": False,
+            "scanned_records": 0,
+            "rows": [],
+            "totals": _empty_search_totals(),
+        }
+
+    def usage_facets(self, now: float | None = None) -> dict[str, Any]:
+        """返回索引整体范围，供检索页填充模型下拉和范围提示。"""
+
+        observed_at = time.time() if now is None else float(now)
+        with self._lock:
+            cached = self._facets_cache
+            if (
+                cached is not None
+                and observed_at - self._facets_cached_at < _FACETS_CACHE_SECONDS
+            ):
+                return cached
+        store = self._persistent
+        facets = (
+            store.facets()
+            if store is not None
+            else {
+                "records": 0,
+                "sessions": 0,
+                "models": [],
+                "first_at": None,
+                "last_at": None,
+            }
+        )
+        facets["available"] = store is not None and facets["records"] > 0
+        with self._lock:
+            self._facets_cache = facets
+            self._facets_cached_at = observed_at
+        return facets
+
+    def search(
+        self,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        models: Sequence[str] = (),
+        session: str | None = None,
+        project: str | None = None,
+        keyword: str | None = None,
+        group: str = "session",
+        sort: str = "recent",
+        limit: int = _DEFAULT_SEARCH_LIMIT,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """按日期、模型和会话检索已落盘的 token 用量历史。"""
+
+        if group not in _USAGE_SEARCH_GROUPS:
+            raise ValueError(f"未知分组方式: {group}")
+        if sort not in _USAGE_SEARCH_SORTS:
+            raise ValueError(f"未知排序方式: {sort}")
+        if limit <= 0 or limit > _MAX_SEARCH_LIMIT:
+            raise ValueError(f"limit 必须在 1 到 {_MAX_SEARCH_LIMIT} 之间")
+        if offset < 0:
+            raise ValueError("offset 不能小于 0")
+        store = self._persistent
+        if store is None:
+            return self.empty_search(group=group, sort=sort, limit=limit, offset=offset)
+        rows = store.search_deltas(
+            since=since,
+            until=until,
+            models=models,
+            session=session,
+            project=project,
+            keyword=keyword,
+            limit=_MAX_SEARCH_ROWS + 1,
+        )
+        truncated = len(rows) > _MAX_SEARCH_ROWS
+        if truncated:
+            rows = rows[:_MAX_SEARCH_ROWS]
+        total_deltas = {row.path for row in rows if row.kind == "total"}
+        buckets: dict[tuple[Any, ...], dict[str, Any]] = {}
+        totals_usage = TokenUsage()
+        totals_cost = _ModelCost()
+        session_paths: set[str] = set()
+        model_names: set[str] = set()
+        scanned_records = 0
+        first_at: float | None = None
+        last_at: float | None = None
+        for row in rows:
+            # 中文注释：一个文件同时有 total 和 fallback 时只用 total，
+            # 与 _CachedFile.deltas 的取值规则保持一致，避免重复计数。
+            if row.kind != "total" and row.path in total_deltas:
+                continue
+            delta = row.delta()
+            if delta is None:
+                continue
+            scanned_records += 1
+            estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model)
+            date_key = _local_day(delta.timestamp)
+            key = _search_bucket_key(group, date_key, row, delta.model)
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = {
+                    "key": "|".join(str(part) for part in key),
+                    "date": date_key,
+                    "session_id": (
+                        _codex_session_id(Path(row.path)) or Path(row.path).stem
+                        if group == "session"
+                        else None
+                    ),
+                    "session_path": row.path if group == "session" else None,
+                    "model": delta.model if group == "session" else None,
+                    "models": {},
+                    "project": row.project,
+                    "usage": TokenUsage(),
+                    "cost": _ModelCost(),
+                    "records": 0,
+                    "first_at": delta.timestamp,
+                    "last_at": delta.timestamp,
+                }
+                buckets[key] = bucket
+            bucket["usage"] = bucket["usage"].add(delta.usage)
+            bucket["cost"].add(estimate)
+            bucket["models"][delta.model] = (
+                bucket["models"].get(delta.model, 0) + delta.usage.total_tokens
+            )
+            bucket["records"] += 1
+            bucket["first_at"] = min(bucket["first_at"], delta.timestamp)
+            bucket["last_at"] = max(bucket["last_at"], delta.timestamp)
+            if bucket["project"] is None:
+                bucket["project"] = row.project
+            totals_usage = totals_usage.add(delta.usage)
+            totals_cost.add(estimate)
+            session_paths.add(row.path)
+            model_names.add(delta.model)
+            first_at = (
+                delta.timestamp if first_at is None else min(first_at, delta.timestamp)
+            )
+            last_at = (
+                delta.timestamp if last_at is None else max(last_at, delta.timestamp)
+            )
+
+        results = [
+            _search_row_to_dict(bucket) for bucket in buckets.values()
+        ]
+        results.sort(key=_search_sort_key(sort))
+        page = results[offset : offset + limit]
+        totals = {
+            "usage": totals_usage.to_dict(),
+            "total_tokens": totals_usage.total_tokens,
+            "cost_usd": (
+                _round_number(totals_cost.estimated_cost_usd)
+                if totals_cost.estimated_cost_usd is not None
+                else None
+            ),
+            "api_pricing_known": totals_cost.api_pricing_known,
+            "cache_savings_usd": (
+                _round_number(totals_cost.cache_savings_usd)
+                if totals_cost.cache_savings_usd is not None
+                else None
+            ),
+            "rows": len(results),
+            "records": scanned_records,
+            "sessions": len(session_paths),
+            "models": len(model_names),
+            "first_at": first_at,
+            "last_at": last_at,
+        }
+        return {
+            "available": True,
+            "group": group,
+            "sort": sort,
+            "limit": limit,
+            "offset": offset,
+            "matched_rows": len(results),
+            "has_more": offset + len(page) < len(results),
+            "truncated": truncated,
+            "scanned_records": scanned_records,
+            "rows": page,
+            "totals": totals,
+        }
+
+    def refresh_index(
+        self,
+        registries: Mapping[str, MultiSessionRegistry],
+        account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """执行一轮有界索引，让没有 Dashboard 的进程也能用最新用量数据。"""
+
+        metadata_by_profile = account_metadata or {}
+        with self._lock:
+            return self._index_once(registries, metadata_by_profile, now)
+
+    def session_usages(self, paths: Sequence[str]) -> dict[str, SessionUsage]:
+        """按 JSONL 路径返回会话的轮数、上下文和累计用量。"""
+
+        wanted = [str(path) for path in paths if path]
+        if not wanted:
+            return {}
+        usages: dict[str, SessionUsage] = {}
+        store = self._persistent
+        if store is not None:
+            rows = store.session_rows(wanted)
+            grouped: dict[str, list[_IndexRow]] = {}
+            for row in rows:
+                grouped.setdefault(row.path, []).append(row)
+            for path, items in grouped.items():
+                summary = _session_usage_from_rows(path, items)
+                if summary is not None:
+                    usages[path] = summary
+        cached_by_path = {str(path): cached for path, cached in self._cache.items()}
+        for path in wanted:
+            if path in usages:
+                continue
+            cached = cached_by_path.get(str(path))
+            if cached is None:
+                continue
+            summary = _session_usage_from_deltas(path, cached.deltas)
+            if summary is not None:
+                usages[path] = summary
+        return usages
 
     def _scope_key(
         self,
@@ -3229,6 +3998,12 @@ def _codex_session_id(path: Path) -> str | None:
     if match is None:
         return None
     return match.group("session_id").lower()
+
+
+def session_id_from_path(path: Path) -> str:
+    """返回会话展示名：Codex session UUID 或文件名（不含扩展名）。"""
+
+    return _codex_session_id(path) or path.stem
 
 
 def _canonical_source_rank(path: Path) -> tuple[int, int, str]:

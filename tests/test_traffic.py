@@ -8,6 +8,7 @@ from pathlib import Path
 
 from token_monitor.traffic import (
     SocketCounters,
+    TrafficAlert,
     TrafficMonitor,
     TrafficThresholds,
     format_bytes,
@@ -294,6 +295,83 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertTrue(is_loopback("127.0.0.1"))
         self.assertTrue(is_loopback("::1"))
         self.assertFalse(is_loopback("1.1.1.1"))
+
+    def test_new_alerts_are_published_to_sink_with_process_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "project").mkdir()
+            _write_process(
+                root,
+                pid=70,
+                comm="codex",
+                command=("codex",),
+                sockets=(9009,),
+                cwd=root / "project",
+            )
+            counters = {9009: _external_socket(9009, bytes_sent=10)}
+            published: list[tuple[TrafficAlert, ...]] = []
+            monitor = TrafficMonitor(
+                thresholds=TrafficThresholds(
+                    burst_window_seconds=15.0,
+                    burst_warn_bytes=8 * _MIB,
+                    burst_danger_bytes=32 * _MIB,
+                    window_seconds=300.0,
+                    window_warn_bytes=64 * _MIB,
+                    window_danger_bytes=256 * _MIB,
+                    alert_cooldown_seconds=60.0,
+                ),
+                proc_root=root,
+                ignore_pids=(),
+                socket_reader=lambda: counters,
+                alert_sink=published.append,
+            )
+            monitor.poll(now=1_000.0)
+            counters[9009] = _external_socket(9009, bytes_sent=10 + 9 * _MIB)
+            monitor.poll(now=1_002.0)
+            monitor.poll(now=1_004.0)
+            monitor.poll(now=1_006.0)
+
+        self.assertEqual(len(published), 1)
+        self.assertEqual(len(published[0]), 1)
+        alert = published[0][0]
+        self.assertEqual(alert.level, "warn")
+        self.assertEqual(alert.kind, "burst")
+        self.assertEqual(alert.process_key, "codex:70:1000")
+        self.assertEqual(alert.command, "codex")
+        self.assertEqual(alert.cwd, str(root / "project"))
+        self.assertEqual(alert.remote, "203.0.113.10:443")
+        payload = alert.to_dict()
+        self.assertEqual(payload["process_key"], "codex:70:1000")
+        self.assertEqual(payload["cwd"], str(root / "project"))
+
+    def test_sink_failure_does_not_break_traffic_monitoring(self) -> None:
+        def failing_sink(alerts: object) -> None:
+            raise RuntimeError("磁盘写入失败")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _write_process(
+                root,
+                pid=71,
+                comm="grok",
+                command=("grok",),
+                sockets=(9010,),
+            )
+            counters = {9010: _external_socket(9010, bytes_sent=10)}
+            monitor = TrafficMonitor(
+                thresholds=_small_thresholds(),
+                proc_root=root,
+                ignore_pids=(),
+                socket_reader=lambda: counters,
+                alert_sink=failing_sink,
+            )
+            monitor.poll(now=1_000.0)
+            counters[9010] = _external_socket(9010, bytes_sent=10 + 9 * _MIB)
+            with self.assertLogs("token_monitor.traffic", level="ERROR"):
+                snapshot = monitor.poll(now=1_002.0)
+
+        self.assertEqual(snapshot.processes[0].alert_level, "warn")
+        self.assertEqual(len(snapshot.alerts), 1)
 
 
 def _small_thresholds() -> TrafficThresholds:
