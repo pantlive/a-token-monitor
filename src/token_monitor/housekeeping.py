@@ -39,6 +39,8 @@ _SESSION_GLOB = "rollout-*.jsonl"
 _ARCHIVE_PREFIX = "codex-sessions"
 # 中文注释：后台任务只保留最近若干条，供网页轮询进度。
 _MAX_TASKS = 10
+# 中文注释：会话清单带 10 秒缓存，避免网页每 5 秒轮询都重新扫描目录。
+_SESSIONS_CACHE_SECONDS = 10.0
 _MANIFEST_SUFFIX = ".manifest.json"
 
 
@@ -142,21 +144,28 @@ class CleanupCriteria:
 
     older_than_days: int = DEFAULT_RETENTION_DAYS
     min_bytes: int = 0
+    # 中文注释：指定具体会话时忽略保留天数，只按路径精确匹配，
+    # 但仍然跳过活动会话和刚写入过的文件。
+    paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """拒绝无意义的时间范围和大小下限。"""
+        """拒绝无意义的时间范围、大小下限和路径。"""
 
         if self.older_than_days < 1 or self.older_than_days > 3650:
             raise ValueError("older_than_days 必须在 1 到 3650 之间")
         if self.min_bytes < 0:
             raise ValueError("min_bytes 不能小于 0")
+        for item in self.paths:
+            if not str(item).strip():
+                raise ValueError("paths 不能包含空路径")
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
         """返回 Dashboard / CLI 展示字段。"""
 
         return {
             "older_than_days": self.older_than_days,
             "min_bytes": self.min_bytes,
+            "paths": list(self.paths),
         }
 
 
@@ -240,6 +249,9 @@ class HousekeepingMonitor:
         self._tasks: dict[str, dict[str, Any]] = {}
         self._report: dict[str, Any] | None = None
         self._reported_at = 0.0
+        self._sessions_cache: (
+            tuple[float, tuple[SessionFile, ...]] | None
+        ) = None
 
     # ---------------------------------------------------------------- 统计
 
@@ -379,14 +391,25 @@ class HousekeepingMonitor:
 
     # ------------------------------------------------------- 归档 / 清理
 
-    def sessions(self) -> tuple[SessionFile, ...]:
-        """返回所有可归档或清理的会话文件。"""
+    def sessions(self, *, refresh: bool = False) -> tuple[SessionFile, ...]:
+        """返回所有可归档或清理的会话文件（带短 TTL 缓存）。"""
 
+        with self._lock:
+            cached = self._sessions_cache
+            if (
+                not refresh
+                and cached is not None
+                and time.monotonic() - cached[0] < _SESSIONS_CACHE_SECONDS
+            ):
+                return cached[1]
         sessions: list[SessionFile] = []
         for target in self.targets:
             if target.cleanable:
                 sessions.extend(scan_session_files(target))
-        return tuple(sessions)
+        resolved = tuple(sessions)
+        with self._lock:
+            self._sessions_cache = (time.monotonic(), resolved)
+        return resolved
 
     def preview(
         self,
@@ -396,8 +419,71 @@ class HousekeepingMonitor:
     ) -> dict[str, Any]:
         """预览符合条件的会话文件；不修改任何数据。"""
 
-        plan = self.plan(criteria, now=now, sessions=sessions)
-        return plan.to_dict()
+        selected = criteria or CleanupCriteria()
+        plan = self.plan(selected, now=now, sessions=sessions)
+        payload = plan.to_dict()
+        payload["unmatched"] = self.unmatched_paths(selected)
+        return payload
+
+    def unmatched_paths(self, criteria: CleanupCriteria) -> list[str]:
+        """返回指定路径里不存在或不在可归档目录内的项。"""
+
+        if not criteria.paths:
+            return []
+        available = {str(item.path) for item in self.sessions()}
+        return [
+            candidate
+            for candidate in (
+                str(Path(str(item)).expanduser()) for item in criteria.paths
+            )
+            if candidate not in available
+        ]
+
+    def _invalidate_sessions(self) -> None:
+        """归档或清理后丢弃会话清单缓存，下一页立刻看到最新占用。"""
+
+        with self._lock:
+            self._sessions_cache = None
+            self._report = None
+
+    def session_archive_state(
+        self,
+        paths: Sequence[str],
+        now: float | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """返回每个会话文件当前能否单独归档，以及不能的原因。"""
+
+        observed_at = time.time() if now is None else float(now)
+        active = self.active_paths()
+        available = {str(item.path): item for item in self.sessions()}
+        states: dict[str, dict[str, Any]] = {}
+        for raw in paths:
+            if not raw:
+                continue
+            key = str(Path(str(raw)).expanduser())
+            item = available.get(key)
+            if item is None:
+                states[key] = {
+                    "eligible": False,
+                    "reason": "不在可归档的 Codex 会话目录内",
+                }
+                continue
+            if key in active:
+                states[key] = {"eligible": False, "reason": "会话仍在运行"}
+                continue
+            if observed_at - item.modified_at < _MIN_AGE_SECONDS:
+                states[key] = {
+                    "eligible": False,
+                    "reason": "最近 10 分钟内仍在写入",
+                }
+                continue
+            states[key] = {
+                "eligible": True,
+                "reason": None,
+                "size": item.size,
+                "session_id": item.session_id,
+            }
+        return states
 
     def plan(
         self,
@@ -412,18 +498,24 @@ class HousekeepingMonitor:
         cutoff = observed_at - selected_criteria.older_than_days * 86_400
         active = self.active_paths()
         candidates = self.sessions() if sessions is None else tuple(sessions)
+        wanted = (
+            {str(Path(item).expanduser()) for item in selected_criteria.paths}
+            if selected_criteria.paths
+            else None
+        )
         chosen: list[SessionFile] = []
         skipped_active = 0
         skipped_recent = 0
         skipped_small = 0
         for item in candidates:
+            if wanted is not None and str(item.path) not in wanted:
+                continue
             if str(item.path) in active:
                 skipped_active += 1
                 continue
-            if (
-                item.modified_at > cutoff
-                or observed_at - item.modified_at < _MIN_AGE_SECONDS
-            ):
+            too_recent = observed_at - item.modified_at < _MIN_AGE_SECONDS
+            # 中文注释：指定具体会话时不再看保留天数，但过新的文件仍然跳过。
+            if too_recent or (wanted is None and item.modified_at > cutoff):
                 skipped_recent += 1
                 continue
             if item.size < selected_criteria.min_bytes:
@@ -503,6 +595,7 @@ class HousekeepingMonitor:
             temporary.unlink(missing_ok=True)
             raise HousekeepingError(f"归档失败: {error}") from error
         deleted, failed = _delete_files(plan.files, progress=progress, total=plan.count)
+        self._invalidate_sessions()
         manifest = {
             "created_at": observed_at,
             "action": "archive",
@@ -558,6 +651,7 @@ class HousekeepingMonitor:
             progress=progress,
             total=plan.count,
         )
+        self._invalidate_sessions()
         if plan.count:
             self.logger.info(
                 "已清理 %d 个会话文件（%s）",

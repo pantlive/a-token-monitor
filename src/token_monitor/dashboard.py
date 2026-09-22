@@ -58,6 +58,8 @@ from .usage import (
 
 # 中文注释：告警历史的写接口只接受小请求体，避免 Dashboard 被当成通用上传入口。
 _MAX_REQUEST_BYTES = 64 * 1024
+# 中文注释：结束不超过该时间的会话仍显示在会话表里，方便单独归档。
+_RECENT_FINISHED_SECONDS = 24 * 3600.0
 
 _DASHBOARD_HTML = r"""<!doctype html>
 <html lang="zh-CN">
@@ -476,6 +478,8 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .usage-number { white-space: nowrap; }
     #alert-list { display: grid; gap: 8px; margin-bottom: 20px; }
     #alert-list:empty { display: none; }
+    #session-notice { display: grid; gap: 8px; margin-bottom: 20px; }
+    #session-notice:empty { display: none; }
     .alert-head { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
     .alert-head-spacer { flex: 1 1 auto; }
     .alert-row { display: grid; grid-template-columns: 3px minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
@@ -686,6 +690,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
 
     <div id="error" class="error" role="alert"></div>
     <div id="alert-list"></div>
+    <div id="session-notice"></div>
 
     <section class="kpi-grid" aria-label="监控摘要">
       <article class="kpi-card accent-cyan"><div class="kpi-top"><span class="kpi-label">近 15 秒外发</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16M13 5l7 7-7 7"/></svg></span></div><div id="upload-burst-count" class="kpi-value">—</div><div class="kpi-foot"><strong id="upload-alert-count">—</strong> 条未读告警 · <a href="#alert-history">历史</a></div></article>
@@ -705,7 +710,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
 
     <section id="accounts" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片按真实账号 ID 分组，profile 混合登录也不会串额；活动会话默认折叠，可点击再展开。</p></div>
+        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片按真实账号 ID 分组，profile 混合登录也不会串额；活动会话默认折叠，可点击再展开，会话表里可直接归档单个已结束的 Codex 会话。</p></div>
         <div class="section-meta"><span class="section-count" id="account-section-count">— 个账号</span></div>
       </div>
       <div id="account-list" class="account-list"><div class="empty-state">正在读取账号状态…</div></div>
@@ -917,8 +922,9 @@ _DASHBOARD_HTML = r"""<!doctype html>
       return '<div class="empty-state">没有活动会话</div>';
     }
     const renderRow = (session) => {
+      const active = session.active !== false;
       const status = escapeHtml(statusNames[session.status] || session.status || '未知');
-      const cssStatus = statusClass(session.status);
+      const cssStatus = active ? statusClass(session.status) : 'other';
       const pids = session.pids && session.pids.length ? session.pids.join(', ') : '无';
       const detail = session.last_error || '—';
       const usage = session.usage || {};
@@ -929,22 +935,29 @@ _DASHBOARD_HTML = r"""<!doctype html>
       const usageCell = turns === null
         ? '<span class="muted">—</span>'
         : `${escapeHtml(String(turns))} 轮<div class="muted">上下文 ${escapeHtml(formatDataSize(usage.context_tokens || 0))} · 累计 ${escapeHtml(formatDataSize(usage.total_tokens || 0))}</div>${advice}`;
+      const archive = session.archive || {};
+      const archiveCell = !session.jsonl_path
+        ? '<span class="muted">无 JSONL</span>'
+        : archive.eligible
+          ? `<button class="btn mini" type="button" data-archive-session="${escapeHtml(session.jsonl_path)}" title="把这个会话压缩归档（tar.gz，可恢复）">归档此会话</button>`
+          : `<span class="muted" title="${escapeHtml(archive.reason || '当前不可归档')}">不可归档</span>`;
       return `<tr>
         <td><div class="session-id">${escapeHtml(session.session_id || session.thread_id)}</div><div class="muted">${escapeHtml(session.source)}</div></td>
-        <td><span class="pill ${cssStatus}">${status}</span></td>
+        <td><span class="pill ${cssStatus}">${status}</span>${active ? '' : '<div class="cell-sub">已结束</div>'}</td>
         <td>${escapeHtml(pids)}<div class="muted">${session.process_backed ? '已绑定 JSONL' : '无进程证据'}</div></td>
         <td class="usage-number">${usageCell}</td>
         <td class="cwd">${escapeHtml(session.cwd || '未知')}</td>
         <td class="event">${escapeHtml(session.last_event_type || '未知')}<div class="muted">${escapeHtml(formatTime(session.last_event_at))}</div></td>
         <td class="error-text">${escapeHtml(detail)}</td>
+        <td>${archiveCell}</td>
       </tr>`;
     };
     const expanded = expandedSessionTables.has(accountKey);
     return `<div class="session-collapsible"${expanded ? '' : ' style="display:none"'}><div class="table-wrap session-table"><table>
-      <thead><tr><th>会话</th><th>状态</th><th>进程</th><th>轮数 / 上下文</th><th>工作目录</th><th>最近事件</th><th>说明</th></tr></thead>
+      <thead><tr><th>会话</th><th>状态</th><th>进程</th><th>轮数 / 上下文</th><th>工作目录</th><th>最近事件</th><th>说明</th><th>归档</th></tr></thead>
       <tbody>${sessions.map(renderRow).join('')}</tbody>
     </table></div></div>
-    <button class="session-toggle" type="button" data-session-toggle="${escapeHtml(accountKey)}" aria-expanded="${expanded}">${expanded ? '收起会话列表' : `展开 ${sessions.length} 个活动会话`}</button>`;
+    <button class="session-toggle" type="button" data-session-toggle="${escapeHtml(accountKey)}" aria-expanded="${expanded}">${expanded ? '收起会话列表' : `展开 ${sessions.length} 个会话（含最近结束）`}</button>`;
   };
   let selectedUsagePeriod = 'today';
   let selectedUsageModel = '';
@@ -2052,8 +2065,9 @@ _DASHBOARD_HTML = r"""<!doctype html>
     note.textContent = text;
     return note;
   };
-  const pollHousekeepingTask = async (taskId, action) => {
+  const pollHousekeepingTask = async (taskId, action, report) => {
     const label = action === 'archive' ? '归档' : '清理';
+    const show = report || housekeepingNote;
     const deadline = Date.now() + 30 * 60 * 1000;
     while (Date.now() < deadline) {
       await new Promise((resolve) => window.setTimeout(resolve, 800));
@@ -2063,13 +2077,13 @@ _DASHBOARD_HTML = r"""<!doctype html>
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         payload = await response.json();
       } catch (error) {
-        housekeepingNote(`${label}进度查询失败：${error.message}`);
+        show(`${label}进度查询失败：${error.message}`, 'danger');
         return;
       }
       const task = payload.task;
       if (!task) {
-        housekeepingNote(`${label}任务已结束（任务记录已被清理）。`);
-        refreshHousekeeping();
+        await refreshHousekeeping();
+        show(`${label}任务已结束（任务记录已被清理）。`, 'info');
         return;
       }
       const progress = task.progress || {};
@@ -2079,21 +2093,22 @@ _DASHBOARD_HTML = r"""<!doctype html>
             : progress.phase === 'delete' ? '删除原文件'
               : '准备文件清单';
         const percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
-        housekeepingNote(`${label}进行中：${phase} ${progress.done}/${progress.total}（${percent}%），已处理 ${formatDataSize(progress.bytes_done || 0)} / ${formatDataSize(progress.total_bytes || 0)}。`);
+        show(`${label}进行中：${phase} ${progress.done}/${progress.total}（${percent}%），已处理 ${formatDataSize(progress.bytes_done || 0)} / ${formatDataSize(progress.total_bytes || 0)}。`, 'info');
         continue;
       }
       if (task.state === 'failed') {
-        housekeepingNote(`${label}失败：${task.error || '未知原因'}`);
-        refreshHousekeeping();
+        await refreshHousekeeping();
+        show(`${label}失败：${task.error || '未知原因'}`, 'danger');
         return;
       }
       const result = task.result || {};
-      housekeepingNote(`${label}完成：${result.count || 0} 个文件，释放 ${formatDataSize(result.bytes || 0)}${result.archive ? `，归档 ${String(result.archive).split('/').pop()}` : ''}。`);
-      refreshHousekeeping();
+      const detail = `${label}完成：${result.count || 0} 个文件，释放 ${formatDataSize(result.bytes || 0)}${result.archive ? `，归档 ${String(result.archive).split('/').pop()}` : ''}。`;
+      await refreshHousekeeping();
+      show(detail, 'info');
       return;
     }
-    housekeepingNote(`${label}仍在后台执行，可稍后刷新查看结果。`);
-    refreshHousekeeping();
+    await refreshHousekeeping();
+    show(`${label}仍在后台执行，可稍后刷新查看结果。`, 'info');
   };
   const mutateHousekeeping = async (action, body) => {
     const criteria = housekeepingCriteria();
@@ -2124,6 +2139,38 @@ _DASHBOARD_HTML = r"""<!doctype html>
       );
     } catch (error) {
       if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">操作失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
+  // 单会话归档的进度显示在页面顶部关注区，折叠的磁盘分区里看不到提示。
+  const archiveNotice = (text, level) => {
+    // 中文注释：单独一个容器，避免被每 5 秒的 renderAlerts 覆盖。
+    const container = document.getElementById('session-notice');
+    if (!container) return;
+    let note = document.getElementById('session-archive-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'session-archive-note';
+      container.append(note);
+    }
+    note.className = `alert-row ${level === 'danger' ? 'danger' : 'warn'}`;
+    note.innerHTML = `<span class="alert-accent" aria-hidden="true"></span><div class="alert-body"><div class="alert-title">${escapeHtml(text)}</div><div class="alert-detail">来自活动会话表的「归档此会话」，归档文件可在磁盘与会话管理里恢复。</div></div><a class="alert-link" href="#housekeeping">查看磁盘与会话管理</a>`;
+  };
+  const archiveSession = async (path) => {
+    archiveNotice('正在归档会话…', 'warn');
+    try {
+      const response = await fetch('/api/housekeeping', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'archive', session: path, confirm: true, async: true })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      if (payload.task) {
+        await pollHousekeepingTask(payload.task.id, 'archive', archiveNotice);
+      }
+      refresh();
+    } catch (error) {
+      archiveNotice(`归档该会话失败：${error.message}`, 'danger');
     }
   };
   const renderAccounts = (state) => {
@@ -2165,6 +2212,14 @@ _DASHBOARD_HTML = r"""<!doctype html>
         ${renderSessionTable(accountSessions, name)}
       </article>`;
     }).join('');
+    container.querySelectorAll('[data-archive-session]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const path = button.dataset.archiveSession || '';
+        if (!path) return;
+        if (!window.confirm(`确认把这个会话压缩归档（tar.gz）并删除原文件？可在「磁盘与会话管理」里恢复。\n${path}`)) return;
+        archiveSession(path);
+      });
+    });
     container.querySelectorAll('[data-session-toggle]').forEach((button) => {
       button.addEventListener('click', () => {
         const key = button.dataset.sessionToggle || '';
@@ -2469,6 +2524,23 @@ class DashboardServer:
         self.close()
 
 
+def _visible_sessions(sessions: Sequence[TrackedSession]) -> list[TrackedSession]:
+    """返回会话表要展示的会话：活动会话 + 最近结束但仍可归档的会话。"""
+
+    now = time.time()
+    visible: list[TrackedSession] = []
+    for session in sessions:
+        if session.is_active:
+            visible.append(session)
+            continue
+        if not session.jsonl_path:
+            continue
+        # 中文注释：刚结束的会话留在表里，方便直接归档单个会话。
+        if now - float(session.last_seen_at or 0.0) <= _RECENT_FINISHED_SECONDS:
+            visible.append(session)
+    return visible
+
+
 def build_dashboard_state(
     registry: MultiSessionRegistry,
     account_name: str = "codex",
@@ -2479,15 +2551,18 @@ def build_dashboard_state(
     """读取 SQLite 并构造不包含提示词的 Dashboard 数据。"""
 
     quota = registry.load_quota()
-    sessions = registry.list_sessions(active_only=True)
+    all_sessions = registry.list_sessions(active_only=False)
+    sessions = _visible_sessions(all_sessions)
     status_counts: dict[str, int] = {}
     for session in sessions:
         status_counts[session.status.value] = (
             status_counts.get(session.status.value, 0) + 1
         )
-    status_counts["active"] = len(sessions)
+    active_sessions = [item for item in sessions if item.is_active]
+    status_counts["active"] = len(active_sessions)
+    status_counts["recent"] = len(sessions) - len(active_sessions)
     status_counts["process_backed"] = sum(
-        session.is_process_backed for session in sessions
+        session.is_process_backed for session in active_sessions
     )
     return {
         "updated_at": time.time(),
@@ -2790,13 +2865,18 @@ def build_multi_dashboard_state(
         if isinstance(status, str) and status:
             account["counts"][status] = account["counts"].get(status, 0) + 1
             counts[status] = counts.get(status, 0) + 1
-        account["counts"]["active"] = account["counts"].get("active", 0) + 1
-        counts["active"] = counts.get("active", 0) + 1
-        if session.get("process_backed"):
-            account["counts"]["process_backed"] = (
-                account["counts"].get("process_backed", 0) + 1
-            )
-            counts["process_backed"] = counts.get("process_backed", 0) + 1
+        # 中文注释：会话表里也会列出最近结束的会话，但它们不计入活动数。
+        if session.get("active", True):
+            account["counts"]["active"] = account["counts"].get("active", 0) + 1
+            counts["active"] = counts.get("active", 0) + 1
+            if session.get("process_backed"):
+                account["counts"]["process_backed"] = (
+                    account["counts"].get("process_backed", 0) + 1
+                )
+                counts["process_backed"] = counts.get("process_backed", 0) + 1
+        else:
+            account["counts"]["recent"] = account["counts"].get("recent", 0) + 1
+            counts["recent"] = counts.get("recent", 0) + 1
 
     quotas = list(quota_by_key.values())
     accounts = list(accounts_by_key.values())
@@ -2913,6 +2993,7 @@ def _session_summary(
         "confidence": session.confidence.value,
         "pids": list(session.pids),
         "process_backed": session.is_process_backed,
+        "active": session.is_active,
         "last_event_at": session.last_event_at,
         "last_event_type": session.last_event_type,
         "jsonl_path": session.jsonl_path,
@@ -3095,6 +3176,37 @@ def _usage_index_summary(
         "first_at": facets.get("first_at"),
         "last_at": facets.get("last_at"),
     }
+
+
+def _attach_session_archive(
+    state: dict[str, Any],
+    monitor: HousekeepingMonitor | None,
+) -> None:
+    """给活动会话标注能否单独归档，供会话表里的「归档」按钮使用。"""
+
+    sessions = state.get("sessions")
+    if monitor is None or not isinstance(sessions, list):
+        return
+    paths = [
+        str(item.get("jsonl_path"))
+        for item in sessions
+        if isinstance(item, dict) and item.get("jsonl_path")
+    ]
+    if not paths:
+        return
+    try:
+        states = monitor.session_archive_state(paths)
+    except (OSError, ValueError):
+        return
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        raw = session.get("jsonl_path")
+        if not raw:
+            continue
+        entry = states.get(str(raw))
+        if entry is not None:
+            session["archive"] = entry
 
 
 def _attach_session_advice(
@@ -3409,6 +3521,7 @@ def _make_handler(
                     usage_aggregator,
                     thresholds_in_use,
                 )
+                _attach_session_archive(state, housekeeping)
                 state["housekeeping"] = _housekeeping_summary(housekeeping)
                 state["usage_index"] = _usage_index_summary(usage_aggregator)
                 self._send_json(status=200, payload=state)
@@ -3637,6 +3750,7 @@ def _make_handler(
                     usage_aggregator,
                     thresholds_in_use,
                 )
+                _attach_session_archive(state, housekeeping)
                 state["housekeeping"] = _housekeeping_summary(housekeeping)
                 state["usage_index"] = _usage_index_summary(usage_aggregator)
                 self._send_json(
@@ -3778,10 +3892,21 @@ def _make_handler(
                 min_bytes = int(
                     float(body.get("min_size_mb") or 0) * 1024 * 1024
                 )
-                criteria = CleanupCriteria(
-                    older_than_days=days,
-                    min_bytes=max(0, min_bytes),
-                )
+                session_path = str(body.get("session") or "").strip()
+                if session_path:
+                    # 中文注释：单个会话先确认它确实在自己的可归档目录里，
+                    # 不接受网页传来的任意路径。
+                    state = monitor.session_archive_state([session_path])
+                    entry = state.get(str(Path(session_path).expanduser()))
+                    if entry is None or not entry.get("eligible"):
+                        reason = (entry or {}).get("reason") or "会话不存在"
+                        raise HousekeepingError(f"该会话当前不能归档：{reason}")
+                    criteria = CleanupCriteria(paths=(session_path,))
+                else:
+                    criteria = CleanupCriteria(
+                        older_than_days=days,
+                        min_bytes=max(0, min_bytes),
+                    )
                 if action == "archive" and body.get("async") is True:
                     if body.get("confirm") is not True:
                         raise HousekeepingError("归档需要确认")

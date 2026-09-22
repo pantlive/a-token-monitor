@@ -697,6 +697,17 @@ def _add_session_cleanup_options(parser: argparse.ArgumentParser) -> None:
         help="直接删除符合条件的会话文件",
     )
     parser.add_argument(
+        "--session",
+        dest="session_keys",
+        action="append",
+        default=None,
+        metavar="ID|PATH",
+        help=(
+            "只处理指定会话（session ID 或 JSONL 路径），可重复传入；"
+            "与 --archive/--clean 一起使用时忽略 --older-than"
+        ),
+    )
+    parser.add_argument(
         "--restore",
         type=Path,
         default=None,
@@ -1819,6 +1830,7 @@ def _session_housekeeping(args: argparse.Namespace) -> int:
     criteria = CleanupCriteria(
         older_than_days=args.older_than,
         min_bytes=int(args.min_size_mb * 1024 * 1024),
+        paths=_resolve_session_paths(monitor, args.session_keys),
     )
     if args.archive and args.clean:
         raise ValueError("--archive 和 --clean 不能同时使用")
@@ -1873,15 +1885,51 @@ def _session_housekeeping(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_session_paths(
+    monitor: HousekeepingMonitor,
+    keys: Sequence[str] | None,
+) -> tuple[str, ...]:
+    """把 --session 的会话 ID 或路径解析成可归档的 JSONL 路径。"""
+
+    if not keys:
+        return ()
+    available = {item.session_id: str(item.path) for item in monitor.sessions()}
+    by_path = {str(item.path) for item in monitor.sessions()}
+    resolved: list[str] = []
+    for key in keys:
+        text = str(key).strip()
+        if not text:
+            continue
+        candidate = str(Path(text).expanduser())
+        if candidate in by_path:
+            resolved.append(candidate)
+            continue
+        match = available.get(text) or available.get(Path(text).stem)
+        if match is None:
+            raise HousekeepingError(
+                f"找不到会话 {text}；可用 token-monitor sessions --all 查看会话 ID"
+            )
+        resolved.append(match)
+    return tuple(resolved)
+
+
 def _print_cleanup_preview(preview: dict[str, object], days: int) -> None:
     """打印一次归档/清理预览。"""
 
+    criteria = preview.get("criteria") or {}
+    scope = (
+        "指定的会话"
+        if criteria.get("paths")
+        else f"超过 {days} 天的会话文件"
+    )
     sys.stdout.write(
-        f"将处理 {preview['count']} 个超过 {days} 天的会话文件，"
+        f"将处理 {preview['count']} 个{scope}，"
         f"约 {format_bytes(int(preview['bytes']))}"
         f"（跳过活动会话 {preview['skipped_active']} 个、过新 "
         f"{preview['skipped_recent']} 个、小于下限 {preview['skipped_small']} 个）。\n"
     )
+    for item in preview.get("unmatched") or []:
+        sys.stdout.write(f"  跳过无法匹配的会话：{item}\n")
     for item in list(preview.get("files") or [])[:20]:
         sys.stdout.write(
             f"  {_format_alert_time(float(item['modified_at']))} | "

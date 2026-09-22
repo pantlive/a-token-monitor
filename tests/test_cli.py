@@ -895,7 +895,99 @@ class CliTests(unittest.TestCase):
         self.assertTrue(still_there)
 
 
-def _write_stale_session(home: Path, days_old: float) -> Path:
+    def test_sessions_archive_single_session_by_id(self) -> None:
+        """--session 支持按会话 ID 或路径单独归档，缺省只预览。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            target = _write_stale_session(home, 100)
+            other = _write_stale_session(
+                home,
+                100,
+                session_id="77777777-7777-4777-8777-777777777777",
+                day="02",
+            )
+            session_id = target.name.split("-", 6)[-1].removesuffix(".jsonl")
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                previewed = main(
+                    [
+                        "--state-dir",
+                        str(root / "state"),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--archive",
+                        "--session",
+                        session_id,
+                        "--json",
+                    ]
+                )
+            preview = json.loads(buffer.getvalue())
+
+            self.assertEqual(previewed, 0)
+            self.assertEqual(preview["count"], 1)
+            self.assertEqual(preview["files"][0]["path"], str(target))
+            self.assertTrue(target.exists())
+            self.assertTrue(other.exists())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                archived = main(
+                    [
+                        "--state-dir",
+                        str(root / "state"),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--archive",
+                        "--session",
+                        str(target),
+                        "--yes",
+                        "--json",
+                    ]
+                )
+            result = json.loads(buffer.getvalue())
+            target_exists = target.exists()
+            other_exists = other.exists()
+
+        self.assertEqual(archived, 0)
+        self.assertEqual(result["count"], 1)
+        self.assertFalse(target_exists)
+        self.assertTrue(other_exists)
+
+    def test_sessions_archive_unknown_session_is_rejected(self) -> None:
+        """未知会话 ID 应给出提示并以退出码 2 结束。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            _write_stale_session(home, 100)
+
+            code = main(
+                [
+                    "--state-dir",
+                    str(root / "state"),
+                    "--codex-home",
+                    str(home),
+                    "sessions",
+                    "--archive",
+                    "--session",
+                    "not-a-real-session",
+                ]
+            )
+
+        self.assertEqual(code, 2)
+
+
+def _write_stale_session(
+    home: Path,
+    days_old: float,
+    session_id: str = "99999999-9999-4999-8999-999999999999",
+    day: str = "01",
+) -> Path:
     """写入一个超过保留期的 Codex session 文件。"""
 
     path = (
@@ -903,8 +995,8 @@ def _write_stale_session(home: Path, days_old: float) -> Path:
         / "sessions"
         / "2026"
         / "06"
-        / "01"
-        / "rollout-2026-06-01T01-00-00-99999999-9999-4999-8999-999999999999.jsonl"
+        / day
+        / f"rollout-2026-06-{day}T01-00-00-{session_id}.jsonl"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"x" * 4096)
