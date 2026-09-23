@@ -38,6 +38,14 @@ from .dsh import (
     read_dsh_account,
     resolve_dsh_homes,
 )
+from .claude import (
+    claude_home_for,
+    list_claude_transcripts,
+    parse_claude_chunk,
+    read_claude_account,
+    resolve_claude_homes,
+    resolve_sidechain_policy,
+)
 from .kimi import (
     KimiSessionInfo,
     kimi_wire_session_id,
@@ -65,6 +73,7 @@ _API_PRICING_SOURCE = "https://developers.openai.com/api/docs/pricing"
 _GROK_API_PRICING_SOURCE = "https://docs.x.ai/docs/models"
 _KIMI_API_PRICING_SOURCE = "https://platform.kimi.com/docs/pricing/chat"
 _DSH_API_PRICING_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing"
+_CLAUDE_API_PRICING_SOURCE = "https://docs.claude.com/en/docs/about-claude/pricing"
 # 中文注释：解析规则变化时必须升版本，避免沿用错误的历史增量。
 _USAGE_INDEX_VERSION = 6
 _USAGE_LINE_HINTS = (
@@ -274,6 +283,54 @@ _MODEL_PRICING: dict[str, ModelPricing] = {
         long_cached_multiplier=1.0,
         long_output_multiplier=1.0,
     ),
+    # 中文注释：Anthropic 公开单价（美元 / 百万 token）。缓存读为输入价的
+    # 0.1×，缓存写由 _estimate_amount 统一按 1.25× 输入价计算（5 分钟缓存；
+    # 1 小时缓存官方为 2×，本工具不做区分）。
+    "claude-opus-4-5": ModelPricing(
+        input_usd=5,
+        cached_input_usd=0.5,
+        output_usd=25,
+    ),
+    "claude-opus-4-1": ModelPricing(
+        input_usd=15,
+        cached_input_usd=1.5,
+        output_usd=75,
+    ),
+    "claude-opus-4": ModelPricing(
+        input_usd=15,
+        cached_input_usd=1.5,
+        output_usd=75,
+    ),
+    "claude-sonnet-4-5": ModelPricing(
+        input_usd=3,
+        cached_input_usd=0.3,
+        output_usd=15,
+    ),
+    "claude-sonnet-4": ModelPricing(
+        input_usd=3,
+        cached_input_usd=0.3,
+        output_usd=15,
+    ),
+    "claude-haiku-4-5": ModelPricing(
+        input_usd=1,
+        cached_input_usd=0.1,
+        output_usd=5,
+    ),
+    "claude-3-7-sonnet": ModelPricing(
+        input_usd=3,
+        cached_input_usd=0.3,
+        output_usd=15,
+    ),
+    "claude-3-5-sonnet": ModelPricing(
+        input_usd=3,
+        cached_input_usd=0.3,
+        output_usd=15,
+    ),
+    "claude-3-5-haiku": ModelPricing(
+        input_usd=0.8,
+        cached_input_usd=0.08,
+        output_usd=4,
+    ),
 }
 
 
@@ -431,6 +488,8 @@ class _UsageParseState:
     project: str | None = None
     previous_timestamp: float = 0.0
     discarding_oversized_line: bool = False
+    # 中文注释：Claude Code 会重复写入同一个 message.id，这里记住最近见过的 ID。
+    recent_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1176,6 +1235,7 @@ def _state_to_json(state: _UsageParseState) -> str:
         "project": state.project,
         "previous_timestamp": state.previous_timestamp,
         "discarding_oversized_line": state.discarding_oversized_line,
+        "recent_ids": list(state.recent_ids),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -1193,6 +1253,12 @@ def _state_from_json(value: object) -> _UsageParseState | None:
     current_model = payload.get("current_model", _UNKNOWN_MODEL)
     project = payload.get("project")
     previous_timestamp = payload.get("previous_timestamp", 0.0)
+    recent_ids_value = payload.get("recent_ids", ())
+    recent_ids = (
+        tuple(item for item in recent_ids_value if isinstance(item, str))
+        if isinstance(recent_ids_value, (list, tuple))
+        else ()
+    )
     if not isinstance(current_model, str):
         return None
     if project is not None and not isinstance(project, str):
@@ -1209,6 +1275,7 @@ def _state_from_json(value: object) -> _UsageParseState | None:
         discarding_oversized_line=bool(
             payload.get("discarding_oversized_line")
         ),
+        recent_ids=recent_ids,
     )
 
 
@@ -1754,6 +1821,7 @@ class UsageAggregator:
         grok_homes: Sequence[Path] | None = None,
         kimi_homes: Sequence[Path] | None = None,
         dsh_homes: Sequence[Path] | None = None,
+        claude_homes: Sequence[Path] | None = None,
     ) -> None:
         """创建有刷新间隔、持久化检查点和单轮磁盘预算的用量缓存。"""
 
@@ -1783,6 +1851,10 @@ class UsageAggregator:
         self._dsh_homes = (
             resolve_dsh_homes(dsh_homes) if dsh_homes is not None else ()
         )
+        self._claude_homes = (
+            resolve_claude_homes(claude_homes) if claude_homes is not None else ()
+        )
+        self._claude_sidechain_cache: dict[Path, tuple[float, bool]] = {}
         self._cache: dict[Path, _CachedFile] = {}
         self._discovered: dict[Path, tuple[Path, ...]] = {}
         self._discovered_at: dict[Path, float] = {}
@@ -2625,7 +2697,32 @@ class UsageAggregator:
                     account_id=account.account_id,
                     codex_home=str(dsh_home),
                 )
+        for claude_home in self._claude_homes:
+            account = read_claude_account(claude_home)
+            include_subagents = self._claude_include_subagents(claude_home)
+            for path in list_claude_transcripts(
+                claude_home,
+                include_subagents=include_subagents,
+            ):
+                sources[path] = _UsageSource(
+                    profile_name=account.profile_name,
+                    account_id=account.account_id,
+                    codex_home=str(claude_home),
+                )
         return sources
+
+    def _claude_include_subagents(self, claude_home: Path) -> bool:
+        """判断是否要索引 subagents 目录，带 10 分钟缓存。"""
+
+        now = time.monotonic()
+        with self._lock:
+            cached = self._claude_sidechain_cache.get(claude_home)
+            if cached is not None and now - cached[0] < 600.0:
+                return cached[1]
+        include = resolve_sidechain_policy([claude_home]).get(claude_home, True)
+        with self._lock:
+            self._claude_sidechain_cache[claude_home] = (now, include)
+        return include
 
     def _deduplicate_codex_sources(
         self,
@@ -2784,6 +2881,9 @@ class UsageAggregator:
         dsh_home = dsh_projcache_home(path, self._dsh_homes)
         if dsh_home is not None:
             return self._read_dsh_projcache(path, maximum_bytes)
+
+        if claude_home_for(path, self._claude_homes) is not None:
+            return self._read_claude_transcript(path, maximum_bytes)
 
         try:
             stat_result = path.stat()
@@ -3124,6 +3224,119 @@ class UsageAggregator:
                     previous_timestamp=stat_result.st_mtime,
                     discarding_oversized_line=parsed.discarding_oversized_line,
                 ),
+                last_read_bytes=parsed.bytes_read,
+                complete=parsed.reached_eof,
+            )
+            replace_deltas = True
+            persist_deltas = new_deltas
+        self._cache[path] = cached_file
+        if self._persistent is not None:
+            self._persistent.save(
+                path,
+                cached_file,
+                persist_deltas,
+                (),
+                replace_deltas=replace_deltas,
+            )
+        return cached_file
+
+    def _read_claude_transcript(
+        self,
+        path: Path,
+        maximum_bytes: int,
+    ) -> _CachedFile | None:
+        """增量解析 Claude Code 会话 JSONL 中的单次请求用量。"""
+
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        signature = (
+            stat_result.st_ino,
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+        )
+        cached = self._cache.get(path)
+        if cached is None and self._persistent is not None:
+            cached = self._persistent.load(path)
+            if cached is not None:
+                self._cache[path] = cached
+        if cached is not None and cached.signature == signature and cached.complete:
+            unchanged = replace(cached, last_read_bytes=0)
+            self._cache[path] = unchanged
+            return unchanged
+
+        can_append = (
+            cached is not None
+            and cached.signature[0] == signature[0]
+            and (not cached.complete or stat_result.st_size > cached.signature[2])
+            and stat_result.st_size >= cached.next_offset
+        )
+        start_state = (
+            cached.state
+            if can_append and cached is not None
+            else _UsageParseState(previous_timestamp=stat_result.st_mtime)
+        )
+        parsed = parse_claude_chunk(
+            path,
+            offset=cached.next_offset if can_append and cached is not None else 0,
+            seen_ids=start_state.recent_ids,
+            discarding_oversized_line=start_state.discarding_oversized_line,
+            maximum_bytes=maximum_bytes,
+        )
+        new_deltas = tuple(
+            UsageDelta(
+                timestamp=event.timestamp,
+                model=event.model,
+                usage=TokenUsage(
+                    input_tokens=event.input_tokens,
+                    cached_input_tokens=event.cached_input_tokens,
+                    cache_write_input_tokens=event.cache_write_input_tokens,
+                    output_tokens=event.output_tokens,
+                    total_tokens=event.total_tokens,
+                ),
+                billing_usage=TokenUsage(
+                    input_tokens=event.input_tokens,
+                    cached_input_tokens=event.cached_input_tokens,
+                    cache_write_input_tokens=event.cache_write_input_tokens,
+                    output_tokens=event.output_tokens,
+                    total_tokens=event.total_tokens,
+                ),
+                project=event.project,
+            )
+            for event in parsed.events
+        )
+        next_state = _UsageParseState(
+            has_total_usage=True,
+            current_model=(
+                parsed.events[-1].model
+                if parsed.events
+                else start_state.current_model
+            ),
+            project=parsed.project or start_state.project,
+            previous_timestamp=stat_result.st_mtime,
+            discarding_oversized_line=parsed.discarding_oversized_line,
+            recent_ids=parsed.seen_ids,
+        )
+        if can_append and cached is not None:
+            cached_file = _CachedFile(
+                signature=signature,
+                next_offset=parsed.next_offset,
+                total_deltas=cached.total_deltas + new_deltas,
+                fallback_deltas=cached.fallback_deltas,
+                state=next_state,
+                last_read_bytes=parsed.bytes_read,
+                complete=parsed.reached_eof,
+            )
+            replace_deltas = False
+            persist_deltas = new_deltas
+        else:
+            cached_file = _CachedFile(
+                signature=signature,
+                next_offset=parsed.next_offset,
+                total_deltas=new_deltas,
+                fallback_deltas=(),
+                state=next_state,
                 last_read_bytes=parsed.bytes_read,
                 complete=parsed.reached_eof,
             )
@@ -3960,6 +4173,7 @@ def pricing_metadata() -> dict[str, str]:
         "grok_api_source": _GROK_API_PRICING_SOURCE,
         "kimi_api_source": _KIMI_API_PRICING_SOURCE,
         "dsh_api_source": _DSH_API_PRICING_SOURCE,
+        "claude_api_source": _CLAUDE_API_PRICING_SOURCE,
         "cost_kind": "api_equivalent_estimate",
         "credits_kind": "not_available_from_plus_jsonl",
         "note": (
@@ -3968,8 +4182,9 @@ def pricing_metadata() -> dict[str, str]:
             "反推；Grok 周额度百分比来自本地 billing 日志；Kimi Code 为订阅制，"
             "金额按 K3 公开 API 单价等价换算，不代表会员扣费；DeepSeek Harness "
             "用量来自本地 projcache 合计，金额按 DeepSeek 官方峰时 API 单价估算，"
-            "不代表 Command Code 等转发账单。未定价模型只展示 token，不计入 "
-            "API 等价值。"
+            "不代表 Command Code 等转发账单；Claude Code 用量来自本地会话 JSONL，"
+            "金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价。"
+            "未定价模型只展示 token，不计入 API 等价值。"
         ),
     }
 

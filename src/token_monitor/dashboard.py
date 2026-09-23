@@ -25,6 +25,7 @@ from .housekeeping import (
     HousekeepingMonitor,
     empty_housekeeping_report,
 )
+from .claude import read_claude_account, resolve_claude_homes
 from .commandcode import (
     list_commandcode_active_sessions,
     read_commandcode_account,
@@ -2197,7 +2198,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
       const profiles = (account.profiles || []).map((profile) => typeof profile === 'string' ? profile : profile.name).filter((profile) => profile).join(' · ');
       const accountId = account.account_id || name;
       const productLabel = (id, label) => account.product === id || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === id) ? label : null;
-      const product = productLabel('kimi', 'Kimi') || productLabel('grok', 'Grok') || productLabel('dsh', 'DeepSeek Harness') || productLabel('command-code', 'Command Code') || 'Codex';
+      const product = productLabel('kimi', 'Kimi') || productLabel('grok', 'Grok') || productLabel('dsh', 'DeepSeek Harness') || productLabel('command-code', 'Command Code') || productLabel('claude', 'Claude Code') || 'Codex';
       const plan = accountQuotas.length ? accountQuotas.map((quota) => quota.plan_type || '未知').join(' · ') : '未知';
       const activeCount = accountCounts.active ?? accountSessions.length;
       const accountSource = accountQuotas.map((quota) => quota.source).filter((source) => source).join(' · ');
@@ -2423,6 +2424,7 @@ class DashboardServer:
         kimi_homes: Sequence[Path] | None = None,
         dsh_homes: Sequence[Path] | None = None,
         commandcode_homes: Sequence[Path] | None = None,
+        claude_homes: Sequence[Path] | None = None,
         traffic_monitor: TrafficMonitor | None = None,
         alert_store: TrafficAlertStore | None = None,
         housekeeping: HousekeepingMonitor | None = None,
@@ -2445,6 +2447,7 @@ class DashboardServer:
         self.kimi_homes = resolve_kimi_homes(kimi_homes)
         self.dsh_homes = resolve_dsh_homes(dsh_homes)
         self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
+        self.claude_homes = resolve_claude_homes(claude_homes)
         self.traffic_monitor = traffic_monitor
         self.alert_store = alert_store
         self.housekeeping = housekeeping
@@ -2453,6 +2456,7 @@ class DashboardServer:
             grok_homes=self.grok_homes,
             kimi_homes=self.kimi_homes,
             dsh_homes=self.dsh_homes,
+            claude_homes=self.claude_homes,
         )
         self._server: _DashboardHTTPServer | None = None
         self._thread: Thread | None = None
@@ -2480,6 +2484,7 @@ class DashboardServer:
             self.kimi_homes,
             self.dsh_homes,
             self.commandcode_homes,
+            self.claude_homes,
             budget_usd=self.config.budget_usd,
             traffic_monitor=self.traffic_monitor,
             alert_store=self.alert_store,
@@ -2593,6 +2598,7 @@ def build_multi_dashboard_state(
     kimi_homes: Sequence[Path] | None = None,
     dsh_homes: Sequence[Path] | None = None,
     commandcode_homes: Sequence[Path] | None = None,
+    claude_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
     traffic: TrafficSnapshot | None = None,
 ) -> dict[str, Any]:
@@ -2807,6 +2813,29 @@ def build_multi_dashboard_state(
                     product="dsh",
                 )
             )
+
+    # Claude Code 本地没有订阅额度接口，只展示身份和本地用量归属。
+    for claude_home in claude_homes or ():
+        claude_account = read_claude_account(claude_home)
+        account_key = claude_account.account_key
+        account = accounts_by_key.setdefault(
+            account_key,
+            {
+                "name": claude_account.display_name,
+                "account_id": claude_account.account_id,
+                "product": "claude",
+                "profiles": [],
+                "quota": None,
+                "counts": {},
+            },
+        )
+        account["product"] = "claude"
+        profile = {
+            "name": claude_account.profile_name,
+            "codex_home": str(claude_home),
+        }
+        if profile not in account["profiles"]:
+            account["profiles"].append(profile)
 
     # Command Code 订阅额度经官方后台接口读取（带缓存）；失败时只展示账号身份。
     for commandcode_home in commandcode_homes or ():
@@ -3441,6 +3470,7 @@ def _make_handler(
     kimi_homes: Sequence[Path] | None = None,
     dsh_homes: Sequence[Path] | None = None,
     commandcode_homes: Sequence[Path] | None = None,
+    claude_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
     traffic_monitor: TrafficMonitor | None = None,
     alert_store: TrafficAlertStore | None = None,
@@ -3501,6 +3531,7 @@ def _make_handler(
                         kimi_homes=kimi_homes,
                         dsh_homes=dsh_homes,
                         commandcode_homes=commandcode_homes,
+                        claude_homes=claude_homes,
                         budget_usd=budget_usd,
                         traffic=(
                             traffic_monitor.latest()
@@ -3729,6 +3760,7 @@ def _make_handler(
                         kimi_homes=kimi_homes,
                         dsh_homes=dsh_homes,
                         commandcode_homes=commandcode_homes,
+                        claude_homes=claude_homes,
                         budget_usd=budget_usd,
                         traffic=(
                             traffic_monitor.latest()

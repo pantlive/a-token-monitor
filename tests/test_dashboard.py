@@ -262,6 +262,7 @@ class DashboardTests(unittest.TestCase):
                 kimi_homes=(),
                 dsh_homes=(),
                 commandcode_homes=(),
+            claude_homes=(),
             )
             server.start()
             host, port = server.address
@@ -352,6 +353,7 @@ class DashboardTests(unittest.TestCase):
                 kimi_homes=(kimi_home,),
                 dsh_homes=(),
                 commandcode_homes=(),
+            claude_homes=(),
             )
             server.start()
             host, port = server.address
@@ -513,6 +515,7 @@ class DashboardTests(unittest.TestCase):
                 kimi_homes=(),
                 dsh_homes=(),
                 commandcode_homes=(),
+            claude_homes=(),
             )
             server.start()
             host, port = server.address
@@ -588,6 +591,7 @@ class DashboardTests(unittest.TestCase):
                 kimi_homes=(kimi_home,),
                 dsh_homes=(),
                 commandcode_homes=(),
+            claude_homes=(),
             )
             server.start()
             host, port = server.address
@@ -662,6 +666,7 @@ class DashboardTests(unittest.TestCase):
                 kimi_homes=(kimi_home,),
                 dsh_homes=(),
                 commandcode_homes=(),
+            claude_homes=(),
             )
             server.start()
             host, port = server.address
@@ -821,6 +826,7 @@ class DashboardTests(unittest.TestCase):
                 kimi_homes=(),
                 dsh_homes=(),
                 commandcode_homes=(),
+            claude_homes=(),
             )
             server.start()
             host, port = server.address
@@ -949,6 +955,7 @@ class AlertHistoryDashboardTests(unittest.TestCase):
             kimi_homes=(),
             dsh_homes=(),
             commandcode_homes=(),
+            claude_homes=(),
             alert_store=alert_store,
         )
         server.start()
@@ -1194,6 +1201,7 @@ class UsageSearchDashboardTests(unittest.TestCase):
             kimi_homes=(),
             dsh_homes=(),
             commandcode_homes=(),
+            claude_homes=(),
             usage_aggregator=aggregator,
         )
         server.start()
@@ -1407,6 +1415,7 @@ class HousekeepingDashboardTests(unittest.TestCase):
             kimi_homes=(),
             dsh_homes=(),
             commandcode_homes=(),
+            claude_homes=(),
             usage_aggregator=aggregator,
             housekeeping=monitor,
         )

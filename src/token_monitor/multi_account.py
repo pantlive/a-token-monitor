@@ -11,6 +11,7 @@ from typing import Mapping, Sequence
 
 from .accounts import CodexAccount
 from .alerts import AlertStoreError, TrafficAlertStore
+from .claude import resolve_claude_homes
 from .commandcode import resolve_commandcode_homes
 from .dashboard import DashboardConfig, DashboardServer
 from .dsh import resolve_dsh_homes
@@ -52,6 +53,7 @@ class MultiAccountMonitor:
         kimi_homes: tuple[Path, ...] | None = None,
         dsh_homes: tuple[Path, ...] | None = None,
         commandcode_homes: tuple[Path, ...] | None = None,
+        claude_homes: tuple[Path, ...] | None = None,
     ) -> None:
         """创建多个单账号监控器。"""
 
@@ -77,6 +79,7 @@ class MultiAccountMonitor:
         self.commandcode_homes = resolve_commandcode_homes(
             commandcode_homes or None
         )
+        self.claude_homes = resolve_claude_homes(claude_homes or None)
         self.alert_store = TrafficAlertStore(
             self.state_dir,
             retention_days=self.config.alert_retention_days,
@@ -133,6 +136,8 @@ class MultiAccountMonitor:
             targets.append(AuditTarget("DeepSeek Harness", "dsh", home))
         for home in self.commandcode_homes:
             targets.append(AuditTarget("Command Code", "command-code", home))
+        for home in self.claude_homes:
+            targets.append(AuditTarget("Claude Code", "claude", home))
         targets.append(AuditTarget("监控状态目录", "state", self.state_dir))
         return tuple(targets)
 
@@ -332,11 +337,13 @@ class MultiAccountMonitor:
                             grok_homes=self.grok_homes,
                             kimi_homes=self.kimi_homes,
                             dsh_homes=self.dsh_homes,
+                            claude_homes=self.claude_homes,
                         ),
                         grok_homes=self.grok_homes,
                         kimi_homes=self.kimi_homes,
                         dsh_homes=self.dsh_homes,
                         commandcode_homes=self.commandcode_homes,
+                        claude_homes=self.claude_homes,
                         traffic_monitor=self.traffic_monitor,
                         alert_store=self.alert_store,
                         housekeeping=self.housekeeping,
