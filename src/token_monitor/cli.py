@@ -9,10 +9,10 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .accounts import CodexAccount, build_account_specs
-from .claude import resolve_claude_homes
+from .claude import list_claude_active_sessions, read_claude_account, resolve_claude_homes
 from .agents import product_label
 from .housekeeping import (
     DEFAULT_SINGLE_WARN_GIB,
@@ -57,7 +57,12 @@ from .app_server import AppServerClient, AppServerConfig, AppServerError
 from .discovery import ProcessScanner
 from .multi_account import MultiAccountMonitor
 from .monitor import MonitorConfig
-from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
+from .multi_models import (
+    DetectionConfidence,
+    SessionStatus,
+    TrackedSession,
+    session_view,
+)
 from .models import JobState
 from .registry import MultiSessionRegistry, RegistryError
 from .quota import QuotaSnapshot
@@ -76,8 +81,8 @@ from .usage import (
     DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
     DEFAULT_SESSION_TURN_WARN,
     SessionSwitchThresholds,
-    SessionUsage,
     UsageAggregator,
+    enrich_session_views,
     search_since_days,
 )
 
@@ -1227,55 +1232,6 @@ def _show_quota(args: argparse.Namespace) -> int:
     return 0 if printed else 2
 
 
-def _session_summary(
-    session: TrackedSession,
-    account_name: str | None = None,
-    account_id: str | None = None,
-    profile_name: str | None = None,
-    product: str | None = None,
-) -> dict[str, object]:
-    """生成不包含内部调度字段的多会话摘要。"""
-
-    record: dict[str, object] = {
-        "thread_id": session.thread_id,
-        "session_id": session.session_id,
-        "cwd": session.cwd,
-        "source": session.source,
-        "status": session.status.value,
-        "confidence": session.confidence.value,
-        "pids": list(session.pids),
-        "process_backed": session.is_process_backed,
-        "last_event_at": session.last_event_at,
-        "last_event_type": session.last_event_type,
-        "last_error": _display_session_error(session.last_error),
-        "quota_reset_at": session.quota_reset_at,
-        "jsonl_path": session.jsonl_path,
-        "account_id": account_id or session.account_id,
-        "active": session.is_active,
-    }
-    if account_name is not None:
-        record["account"] = account_name
-    if profile_name is not None:
-        record["profile_name"] = profile_name
-    if product is not None:
-        record["product"] = product
-    return record
-
-
-def _display_session_error(value: str | None) -> str | None:
-    """隐藏旧版恢复记录，避免历史错误文本重新出现在命令行中。"""
-
-    if not value:
-        return None
-    lowered = value.lower()
-    legacy_terms = ("自动恢复", "不自动恢复", "续跑", "resume", "recovery")
-    if any(term in lowered or term in value for term in legacy_terms):
-        if "额度" in value or "quota" in lowered:
-            return "额度限制事件"
-        return "历史会话状态"
-    return value
-
-
 def _show_sessions(args: argparse.Namespace) -> int:
     """发现并列出活动会话，或执行会话归档/清理/恢复。"""
 
@@ -1326,7 +1282,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
         for session in account_sessions
     ]
     summaries = [
-        _session_summary(session, account.account_id or account.name)
+        session_view(session, account.account_id or account.name)
         for account, account_sessions in sessions_by_account
         for session in account_sessions
     ]
@@ -1339,7 +1295,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
             for session in list_grok_active_sessions(grok_home):
                 extra_sessions.append((grok_account.display_name, session))
                 summaries.append(
-                    _session_summary(
+                    session_view(
                         session,
                         grok_account.display_name,
                         account_id=grok_account.account_id,
@@ -1357,7 +1313,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
             for session in list_kimi_active_sessions(kimi_home):
                 extra_sessions.append((kimi_account.display_name, session))
                 summaries.append(
-                    _session_summary(
+                    session_view(
                         session,
                         kimi_account.display_name,
                         account_id=kimi_account.account_id,
@@ -1375,7 +1331,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
             for session in list_dsh_active_sessions(dsh_home):
                 extra_sessions.append((dsh_account.display_name, session))
                 summaries.append(
-                    _session_summary(
+                    session_view(
                         session,
                         dsh_account.display_name,
                         account_id=dsh_account.account_id,
@@ -1395,7 +1351,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
             for session in list_commandcode_active_sessions(commandcode_home):
                 extra_sessions.append((commandcode_account.display_name, session))
                 summaries.append(
-                    _session_summary(
+                    session_view(
                         session,
                         commandcode_account.display_name,
                         account_id=commandcode_account.account_id,
@@ -1405,25 +1361,39 @@ def _show_sessions(args: argparse.Namespace) -> int:
                 )
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Command Code', commandcode_home)
+    for claude_home in resolve_claude_homes(getattr(args, "claude_homes", None)):
+        if not claude_home.is_dir():
+            continue
+        try:
+            claude_account = read_claude_account(claude_home)
+            for session in list_claude_active_sessions(claude_home):
+                extra_sessions.append((claude_account.display_name, session))
+                summaries.append(
+                    session_view(
+                        session,
+                        claude_account.display_name,
+                        account_id=claude_account.account_id,
+                        profile_name=claude_account.profile_name,
+                    )
+                )
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider("Claude Code", claude_home)
+
     thresholds = SessionSwitchThresholds(
         turn_warn=args.session_turn_warn,
         context_warn_tokens=args.session_context_warn_tokens,
     )
-    usages, reminders = _session_usage_lookup(
+    summaries, reminders = _enrich_session_summaries(
         args,
         monitor,
-        [item.jsonl_path for item in sessions],
+        summaries,
         thresholds,
     )
-    for summary in summaries:
-        usage = usages.get(str(summary.get("jsonl_path") or ""))
-        if usage is None:
-            continue
-        payload = usage.to_dict()
-        payload["reminder"] = usage.reminder(thresholds)
-        summary["usage"] = payload
-        if payload["reminder"] is not None:
-            summary["advice"] = payload["reminder"]["message"]
+    views_by_path = {
+        str(item.get("jsonl_path") or ""): item
+        for item in summaries
+        if item.get("jsonl_path")
+    }
     if args.json:
         sys.stdout.write(f"{json.dumps(summaries, ensure_ascii=False, indent=2)}\n")
         return 0
@@ -1438,7 +1408,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
                 f"{session.session_id or session.thread_id} | "
                 f"{session.status.value} | PID {pids} | "
                 f"{session.cwd or '目录未知'}"
-                f"{_session_usage_note(usages.get(str(session.jsonl_path or '')), thresholds)}\n"
+                f"{_session_usage_note(views_by_path.get(str(session.jsonl_path or '')))}\n"
             )
     for label, session in extra_sessions:
         pids = ",".join(str(pid) for pid in session.pids) or "无"
@@ -1446,24 +1416,21 @@ def _show_sessions(args: argparse.Namespace) -> int:
             f"{label} | {session.session_id or session.thread_id} | "
             f"{session.status.value} | PID {pids} | "
             f"{session.cwd or '目录未知'}"
-            f"{_session_usage_note(usages.get(str(session.jsonl_path or '')), thresholds)}\n"
+            f"{_session_usage_note(views_by_path.get(str(session.jsonl_path or '')))}\n"
         )
     for reminder in reminders:
         sys.stdout.write(f"[{reminder['level']}] {reminder['message']}\n")
     return 0
 
 
-def _session_usage_lookup(
+def _enrich_session_summaries(
     args: argparse.Namespace,
     monitor: MultiAccountMonitor,
-    paths: Sequence[str | None],
+    summaries: list[dict[str, object]],
     thresholds: SessionSwitchThresholds,
-) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """读取活动会话的轮数与上下文，并生成切换新会话的提醒。"""
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """用统一用量入口给会话视图补充 token、轮数与切换提醒。"""
 
-    wanted = [str(path) for path in paths if path]
-    if not wanted:
-        return {}, []
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
         claude_homes=resolve_claude_homes(getattr(args, "claude_homes", None)),
@@ -1473,32 +1440,29 @@ def _session_usage_lookup(
             monitor.registries,
             monitor.dashboard_account_metadata,
         )
-        usages = aggregator.session_usages(wanted)
     except (OSError, ValueError):
-        return {}, []
-    reminders: list[dict[str, object]] = []
-    for usage in usages.values():
-        reminder = usage.reminder(thresholds)
-        if reminder is not None:
-            reminders.append(reminder)
-    reminders.sort(key=lambda item: -int(item["context_tokens"]))
-    return dict(usages), reminders
+        logging.getLogger(__name__).debug(
+            "会话用量索引刷新失败，跳过轮数与上下文提示",
+            exc_info=True,
+        )
+    return enrich_session_views(summaries, aggregator, thresholds)
 
 
-def _session_usage_note(
-    usage: object,
-    thresholds: SessionSwitchThresholds,
-) -> str:
-    """返回附在会话行尾的轮数/上下文说明。"""
+def _session_usage_note(view: object) -> str:
+    """返回附在会话行尾的轮数/上下文说明（读取统一视图的 usage 字段）。"""
 
-    if not isinstance(usage, SessionUsage):
+    if not isinstance(view, Mapping):
+        return ""
+    usage = view.get("usage")
+    if not isinstance(usage, Mapping):
         return ""
     note = (
-        f" | {usage.turns} 轮 / 上下文 {_format_count(usage.context_tokens)} token"
-        f" / 累计 {_format_count(usage.total_tokens)} token"
-        f" | {usage.model or '未知模型'}"
+        f" | {usage.get('turns', 0)} 轮"
+        f" / 上下文 {_format_count(usage.get('context_tokens'))} token"
+        f" / 累计 {_format_count(usage.get('total_tokens'))} token"
+        f" | {usage.get('model') or '未知模型'}"
     )
-    if usage.reminder(thresholds) is not None:
+    if usage.get("reminder"):
         note += " | ⚠ 建议开新会话"
     return note
 

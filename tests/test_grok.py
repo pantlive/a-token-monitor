@@ -320,7 +320,10 @@ class GrokActiveSessionTests(unittest.TestCase):
             {"updates.jsonl", "chat_history.jsonl", "summary.json"},
         )
         self.assertTrue(str(session.jsonl_path).endswith("chat_history.jsonl"))
-        self.assertEqual(session.metadata.get("model"), "grok-4.6")
+        # 统一模型字段取代旧的 metadata["model"]
+        self.assertEqual(session.model, "grok-4.6")
+        self.assertEqual(session.product, "grok")
+        self.assertEqual(session.project, "/workspace/demo")
 
     def test_merges_multiple_processes_and_ignores_others(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

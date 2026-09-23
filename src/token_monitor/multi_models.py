@@ -70,12 +70,39 @@ class TrackedSession:
     last_resume_result: str | None = None
     account_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    # 中文注释：统一会话模型字段——所有 provider 的适配器都填这组字段，
+    # 公共聚合与 Dashboard 只依赖这里，不再读取 provider 私有结构。
+    product: str = "codex"
+    account_name: str | None = None
+    model: str | None = None
+    project: str | None = None
+    tokens: int = 0
+    context_tokens: int = 0
+    turns: int = 0
 
     @property
     def is_process_backed(self) -> bool:
         """判断当前记录是否有打开 JSONL 的活动进程。"""
 
         return bool(self.pids)
+
+    @property
+    def started_at(self) -> float:
+        """统一开始时间（与 first_seen_at 同义，供视图使用）。"""
+
+        return self.first_seen_at
+
+    @property
+    def last_activity_at(self) -> float:
+        """统一最后活动时间：优先最近事件，其次最近一次观察。"""
+
+        return self.last_event_at or self.last_seen_at
+
+    @property
+    def resolved_project(self) -> str | None:
+        """统一项目字段：适配器没填时退回工作目录。"""
+
+        return self.project or self.cwd
 
     @property
     def is_active(self) -> bool:
@@ -223,3 +250,68 @@ class TrackedSession:
             account_id=string_value("account_id"),
             metadata=normalized_metadata,
         )
+
+
+def display_session_error(value: str | None) -> str | None:
+    """隐藏旧版恢复记录，避免历史错误文本重新出现在网页或命令行中。"""
+
+    if not value:
+        return None
+    lowered = value.lower()
+    legacy_terms = ("自动恢复", "不自动恢复", "续跑", "resume", "recovery")
+    if any(term in lowered or term in value for term in legacy_terms):
+        if "额度" in value or "quota" in lowered:
+            return "额度限制事件"
+        return "历史会话状态"
+    return value
+
+
+def session_view(
+    session: TrackedSession,
+    account_name: str | None = None,
+    account_id: str | None = None,
+    profile_name: str | None = None,
+    codex_home: str | None = None,
+    product: str | None = None,
+) -> dict[str, Any]:
+    """把统一会话模型序列化为 Dashboard 和 CLI 共用的视图。
+
+    只输出统一字段（身份、产品、项目、模型、状态、token、开始与最后活动时间）
+    和展示所需的过程状态，不包含 resume 调度等内部字段。
+    """
+
+    resolved_account_id = session.account_id or account_id
+    resolved_account = session.account_name or resolved_account_id or account_name
+    return {
+        # 统一身份
+        "account": resolved_account,
+        "account_id": resolved_account_id,
+        "profile_name": profile_name or account_name,
+        "codex_home": codex_home,
+        "product": product or session.product,
+        # 统一会话信息
+        "thread_id": session.thread_id,
+        "session_id": session.session_id,
+        "source": session.source,
+        "cwd": session.cwd,
+        "project": session.resolved_project,
+        "model": session.model,
+        "status": session.status.value,
+        "confidence": session.confidence.value,
+        "pids": list(session.pids),
+        "process_backed": session.is_process_backed,
+        "active": session.is_active,
+        "started_at": session.started_at,
+        "last_activity_at": session.last_activity_at,
+        "first_seen_at": session.first_seen_at,
+        "last_seen_at": session.last_seen_at,
+        "tokens": session.tokens,
+        "context_tokens": session.context_tokens,
+        "turns": session.turns,
+        # 展示所需过程状态
+        "jsonl_path": session.jsonl_path,
+        "last_event_at": session.last_event_at,
+        "last_event_type": session.last_event_type,
+        "last_error": display_session_error(session.last_error),
+        "quota_reset_at": session.quota_reset_at,
+    }

@@ -166,6 +166,9 @@ def list_dsh_active_sessions(
                 pids=tuple(sorted(pids)),
                 last_event_at=last_event_at,
                 last_event_type=last_event_type,
+                product="dsh",
+                model=usage.model if usage is not None else None,
+                project=cwd,
             )
         )
     sessions.sort(key=lambda item: item.last_seen_at, reverse=True)

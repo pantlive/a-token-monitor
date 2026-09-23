@@ -1152,7 +1152,9 @@ class GrokSessionDashboardTests(unittest.TestCase):
             pids=(4242,),
             last_event_at=190.0,
             last_event_type="updates.jsonl",
-            metadata={"model": "grok-4.6"},
+            product="grok",
+            model="grok-4.6",
+            project="/workspace/demo",
         )
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1191,6 +1193,14 @@ class GrokSessionDashboardTests(unittest.TestCase):
         self.assertEqual(entry["last_event_type"], "updates.jsonl")
         self.assertTrue(entry["process_backed"])
         self.assertEqual(entry["account"], "grok")
+        # 统一会话模型字段
+        self.assertEqual(entry["product"], "grok")
+        self.assertEqual(entry["model"], "grok-4.6")
+        self.assertEqual(entry["project"], "/workspace/demo")
+        self.assertEqual(entry["started_at"], 100.0)
+        self.assertEqual(entry["last_activity_at"], 190.0)
+        self.assertIn("tokens", entry)
+        self.assertIn("turns", entry)
         grok_accounts = [
             account for account in state["accounts"] if account.get("product") == "grok"
         ]
@@ -1285,6 +1295,70 @@ class NoCodexDashboardTests(unittest.TestCase):
             any("Grok 目录读取失败" in line for line in captured.output),
             captured.output,
         )
+
+
+class ClaudeSessionDashboardTests(unittest.TestCase):
+    """验证 Claude Code 活动会话通过统一适配器进入 Dashboard 状态。"""
+
+    def test_claude_sessions_use_unified_fields(self) -> None:
+        session = TrackedSession(
+            thread_id="claude:session-1",
+            session_id="session-1",
+            jsonl_path="/home/dev/.claude/projects/-home-dev-proj/session-1.jsonl",
+            cwd="/home/dev/proj",
+            source="claude-cli",
+            status=SessionStatus.RUNNING,
+            confidence=DetectionConfidence.OPEN_FILE,
+            first_seen_at=100.0,
+            last_seen_at=200.0,
+            pids=(9,),
+            last_event_at=150.0,
+            last_event_type="assistant",
+            product="claude",
+            model="claude-sonnet-4-5",
+            project="/home/dev/proj",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            claude_home = root / ".claude"
+            claude_home.mkdir(parents=True)
+            registry = MultiSessionRegistry(root / "state")
+            with (
+                mock.patch(
+                    "token_monitor.dashboard.list_claude_active_sessions",
+                    return_value=(session,),
+                ),
+                mock.patch(
+                    "token_monitor.dashboard.read_grok_quota",
+                    return_value=None,
+                ),
+            ):
+                state = build_multi_dashboard_state(
+                    {"personal": registry},
+                    grok_homes=(root / "missing" / "grok",),
+                    kimi_homes=(root / "missing" / "kimi",),
+                    dsh_homes=(root / "missing" / "dsh",),
+                    commandcode_homes=(root / "missing" / "commandcode",),
+                    claude_homes=(claude_home,),
+                )
+
+        entries = [
+            item for item in state["sessions"] if item.get("product") == "claude"
+        ]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["source"], "claude-cli")
+        self.assertEqual(entry["model"], "claude-sonnet-4-5")
+        self.assertEqual(entry["project"], "/home/dev/proj")
+        self.assertEqual(entry["started_at"], 100.0)
+        self.assertEqual(entry["last_activity_at"], 150.0)
+        self.assertEqual(entry["pids"], [9])
+        claude_accounts = [
+            account
+            for account in state["accounts"]
+            if account.get("product") == "claude"
+        ]
+        self.assertTrue(claude_accounts)
 
 
 class UsageSearchDashboardTests(unittest.TestCase):

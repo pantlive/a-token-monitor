@@ -1313,6 +1313,66 @@ def _search_pattern(value: str | None) -> str | None:
     return f"%{escaped}%"
 
 
+def enrich_session_views(
+    views: Sequence[dict[str, Any]],
+    aggregator: "UsageAggregator | None",
+    thresholds: "SessionSwitchThresholds | None" = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """给统一会话视图补充 token、上下文、轮数与切换新会话的提醒。
+
+    Dashboard 和命令行共用这一个入口：视图里的 ``jsonl_path`` 是唯一取数依据，
+    读取失败时静默返回原视图，不影响其他功能。返回 ``(视图列表, 提醒列表)``。
+    """
+
+    views_out = list(views)
+    if aggregator is None:
+        return views_out, []
+    resolved = thresholds or SessionSwitchThresholds()
+    paths = [
+        str(view.get("jsonl_path"))
+        for view in views_out
+        if view.get("jsonl_path")
+    ]
+    if not paths:
+        return views_out, []
+    try:
+        usages = aggregator.session_usages(paths)
+    except (OSError, ValueError):
+        return views_out, []
+    reminders: list[dict[str, Any]] = []
+    for view in views_out:
+        path = str(view.get("jsonl_path") or "")
+        if not path:
+            continue
+        usage = usages.get(path)
+        if usage is None:
+            continue
+        payload = usage.to_dict()
+        reminder = usage.reminder(resolved)
+        payload["reminder"] = reminder
+        view["usage"] = payload
+        # 中文注释：统一模型的 token 字段由用量索引回填，discovery 阶段为 0。
+        view["tokens"] = payload["total_tokens"]
+        view["context_tokens"] = payload["context_tokens"]
+        view["turns"] = payload["turns"]
+        if not view.get("model"):
+            view["model"] = payload["model"]
+        if reminder is None:
+            continue
+        reminders.append(
+            {
+                **reminder,
+                "thread_id": view.get("thread_id"),
+                "account": view.get("account"),
+                "product": view.get("product"),
+                "cwd": view.get("cwd"),
+                "project": view.get("project"),
+            }
+        )
+    reminders.sort(key=lambda item: -int(item.get("context_tokens") or 0))
+    return views_out, reminders
+
+
 def _session_usage_from_rows(
     path: str,
     rows: Sequence[_IndexRow],
