@@ -117,6 +117,30 @@ class DiskScanTests(unittest.TestCase):
 
         self.assertEqual(report["reminders"], [])
 
+    def test_target_created_after_construction_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            monitor = HousekeepingMonitor(
+                targets=(
+                    AuditTarget(
+                        "Codex (codex)",
+                        "codex",
+                        home,
+                        sessions_root=home / "sessions",
+                    ),
+                ),
+                archive_dir=root / "archives",
+            )
+            self.assertEqual([target.label for target in monitor.targets], [])
+            home.mkdir()
+            (home / "sessions").mkdir()
+
+            report = monitor.scan(now=time.time())
+
+        self.assertEqual(len(report["directories"]), 1)
+        self.assertEqual(report["directories"][0]["label"], "Codex (codex)")
+
     def test_missing_target_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

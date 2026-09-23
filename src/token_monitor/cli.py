@@ -921,6 +921,16 @@ def _read_account_quota(
         client.close()
 
 
+def _guard_provider(label: str, home: Path) -> None:
+    """记录单个 provider 目录读取失败，继续处理其他 provider。"""
+
+    logging.getLogger(__name__).exception(
+        "%s 目录读取失败，已跳过该目录（其他 provider 不受影响）: %s",
+        label,
+        home,
+    )
+
+
 def _show_quota(args: argparse.Namespace) -> int:
     """主动读取所有配置账号的额度并输出精确窗口字段。"""
 
@@ -948,103 +958,123 @@ def _show_quota(args: argparse.Namespace) -> int:
         snapshots.append((account, snapshot))
 
     for grok_home in resolve_grok_homes(getattr(args, "grok_homes", None)):
-        grok_snapshot = read_grok_quota(grok_home)
-        grok_account = read_grok_account(grok_home)
-        if grok_snapshot is None:
-            errors.append(
-                {
-                    "account": grok_account.display_name,
-                    "error": "未找到 Grok billing 额度日志",
-                }
-            )
+        if not grok_home.is_dir():
             continue
-        summary = _quota_summary(grok_snapshot)
-        summary["account"] = grok_account.display_name
-        summary["account_id"] = grok_account.account_id
-        summary["profile_name"] = grok_account.profile_name
-        summary["codex_home"] = str(grok_home)
-        summary["product"] = "grok"
-        results.append(summary)
+        try:
+            grok_snapshot = read_grok_quota(grok_home)
+            grok_account = read_grok_account(grok_home)
+            if grok_snapshot is None:
+                errors.append(
+                    {
+                        "account": grok_account.display_name,
+                        "error": "未找到 Grok billing 额度日志",
+                    }
+                )
+                continue
+            summary = _quota_summary(grok_snapshot)
+            summary["account"] = grok_account.display_name
+            summary["account_id"] = grok_account.account_id
+            summary["profile_name"] = grok_account.profile_name
+            summary["codex_home"] = str(grok_home)
+            summary["product"] = "grok"
+            results.append(summary)
 
-    # Kimi 配额走官方 /usages 接口；读取失败时只输出账号与登录状态。
+        # Kimi 配额走官方 /usages 接口；读取失败时只输出账号与登录状态。
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Grok', grok_home)
     for kimi_home in resolve_kimi_homes(getattr(args, "kimi_homes", None)):
-        kimi_account = read_kimi_account(kimi_home)
-        kimi_snapshot = read_kimi_quota(kimi_home)
-        if kimi_snapshot is None:
-            results.append(
-                {
-                    "account": kimi_account.display_name,
-                    "account_id": kimi_account.account_id,
-                    "profile_name": kimi_account.profile_name,
-                    "codex_home": str(kimi_home),
-                    "product": "kimi",
-                    "logged_in": kimi_account.logged_in,
-                    "windows": [],
-                }
-            )
+        if not kimi_home.is_dir():
             continue
-        summary = _quota_summary(kimi_snapshot)
-        summary["account"] = kimi_account.display_name
-        summary["account_id"] = kimi_account.account_id
-        summary["profile_name"] = kimi_account.profile_name
-        summary["codex_home"] = str(kimi_home)
-        summary["product"] = "kimi"
-        summary["logged_in"] = kimi_account.logged_in
-        results.append(summary)
+        try:
+            kimi_account = read_kimi_account(kimi_home)
+            kimi_snapshot = read_kimi_quota(kimi_home)
+            if kimi_snapshot is None:
+                results.append(
+                    {
+                        "account": kimi_account.display_name,
+                        "account_id": kimi_account.account_id,
+                        "profile_name": kimi_account.profile_name,
+                        "codex_home": str(kimi_home),
+                        "product": "kimi",
+                        "logged_in": kimi_account.logged_in,
+                        "windows": [],
+                    }
+                )
+                continue
+            summary = _quota_summary(kimi_snapshot)
+            summary["account"] = kimi_account.display_name
+            summary["account_id"] = kimi_account.account_id
+            summary["profile_name"] = kimi_account.profile_name
+            summary["codex_home"] = str(kimi_home)
+            summary["product"] = "kimi"
+            summary["logged_in"] = kimi_account.logged_in
+            results.append(summary)
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Kimi', kimi_home)
     for dsh_home in resolve_dsh_homes(getattr(args, "dsh_homes", None)):
-        dsh_account = read_dsh_account(dsh_home)
-        dsh_snapshot = read_dsh_quota(dsh_home)
-        if dsh_snapshot is None:
-            results.append(
-                {
-                    "account": dsh_account.display_name,
-                    "account_id": dsh_account.account_id,
-                    "profile_name": dsh_account.profile_name,
-                    "codex_home": str(dsh_home),
-                    "product": "dsh",
-                    "has_credentials": dsh_account.has_credentials,
-                    "windows": [],
-                }
-            )
+        if not dsh_home.is_dir():
             continue
-        summary = _quota_summary(dsh_snapshot)
-        summary["account"] = dsh_account.display_name
-        summary["account_id"] = dsh_account.account_id
-        summary["profile_name"] = dsh_account.profile_name
-        summary["codex_home"] = str(dsh_home)
-        summary["product"] = "dsh"
-        summary["has_credentials"] = dsh_account.has_credentials
-        results.append(summary)
+        try:
+            dsh_account = read_dsh_account(dsh_home)
+            dsh_snapshot = read_dsh_quota(dsh_home)
+            if dsh_snapshot is None:
+                results.append(
+                    {
+                        "account": dsh_account.display_name,
+                        "account_id": dsh_account.account_id,
+                        "profile_name": dsh_account.profile_name,
+                        "codex_home": str(dsh_home),
+                        "product": "dsh",
+                        "has_credentials": dsh_account.has_credentials,
+                        "windows": [],
+                    }
+                )
+                continue
+            summary = _quota_summary(dsh_snapshot)
+            summary["account"] = dsh_account.display_name
+            summary["account_id"] = dsh_account.account_id
+            summary["profile_name"] = dsh_account.profile_name
+            summary["codex_home"] = str(dsh_home)
+            summary["product"] = "dsh"
+            summary["has_credentials"] = dsh_account.has_credentials
+            results.append(summary)
 
-    # Command Code 订阅额度走官方后台接口；读取失败时只输出账号与登录状态。
+        # Command Code 订阅额度走官方后台接口；读取失败时只输出账号与登录状态。
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('DeepSeek Harness', dsh_home)
     for commandcode_home in resolve_commandcode_homes(
         getattr(args, "commandcode_homes", None)
     ):
-        commandcode_account = read_commandcode_account(commandcode_home)
-        commandcode_snapshot = read_commandcode_quota(commandcode_home)
-        if commandcode_snapshot is None:
-            results.append(
-                {
-                    "account": commandcode_account.display_name,
-                    "account_id": commandcode_account.account_id,
-                    "profile_name": commandcode_account.profile_name,
-                    "codex_home": str(commandcode_home),
-                    "product": "command-code",
-                    "logged_in": commandcode_account.logged_in,
-                    "windows": [],
-                }
-            )
+        if not commandcode_home.is_dir():
             continue
-        summary = _quota_summary(commandcode_snapshot)
-        summary["account"] = commandcode_account.display_name
-        summary["account_id"] = commandcode_account.account_id
-        summary["profile_name"] = commandcode_account.profile_name
-        summary["codex_home"] = str(commandcode_home)
-        summary["product"] = "command-code"
-        summary["logged_in"] = commandcode_account.logged_in
-        results.append(summary)
+        try:
+            commandcode_account = read_commandcode_account(commandcode_home)
+            commandcode_snapshot = read_commandcode_quota(commandcode_home)
+            if commandcode_snapshot is None:
+                results.append(
+                    {
+                        "account": commandcode_account.display_name,
+                        "account_id": commandcode_account.account_id,
+                        "profile_name": commandcode_account.profile_name,
+                        "codex_home": str(commandcode_home),
+                        "product": "command-code",
+                        "logged_in": commandcode_account.logged_in,
+                        "windows": [],
+                    }
+                )
+                continue
+            summary = _quota_summary(commandcode_snapshot)
+            summary["account"] = commandcode_account.display_name
+            summary["account_id"] = commandcode_account.account_id
+            summary["profile_name"] = commandcode_account.profile_name
+            summary["codex_home"] = str(commandcode_home)
+            summary["product"] = "command-code"
+            summary["logged_in"] = commandcode_account.logged_in
+            results.append(summary)
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Command Code', commandcode_home)
     if args.json:
         if len(results) == 1 and not errors:
             output: object = results[0]
@@ -1052,6 +1082,13 @@ def _show_quota(args: argparse.Namespace) -> int:
             output = {"accounts": results, "errors": errors}
         sys.stdout.write(f"{json.dumps(output, ensure_ascii=False, indent=2)}\n")
         return 0 if results else 2
+
+    if not results and not errors:
+        sys.stdout.write(
+            "未发现任何账号：本机没有 CODEX_HOME，也没有配置 Grok / Kimi / "
+            "DeepSeek Harness / Claude Code / Command Code 数据目录。\n"
+        )
+        return 2
 
     printed = 0
     for account, snapshot in snapshots:
@@ -1295,59 +1332,79 @@ def _show_sessions(args: argparse.Namespace) -> int:
     ]
     extra_sessions: list[tuple[str, TrackedSession]] = []
     for grok_home in resolve_grok_homes(getattr(args, "grok_homes", None)):
-        grok_account = read_grok_account(grok_home)
-        for session in list_grok_active_sessions(grok_home):
-            extra_sessions.append((grok_account.display_name, session))
-            summaries.append(
-                _session_summary(
-                    session,
-                    grok_account.display_name,
-                    account_id=grok_account.account_id,
-                    profile_name=grok_account.profile_name,
-                    product="grok",
+        if not grok_home.is_dir():
+            continue
+        try:
+            grok_account = read_grok_account(grok_home)
+            for session in list_grok_active_sessions(grok_home):
+                extra_sessions.append((grok_account.display_name, session))
+                summaries.append(
+                    _session_summary(
+                        session,
+                        grok_account.display_name,
+                        account_id=grok_account.account_id,
+                        profile_name=grok_account.profile_name,
+                        product="grok",
+                    )
                 )
-            )
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Grok', grok_home)
     for kimi_home in resolve_kimi_homes(getattr(args, "kimi_homes", None)):
-        kimi_account = read_kimi_account(kimi_home)
-        for session in list_kimi_active_sessions(kimi_home):
-            extra_sessions.append((kimi_account.display_name, session))
-            summaries.append(
-                _session_summary(
-                    session,
-                    kimi_account.display_name,
-                    account_id=kimi_account.account_id,
-                    profile_name=kimi_account.profile_name,
-                    product="kimi",
+        if not kimi_home.is_dir():
+            continue
+        try:
+            kimi_account = read_kimi_account(kimi_home)
+            for session in list_kimi_active_sessions(kimi_home):
+                extra_sessions.append((kimi_account.display_name, session))
+                summaries.append(
+                    _session_summary(
+                        session,
+                        kimi_account.display_name,
+                        account_id=kimi_account.account_id,
+                        profile_name=kimi_account.profile_name,
+                        product="kimi",
+                    )
                 )
-            )
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Kimi', kimi_home)
     for dsh_home in resolve_dsh_homes(getattr(args, "dsh_homes", None)):
-        dsh_account = read_dsh_account(dsh_home)
-        for session in list_dsh_active_sessions(dsh_home):
-            extra_sessions.append((dsh_account.display_name, session))
-            summaries.append(
-                _session_summary(
-                    session,
-                    dsh_account.display_name,
-                    account_id=dsh_account.account_id,
-                    profile_name=dsh_account.profile_name,
-                    product="dsh",
+        if not dsh_home.is_dir():
+            continue
+        try:
+            dsh_account = read_dsh_account(dsh_home)
+            for session in list_dsh_active_sessions(dsh_home):
+                extra_sessions.append((dsh_account.display_name, session))
+                summaries.append(
+                    _session_summary(
+                        session,
+                        dsh_account.display_name,
+                        account_id=dsh_account.account_id,
+                        profile_name=dsh_account.profile_name,
+                        product="dsh",
+                    )
                 )
-            )
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('DeepSeek Harness', dsh_home)
     for commandcode_home in resolve_commandcode_homes(
         getattr(args, "commandcode_homes", None)
     ):
-        commandcode_account = read_commandcode_account(commandcode_home)
-        for session in list_commandcode_active_sessions(commandcode_home):
-            extra_sessions.append((commandcode_account.display_name, session))
-            summaries.append(
-                _session_summary(
-                    session,
-                    commandcode_account.display_name,
-                    account_id=commandcode_account.account_id,
-                    profile_name=commandcode_account.profile_name,
-                    product="command-code",
+        if not commandcode_home.is_dir():
+            continue
+        try:
+            commandcode_account = read_commandcode_account(commandcode_home)
+            for session in list_commandcode_active_sessions(commandcode_home):
+                extra_sessions.append((commandcode_account.display_name, session))
+                summaries.append(
+                    _session_summary(
+                        session,
+                        commandcode_account.display_name,
+                        account_id=commandcode_account.account_id,
+                        profile_name=commandcode_account.profile_name,
+                        product="command-code",
+                    )
                 )
-            )
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Command Code', commandcode_home)
     thresholds = SessionSwitchThresholds(
         turn_warn=args.session_turn_warn,
         context_warn_tokens=args.session_context_warn_tokens,
@@ -2043,7 +2100,9 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
     """把 service install 参数转换成可持久化配置。"""
 
     accounts = _accounts(args)
-    codex_path = resolve_executable(args.codex)
+    # 中文注释：没有 Codex 账号时不解析 Codex 可执行文件，
+    # 允许在没装 Codex CLI 的机器上安装只监控其他 provider 的后台服务。
+    codex_path = resolve_executable(args.codex) if accounts else str(args.codex)
     return ServiceConfig(
         state_dir=args.state_dir.expanduser().resolve(),
         codex_homes=tuple(account.home for account in accounts),

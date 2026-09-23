@@ -236,7 +236,9 @@ class HousekeepingMonitor:
 
         if refresh_interval <= 0:
             raise ValueError("refresh_interval 必须大于 0")
-        self.targets = tuple(target for target in targets if target.path.exists())
+        # 中文注释：不在构造时过滤——状态目录可能在 daemon 启动后才创建，
+        # 读取 targets 时按当前文件系统状态过滤。
+        self._targets = tuple(targets)
         self.thresholds = thresholds or DiskThresholds()
         self.archive_dir = (
             Path(archive_dir).expanduser() if archive_dir is not None else None
@@ -254,6 +256,12 @@ class HousekeepingMonitor:
         ) = None
 
     # ---------------------------------------------------------------- 统计
+
+    @property
+    def targets(self) -> tuple[AuditTarget, ...]:
+        """返回当前真实存在的审计目标。"""
+
+        return tuple(target for target in self._targets if target.path.exists())
 
     def latest(self) -> dict[str, Any]:
         """返回最近一次统计结果；尚未统计时返回空报告。"""

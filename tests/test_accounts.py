@@ -315,6 +315,69 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(paths, {str(root / "sessions" / "active.jsonl")})
 
 
+    def test_build_account_specs_without_codex_home_returns_empty(self) -> None:
+        """没有默认 CODEX_HOME 时返回零账号，显式目录仍按配置生效。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            missing = root / "missing-codex-home"
+            with patch.dict(os.environ, {"CODEX_HOME": str(missing)}):
+                default_accounts = build_account_specs(
+                    None,
+                    state_dir=root / "state",
+                )
+            explicit = build_account_specs(
+                (root / ".codex-new",),
+                state_dir=root / "state",
+            )
+            empty = build_account_specs((), state_dir=root / "state")
+
+        self.assertEqual(default_accounts, ())
+        self.assertEqual(empty, ())
+        self.assertEqual(len(explicit), 1)
+
+    def test_monitor_without_codex_accounts_still_runs(self) -> None:
+        """零 Codex 账号时 daemon 仍能跑一轮（流量与磁盘提醒）。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            provider_root = root / "missing"
+            _FakeAppServer.configs = []
+            with patch(
+                "token_monitor.monitor.AppServerClient",
+                _FakeAppServer,
+            ):
+                monitor = MultiAccountMonitor(
+                    accounts=(),
+                    state_dir=root / "state",
+                    config=MonitorConfig(auto_resume=False),
+                    grok_homes=(provider_root / "grok",),
+                    kimi_homes=(provider_root / "kimi",),
+                    dsh_homes=(provider_root / "dsh",),
+                    commandcode_homes=(provider_root / "commandcode",),
+                    claude_homes=(provider_root / "claude",),
+                )
+                registries = dict(monitor.registries)
+                metadata = dict(monitor.dashboard_account_metadata)
+                monitor.run_once(now=1_000.0)
+                labels = {
+                    target.label
+                    for target in monitor.housekeeping.targets
+                }
+                monitor.close()
+
+        self.assertEqual(registries, {})
+        self.assertEqual(metadata, {})
+        # 缺失的 provider 目录不进入磁盘审计目标
+        self.assertLessEqual(labels, {"监控状态目录"})
+
+    def test_monitor_requires_state_dir_without_accounts(self) -> None:
+        """零账号又没有 state_dir 时给出明确错误。"""
+
+        with self.assertRaises(ValueError):
+            MultiAccountMonitor(accounts=(), state_dir=None)
+
+
 def _sample_alert() -> TrafficAlert:
     """构造一条用于编排层测试的告警。"""
 

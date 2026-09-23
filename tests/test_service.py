@@ -387,6 +387,40 @@ class ServiceTests(unittest.TestCase):
             '"/tmp/a b/$$HOME/100%%/\\"x\\""',
         )
 
+    def test_config_without_codex_home_builds_monitor(self) -> None:
+        """没有 CODEX_HOME 也允许保存配置并启动零账号 daemon。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = ServiceConfig(
+                state_dir=root / "state",
+                codex_homes=(),
+                session_root=None,
+                verbose=False,
+                codex_path="codex",
+                scan_interval=2.0,
+                reconcile_interval=30.0,
+                quota_interval=300.0,
+                dashboard=True,
+                dashboard_host="127.0.0.1",
+                dashboard_port=8765,
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+
+            config.save()
+            loaded = ServiceConfig.load(config.config_path)
+            monitor = loaded.build_monitor()
+            registries = dict(monitor.registries)
+            monitor.close()
+
+        self.assertEqual(loaded.codex_homes, ())
+        self.assertEqual(config.build_monitor().accounts, ())
+        self.assertEqual(registries, {})
+
     @staticmethod
     def _config(root: Path) -> ServiceConfig:
         """生成覆盖多账号和 Dashboard 的最小有效配置。"""

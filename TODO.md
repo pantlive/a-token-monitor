@@ -2,12 +2,6 @@
 
 ## 功能
 
-- [ ] Daemon 不强制 Codex 账号
-  - 没有 Codex CLI、`CODEX_HOME` 或有效登录时仍能启动 daemon。
-  - 支持仅监控流量、Kimi、DSH 或 Grok。
-  - 各 provider 独立初始化和降级，单个 provider 失败不影响其他功能。
-  - `service install` 同样允许无 Codex 配置运行。
-
 - [ ] 历史数据管理
   - 支持分别配置用量、告警和会话历史的保留天数。
   - 在 Dashboard 展示状态目录及各类索引的磁盘占用。
@@ -48,6 +42,15 @@
   - 在实现 Grok 活动会话和 Claude Code 用量索引时同步接入，避免产生新的平行数据结构。
 
 ## 已完成
+
+- [x] Daemon 不强制 Codex 账号
+  - 没有 Codex CLI、`CODEX_HOME` 或有效登录时仍能启动 daemon，Codex 账号变为可选配置。
+  - 支持仅监控流量，或监控 Grok / Kimi / DeepSeek Harness / Claude Code / Command Code
+    的任意组合；`MultiAccountMonitor` 零账号时 `registries` 为空，Dashboard 照常提供状态。
+  - provider 目录不存在直接跳过；读取失败只降级该目录（Dashboard 状态与 `sessions`、
+    `quota` 命令均按 provider 隔离，日志记录失败原因）。
+  - `service install` 允许 `codex_homes: []` 并保持配置往返；没有账号时不解析
+    Codex 可执行文件，缺省命令名原样保存。
 
 - [x] Grok 活动会话与 Kimi / DSH 对齐
   - 以 `/proc/<pid>/fd` 里 Grok CLI 实际打开的会话文件为准识别活动会话，

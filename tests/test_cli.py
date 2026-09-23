@@ -14,7 +14,8 @@ from unittest import mock
 
 from token_monitor.accounts import build_account_specs
 from token_monitor.alerts import TrafficAlertStore
-from token_monitor.cli import build_parser, default_state_dir, main
+from token_monitor.cli import _service_config, build_parser, default_state_dir, main
+from token_monitor.service import ServiceConfig
 from token_monitor.housekeeping import DEFAULT_TOTAL_WARN_GIB
 from token_monitor.usage import (
     DEFAULT_SESSION_TURN_WARN,
@@ -980,6 +981,47 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertEqual(code, 2)
+
+
+    def test_service_install_config_without_codex(self) -> None:
+        """没有 Codex CLI/CODEX_HOME 也能生成后台服务配置。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            args = build_parser().parse_args(
+                ["--state-dir", str(root / "state"), "service", "install"]
+            )
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "missing")}):
+                config = _service_config(args)
+            config.save()
+            loaded = ServiceConfig.load(config.config_path)
+
+        self.assertEqual(config.codex_homes, ())
+        # 没有 Codex 账号时不解析可执行文件，保留原始命令名
+        self.assertEqual(config.codex_path, "codex")
+        self.assertEqual(loaded.codex_homes, ())
+
+    def test_quota_without_any_provider_prints_hint(self) -> None:
+        """没有任何账号时 quota 给出可读提示而不是空输出。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            buffer = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "missing")}),
+                mock.patch("token_monitor.cli.resolve_grok_homes", return_value=()),
+                mock.patch("token_monitor.cli.resolve_kimi_homes", return_value=()),
+                mock.patch("token_monitor.cli.resolve_dsh_homes", return_value=()),
+                mock.patch(
+                    "token_monitor.cli.resolve_commandcode_homes",
+                    return_value=(),
+                ),
+                contextlib.redirect_stdout(buffer),
+            ):
+                code = main(["--state-dir", str(root / "state"), "quota"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("未发现任何账号", buffer.getvalue())
 
 
 def _write_stale_session(

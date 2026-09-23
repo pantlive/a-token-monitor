@@ -1198,6 +1198,95 @@ class GrokSessionDashboardTests(unittest.TestCase):
         self.assertEqual(state["counts"]["active"], 1)
 
 
+class NoCodexDashboardTests(unittest.TestCase):
+    """验证没有 Codex 账号时 Dashboard 与 provider 隔离仍然可用。"""
+
+    def _missing_homes(self, root: Path) -> dict[str, object]:
+        missing = root / "missing"
+        return {
+            "grok_homes": (missing / "grok",),
+            "kimi_homes": (missing / "kimi",),
+            "dsh_homes": (missing / "dsh",),
+            "commandcode_homes": (missing / "commandcode",),
+            "claude_homes": (missing / "claude",),
+        }
+
+    def test_state_without_any_account_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state = build_multi_dashboard_state({}, **self._missing_homes(root))
+
+        self.assertEqual(state["accounts"], [])
+        self.assertEqual(state["sessions"], [])
+        self.assertEqual(state["counts"], {})
+        self.assertEqual(state["quotas"] if "quotas" in state else [], [])
+
+    def test_server_serves_state_without_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = DashboardServer(
+                registries={},
+                config=DashboardConfig(port=0),
+                grok_homes=(root / "missing" / "grok",),
+                kimi_homes=(root / "missing" / "kimi",),
+                dsh_homes=(root / "missing" / "dsh",),
+                commandcode_homes=(root / "missing" / "commandcode",),
+                claude_homes=(root / "missing" / "claude",),
+            )
+            server.start()
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/api/state", timeout=5) as response:
+                    status = response.status
+                    state = json.load(response)
+                with urlopen(f"{base_url}/", timeout=5) as response:
+                    html = response.read().decode("utf-8")
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(state["accounts"], [])
+        self.assertEqual(state["sessions"], [])
+        self.assertIn("Token Monitor", html)
+
+    def test_one_failing_provider_does_not_break_state(self) -> None:
+        """单个 provider 读取失败只降级自己，不影响其他 provider。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = root / ".grok"
+            grok_home.mkdir()
+            claude_home = root / ".claude"
+            claude_home.mkdir()
+            (root / ".claude.json").write_text(
+                json.dumps({"userID": "user-abc"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch(
+                    "token_monitor.dashboard.read_grok_account",
+                    side_effect=RuntimeError("模拟 Grok 目录损坏"),
+                ),
+                self.assertLogs("token_monitor.dashboard", level="ERROR") as captured,
+            ):
+                state = build_multi_dashboard_state(
+                    {},
+                    grok_homes=(grok_home,),
+                    kimi_homes=(root / "missing" / "kimi",),
+                    dsh_homes=(root / "missing" / "dsh",),
+                    commandcode_homes=(root / "missing" / "commandcode",),
+                    claude_homes=(claude_home,),
+                )
+
+        products = [item.get("product") for item in state["accounts"]]
+        self.assertNotIn("grok", products)
+        self.assertIn("claude", products)
+        self.assertTrue(
+            any("Grok 目录读取失败" in line for line in captured.output),
+            captured.output,
+        )
+
+
 class UsageSearchDashboardTests(unittest.TestCase):
     """验证用量检索接口和页面入口。"""
 

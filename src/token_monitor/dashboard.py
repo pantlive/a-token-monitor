@@ -2437,15 +2437,13 @@ class DashboardServer:
     ) -> None:
         if registries is not None and registry is not None:
             raise ValueError("registry 和 registries 只能传入一个")
-        if registries is None:
-            if registry is None:
-                raise ValueError("至少需要一个 Dashboard 注册表")
+        if registry is not None:
             registries = {"codex": registry}
-        if not registries:
-            raise ValueError("至少需要一个 Dashboard 注册表")
-        self.registries = dict(registries)
+        # 中文注释：没有 Codex 账号时允许空注册表，Dashboard 仍然展示
+        # Grok / Kimi / DSH / Claude Code / Command Code 的状态。
+        self.registries = dict(registries or {})
         self.account_metadata = dict(account_metadata or {})
-        self.registry = next(iter(self.registries.values()))
+        self.registry = next(iter(self.registries.values()), None)
         self.config = config or DashboardConfig()
         self.logger = logger or logging.getLogger(__name__)
         self.grok_homes = resolve_grok_homes(grok_homes)
@@ -2595,6 +2593,16 @@ def build_dashboard_state(
     }
 
 
+def _guard_provider(label: str, home: Path) -> None:
+    """记录单个 provider 目录的读取失败，继续构建其他 provider 的状态。"""
+
+    logging.getLogger(__name__).exception(
+        "%s 目录读取失败，已跳过该目录（其他 provider 不受影响）: %s",
+        label,
+        home,
+    )
+
+
 def build_multi_dashboard_state(
     registries: Mapping[str, MultiSessionRegistry],
     account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
@@ -2695,212 +2703,237 @@ def build_multi_dashboard_state(
             account["profiles"].append(profile)
 
     for grok_home in grok_homes or ():
-        grok_account = read_grok_account(grok_home)
-        grok_quota = read_grok_quota(grok_home)
-        account_key = grok_account.account_key
-        account = accounts_by_key.setdefault(
-            account_key,
-            {
-                "name": grok_account.display_name,
-                "account_id": grok_account.account_id,
-                "product": "grok",
-                "profiles": [],
-                "quota": None,
-                "counts": {},
-            },
-        )
-        account["product"] = "grok"
-        profile = {
-            "name": grok_account.profile_name,
-            "codex_home": str(grok_home),
-        }
-        if profile not in account["profiles"]:
-            account["profiles"].append(profile)
-        if grok_quota is not None:
-            quota_with_account = _quota_summary(grok_quota)
-            if quota_with_account is not None:
-                quota_with_account["account"] = grok_account.display_name
-                quota_with_account["account_id"] = grok_account.account_id
-                quota_with_account["profile_name"] = grok_account.profile_name
-                quota_with_account["codex_home"] = str(grok_home)
-                quota_with_account["product"] = "grok"
-                quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                    quota_with_account
-                )
-        for session in list_grok_active_sessions(grok_home):
-            sessions.append(
-                _session_summary(
-                    session,
-                    account_name=grok_account.display_name,
-                    account_id=grok_account.account_id,
-                    profile_name=grok_account.profile_name,
-                    codex_home=str(grok_home),
-                    product="grok",
-                )
+        if not grok_home.is_dir():
+            continue
+        try:
+            grok_account = read_grok_account(grok_home)
+            grok_quota = read_grok_quota(grok_home)
+            account_key = grok_account.account_key
+            account = accounts_by_key.setdefault(
+                account_key,
+                {
+                    "name": grok_account.display_name,
+                    "account_id": grok_account.account_id,
+                    "product": "grok",
+                    "profiles": [],
+                    "quota": None,
+                    "counts": {},
+                },
             )
+            account["product"] = "grok"
+            profile = {
+                "name": grok_account.profile_name,
+                "codex_home": str(grok_home),
+            }
+            if profile not in account["profiles"]:
+                account["profiles"].append(profile)
+            if grok_quota is not None:
+                quota_with_account = _quota_summary(grok_quota)
+                if quota_with_account is not None:
+                    quota_with_account["account"] = grok_account.display_name
+                    quota_with_account["account_id"] = grok_account.account_id
+                    quota_with_account["profile_name"] = grok_account.profile_name
+                    quota_with_account["codex_home"] = str(grok_home)
+                    quota_with_account["product"] = "grok"
+                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
+                        quota_with_account
+                    )
+            for session in list_grok_active_sessions(grok_home):
+                sessions.append(
+                    _session_summary(
+                        session,
+                        account_name=grok_account.display_name,
+                        account_id=grok_account.account_id,
+                        profile_name=grok_account.profile_name,
+                        codex_home=str(grok_home),
+                        product="grok",
+                    )
+                )
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Grok', grok_home)
     # Kimi 配额经官方 /usages 接口读取（带缓存）；失败时账号卡片只展示身份。
     for kimi_home in kimi_homes or ():
-        kimi_account = read_kimi_account(kimi_home)
-        kimi_quota = read_kimi_quota(kimi_home)
-        account_key = kimi_account.account_key
-        account = accounts_by_key.setdefault(
-            account_key,
-            {
-                "name": kimi_account.display_name,
-                "account_id": kimi_account.account_id,
-                "product": "kimi",
-                "profiles": [],
-                "quota": None,
-                "counts": {},
-            },
-        )
-        account["product"] = "kimi"
-        profile = {
-            "name": kimi_account.profile_name,
-            "codex_home": str(kimi_home),
-        }
-        if profile not in account["profiles"]:
-            account["profiles"].append(profile)
-        if kimi_quota is not None:
-            quota_with_account = _quota_summary(kimi_quota)
-            if quota_with_account is not None:
-                quota_with_account["account"] = kimi_account.display_name
-                quota_with_account["account_id"] = kimi_account.account_id
-                quota_with_account["profile_name"] = kimi_account.profile_name
-                quota_with_account["codex_home"] = str(kimi_home)
-                quota_with_account["product"] = "kimi"
-                quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                    quota_with_account
-                )
-        for session in list_kimi_active_sessions(kimi_home):
-            sessions.append(
-                _session_summary(
-                    session,
-                    account_name=kimi_account.display_name,
-                    account_id=kimi_account.account_id,
-                    profile_name=kimi_account.profile_name,
-                    codex_home=str(kimi_home),
-                    product="kimi",
-                )
+        if not kimi_home.is_dir():
+            continue
+        try:
+            kimi_account = read_kimi_account(kimi_home)
+            kimi_quota = read_kimi_quota(kimi_home)
+            account_key = kimi_account.account_key
+            account = accounts_by_key.setdefault(
+                account_key,
+                {
+                    "name": kimi_account.display_name,
+                    "account_id": kimi_account.account_id,
+                    "product": "kimi",
+                    "profiles": [],
+                    "quota": None,
+                    "counts": {},
+                },
             )
+            account["product"] = "kimi"
+            profile = {
+                "name": kimi_account.profile_name,
+                "codex_home": str(kimi_home),
+            }
+            if profile not in account["profiles"]:
+                account["profiles"].append(profile)
+            if kimi_quota is not None:
+                quota_with_account = _quota_summary(kimi_quota)
+                if quota_with_account is not None:
+                    quota_with_account["account"] = kimi_account.display_name
+                    quota_with_account["account_id"] = kimi_account.account_id
+                    quota_with_account["profile_name"] = kimi_account.profile_name
+                    quota_with_account["codex_home"] = str(kimi_home)
+                    quota_with_account["product"] = "kimi"
+                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
+                        quota_with_account
+                    )
+            for session in list_kimi_active_sessions(kimi_home):
+                sessions.append(
+                    _session_summary(
+                        session,
+                        account_name=kimi_account.display_name,
+                        account_id=kimi_account.account_id,
+                        profile_name=kimi_account.profile_name,
+                        codex_home=str(kimi_home),
+                        product="kimi",
+                    )
+                )
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Kimi', kimi_home)
     for dsh_home in dsh_homes or ():
-        dsh_account = read_dsh_account(dsh_home)
-        dsh_quota = read_dsh_quota(dsh_home)
-        account_key = dsh_account.account_key
-        account = accounts_by_key.setdefault(
-            account_key,
-            {
-                "name": dsh_account.display_name,
-                "account_id": dsh_account.account_id,
-                "product": "dsh",
-                "profiles": [],
-                "quota": None,
-                "counts": {},
-            },
-        )
-        account["product"] = "dsh"
-        profile = {
-            "name": dsh_account.profile_name,
-            "codex_home": str(dsh_home),
-        }
-        if profile not in account["profiles"]:
-            account["profiles"].append(profile)
-        if dsh_quota is not None:
-            quota_with_account = _quota_summary(dsh_quota)
-            if quota_with_account is not None:
-                quota_with_account["account"] = dsh_account.display_name
-                quota_with_account["account_id"] = dsh_account.account_id
-                quota_with_account["profile_name"] = dsh_account.profile_name
-                quota_with_account["codex_home"] = str(dsh_home)
-                quota_with_account["product"] = "dsh"
-                quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                    quota_with_account
-                )
-        for session in list_dsh_active_sessions(dsh_home):
-            sessions.append(
-                _session_summary(
-                    session,
-                    account_name=dsh_account.display_name,
-                    account_id=dsh_account.account_id,
-                    profile_name=dsh_account.profile_name,
-                    codex_home=str(dsh_home),
-                    product="dsh",
-                )
+        if not dsh_home.is_dir():
+            continue
+        try:
+            dsh_account = read_dsh_account(dsh_home)
+            dsh_quota = read_dsh_quota(dsh_home)
+            account_key = dsh_account.account_key
+            account = accounts_by_key.setdefault(
+                account_key,
+                {
+                    "name": dsh_account.display_name,
+                    "account_id": dsh_account.account_id,
+                    "product": "dsh",
+                    "profiles": [],
+                    "quota": None,
+                    "counts": {},
+                },
             )
+            account["product"] = "dsh"
+            profile = {
+                "name": dsh_account.profile_name,
+                "codex_home": str(dsh_home),
+            }
+            if profile not in account["profiles"]:
+                account["profiles"].append(profile)
+            if dsh_quota is not None:
+                quota_with_account = _quota_summary(dsh_quota)
+                if quota_with_account is not None:
+                    quota_with_account["account"] = dsh_account.display_name
+                    quota_with_account["account_id"] = dsh_account.account_id
+                    quota_with_account["profile_name"] = dsh_account.profile_name
+                    quota_with_account["codex_home"] = str(dsh_home)
+                    quota_with_account["product"] = "dsh"
+                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
+                        quota_with_account
+                    )
+            for session in list_dsh_active_sessions(dsh_home):
+                sessions.append(
+                    _session_summary(
+                        session,
+                        account_name=dsh_account.display_name,
+                        account_id=dsh_account.account_id,
+                        profile_name=dsh_account.profile_name,
+                        codex_home=str(dsh_home),
+                        product="dsh",
+                    )
+                )
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('DeepSeek Harness', dsh_home)
     # Claude Code 本地没有订阅额度接口，只展示身份和本地用量归属。
     for claude_home in claude_homes or ():
-        claude_account = read_claude_account(claude_home)
-        account_key = claude_account.account_key
-        account = accounts_by_key.setdefault(
-            account_key,
-            {
-                "name": claude_account.display_name,
-                "account_id": claude_account.account_id,
-                "product": "claude",
-                "profiles": [],
-                "quota": None,
-                "counts": {},
-            },
-        )
-        account["product"] = "claude"
-        profile = {
-            "name": claude_account.profile_name,
-            "codex_home": str(claude_home),
-        }
-        if profile not in account["profiles"]:
-            account["profiles"].append(profile)
+        if not claude_home.is_dir():
+            continue
+        try:
+            claude_account = read_claude_account(claude_home)
+            account_key = claude_account.account_key
+            account = accounts_by_key.setdefault(
+                account_key,
+                {
+                    "name": claude_account.display_name,
+                    "account_id": claude_account.account_id,
+                    "product": "claude",
+                    "profiles": [],
+                    "quota": None,
+                    "counts": {},
+                },
+            )
+            account["product"] = "claude"
+            profile = {
+                "name": claude_account.profile_name,
+                "codex_home": str(claude_home),
+            }
+            if profile not in account["profiles"]:
+                account["profiles"].append(profile)
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Claude Code', claude_home)
     # Command Code 订阅额度经官方后台接口读取（带缓存）；失败时只展示账号身份。
     for commandcode_home in commandcode_homes or ():
-        commandcode_account = read_commandcode_account(commandcode_home)
-        commandcode_quota = read_commandcode_quota(commandcode_home)
-        account_key = commandcode_account.account_key
-        account = accounts_by_key.setdefault(
-            account_key,
-            {
-                "name": commandcode_account.display_name,
-                "account_id": commandcode_account.account_id,
-                "product": "command-code",
-                "profiles": [],
-                "quota": None,
-                "counts": {},
-            },
-        )
-        account["product"] = "command-code"
-        profile = {
-            "name": commandcode_account.profile_name,
-            "codex_home": str(commandcode_home),
-        }
-        if profile not in account["profiles"]:
-            account["profiles"].append(profile)
-        if commandcode_quota is not None:
-            quota_with_account = _quota_summary(commandcode_quota)
-            if quota_with_account is not None:
-                quota_with_account["account"] = commandcode_account.display_name
-                quota_with_account["account_id"] = commandcode_account.account_id
-                quota_with_account["profile_name"] = (
-                    commandcode_account.profile_name
-                )
-                quota_with_account["codex_home"] = str(commandcode_home)
-                quota_with_account["product"] = "command-code"
-                quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                    quota_with_account
-                )
-        for session in list_commandcode_active_sessions(commandcode_home):
-            sessions.append(
-                _session_summary(
-                    session,
-                    account_name=commandcode_account.display_name,
-                    account_id=commandcode_account.account_id,
-                    profile_name=commandcode_account.profile_name,
-                    codex_home=str(commandcode_home),
-                    product="command-code",
-                )
+        if not commandcode_home.is_dir():
+            continue
+        try:
+            commandcode_account = read_commandcode_account(commandcode_home)
+            commandcode_quota = read_commandcode_quota(commandcode_home)
+            account_key = commandcode_account.account_key
+            account = accounts_by_key.setdefault(
+                account_key,
+                {
+                    "name": commandcode_account.display_name,
+                    "account_id": commandcode_account.account_id,
+                    "product": "command-code",
+                    "profiles": [],
+                    "quota": None,
+                    "counts": {},
+                },
             )
+            account["product"] = "command-code"
+            profile = {
+                "name": commandcode_account.profile_name,
+                "codex_home": str(commandcode_home),
+            }
+            if profile not in account["profiles"]:
+                account["profiles"].append(profile)
+            if commandcode_quota is not None:
+                quota_with_account = _quota_summary(commandcode_quota)
+                if quota_with_account is not None:
+                    quota_with_account["account"] = commandcode_account.display_name
+                    quota_with_account["account_id"] = commandcode_account.account_id
+                    quota_with_account["profile_name"] = (
+                        commandcode_account.profile_name
+                    )
+                    quota_with_account["codex_home"] = str(commandcode_home)
+                    quota_with_account["product"] = "command-code"
+                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
+                        quota_with_account
+                    )
+            for session in list_commandcode_active_sessions(commandcode_home):
+                sessions.append(
+                    _session_summary(
+                        session,
+                        account_name=commandcode_account.display_name,
+                        account_id=commandcode_account.account_id,
+                        profile_name=commandcode_account.profile_name,
+                        codex_home=str(commandcode_home),
+                        product="command-code",
+                    )
+                )
 
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Command Code', commandcode_home)
     counts: dict[str, int] = {}
     for account in accounts_by_key.values():
         account["counts"] = {}
