@@ -110,6 +110,12 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
 
 ## 监控内容
 
+- **Codex 账号是可选的**：没有 Codex CLI、`CODEX_HOME` 或有效登录时 daemon 仍可启动，
+  只监控已启用的其他 provider（Grok / Kimi / DeepSeek Harness / Claude Code /
+  Command Code）或仅监控流量与磁盘占用。每个 provider 目录独立初始化：目录不存在直接跳过，
+  读取失败只记一条日志并跳过该目录，不影响其他 provider 和 Dashboard；`service install`
+  同样允许 `codex_homes: []`，此时不再解析 Codex 可执行文件。`token-monitor quota`
+  在没有任何账号时给出可读提示并返回退出码 2。
 - 额度查询使用 Codex App Server 的 `account/rateLimits/read`，不会发送模型提示词。
 - 每个 `CODEX_HOME` 使用独立的登录状态、session 范围和额度快照。
 - 活动会话以实际打开 JSONL 的进程和 App Server 会话状态为依据。

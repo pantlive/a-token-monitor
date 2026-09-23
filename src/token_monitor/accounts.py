@@ -57,10 +57,20 @@ def build_account_specs(
     ``session_root`` 只允许配合一个账号，避免把两个账号的 JSONL 混在一起。
     """
 
-    raw_homes = tuple(homes) if homes else (default_codex_home(),)
+    if homes is None:
+        # 中文注释：没有显式配置时只在默认 CODEX_HOME 确实存在时建账号，
+        # 这样既没有 Codex CLI 也没有 CODEX_HOME 的机器也能只监控其他 provider。
+        default_home = default_codex_home().expanduser()
+        raw_homes = (default_home,) if default_home.exists() else ()
+    else:
+        raw_homes = tuple(homes)
     normalized_homes = _unique_paths(raw_homes)
     if not normalized_homes:
-        raise ValueError("至少需要一个 --codex-home")
+        if session_root is not None:
+            raise ValueError("--session-root 需要至少一个 --codex-home")
+        # 中文注释：没有任何 Codex 账号是合法配置：daemon 可以只监控
+        # 流量、Kimi、DSH、Grok、Claude Code 或 Command Code。
+        return ()
     if session_root is not None and len(normalized_homes) != 1:
         raise ValueError("--session-root 只能和一个 --codex-home 一起使用")
 

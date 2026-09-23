@@ -112,8 +112,7 @@ class ServiceConfig:
                 "session_root",
                 _absolute_path(self.session_root),
             )
-        if not self.codex_homes:
-            raise ValueError("后台服务至少需要一个 CODEX_HOME")
+        # 中文注释：没有 CODEX_HOME 也允许安装后台服务（只监控其他 provider）。
         if not self.codex_path.strip():
             raise ValueError("Codex 可执行文件不能为空")
         if self.session_root is not None and len(self.codex_homes) != 1:
@@ -217,8 +216,8 @@ class ServiceConfig:
         if schema_version != cls.SCHEMA_VERSION:
             raise ServiceError(f"不支持的服务配置版本: {schema_version}")
         homes_value = raw_payload.get("codex_homes")
-        if not isinstance(homes_value, list) or not homes_value:
-            raise ServiceError("服务配置 codex_homes 必须是非空列表")
+        if not isinstance(homes_value, list):
+            raise ServiceError("服务配置 codex_homes 必须是列表")
         codex_homes = tuple(
             _absolute_path(Path(_list_string(homes_value, index)))
             for index in range(len(homes_value))

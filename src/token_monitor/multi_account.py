@@ -57,18 +57,19 @@ class MultiAccountMonitor:
     ) -> None:
         """创建多个单账号监控器。"""
 
-        if not accounts:
-            raise ValueError("至少需要一个 Codex 账号")
+        # 中文注释：没有 Codex 账号也是合法配置——daemon 仍要监控流量、
+        # Kimi、DSH、Grok 等 provider，此时状态目录必须显式给出。
         self.accounts = accounts
         self.config = config or MonitorConfig()
-        self.state_dir = (
-            state_dir.expanduser()
-            if state_dir is not None
-            else min(
+        if state_dir is not None:
+            self.state_dir = state_dir.expanduser()
+        elif accounts:
+            self.state_dir = min(
                 (account.state_dir for account in accounts),
                 key=lambda path: len(path.parts),
             )
-        )
+        else:
+            raise ValueError("没有 Codex 账号时必须指定 state_dir")
         self.logger = logger or logging.getLogger(__name__)
         self.account_monitors = tuple(
             self._create_account_monitor(account) for account in accounts
