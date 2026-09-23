@@ -38,7 +38,12 @@ from .dsh import (
     read_dsh_quota,
     resolve_dsh_homes,
 )
-from .grok import read_grok_account, read_grok_quota, resolve_grok_homes
+from .grok import (
+    list_grok_active_sessions,
+    read_grok_account,
+    read_grok_quota,
+    resolve_grok_homes,
+)
 from .kimi import (
     list_kimi_active_sessions,
     read_kimi_account,
@@ -2722,6 +2727,17 @@ def build_multi_dashboard_state(
                 quota_by_key[(account_key, "snapshot", "snapshot")] = (
                     quota_with_account
                 )
+        for session in list_grok_active_sessions(grok_home):
+            sessions.append(
+                _session_summary(
+                    session,
+                    account_name=grok_account.display_name,
+                    account_id=grok_account.account_id,
+                    profile_name=grok_account.profile_name,
+                    codex_home=str(grok_home),
+                    product="grok",
+                )
+            )
 
     # Kimi 配额经官方 /usages 接口读取（带缓存）；失败时账号卡片只展示身份。
     for kimi_home in kimi_homes or ():

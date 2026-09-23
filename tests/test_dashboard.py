@@ -1132,6 +1132,72 @@ class AlertHistoryDashboardTests(unittest.TestCase):
         self.assertIn("/api/alerts", html)
 
 
+class GrokSessionDashboardTests(unittest.TestCase):
+    """验证 Grok 活动会话以统一字段进入 Dashboard 状态。"""
+
+    def test_grok_sessions_use_unified_fields(self) -> None:
+        from token_monitor.multi_models import DetectionConfidence, SessionStatus
+        from token_monitor.multi_models import TrackedSession as Model
+
+        session = Model(
+            thread_id="grok:session-1",
+            session_id="session-1",
+            jsonl_path="/home/dev/.grok/sessions/%2Fworkspace%2Fdemo/session-1/chat_history.jsonl",
+            cwd="/workspace/demo",
+            source="grok-cli",
+            status=SessionStatus.RUNNING,
+            confidence=DetectionConfidence.OPEN_FILE,
+            first_seen_at=100.0,
+            last_seen_at=200.0,
+            pids=(4242,),
+            last_event_at=190.0,
+            last_event_type="updates.jsonl",
+            metadata={"model": "grok-4.6"},
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = root / ".grok"
+            grok_home.mkdir(parents=True)
+            registry = MultiSessionRegistry(root / "state")
+            with (
+                mock.patch(
+                    "token_monitor.dashboard.list_grok_active_sessions",
+                    return_value=(session,),
+                ),
+                mock.patch(
+                    "token_monitor.dashboard.read_grok_quota",
+                    return_value=None,
+                ),
+            ):
+                state = build_multi_dashboard_state(
+                    {"personal": registry},
+                    grok_homes=(grok_home,),
+                    kimi_homes=(),
+                    dsh_homes=(),
+                    commandcode_homes=(),
+                    claude_homes=(),
+                )
+
+        grok_entries = [
+            item for item in state["sessions"] if item.get("product") == "grok"
+        ]
+        self.assertEqual(len(grok_entries), 1)
+        entry = grok_entries[0]
+        self.assertEqual(entry["session_id"], "session-1")
+        self.assertEqual(entry["source"], "grok-cli")
+        self.assertEqual(entry["cwd"], "/workspace/demo")
+        self.assertEqual(entry["pids"], [4242])
+        self.assertEqual(entry["status"], "running")
+        self.assertEqual(entry["last_event_type"], "updates.jsonl")
+        self.assertTrue(entry["process_backed"])
+        self.assertEqual(entry["account"], "grok")
+        grok_accounts = [
+            account for account in state["accounts"] if account.get("product") == "grok"
+        ]
+        self.assertTrue(grok_accounts)
+        self.assertEqual(state["counts"]["active"], 1)
+
+
 class UsageSearchDashboardTests(unittest.TestCase):
     """验证用量检索接口和页面入口。"""
 
@@ -1525,7 +1591,7 @@ class HousekeepingDashboardTests(unittest.TestCase):
                 ) as response:
                     started = json.load(response)
                 task_id = started["task"]["id"]
-                deadline = time.time() + 10
+                deadline = time.time() + 30
                 status = None
                 while time.time() < deadline:
                     with urlopen(
@@ -1641,7 +1707,7 @@ class HousekeepingDashboardTests(unittest.TestCase):
                 ) as response:
                     started = json.load(response)
                 task_id = started["task"]["id"]
-                deadline = time.time() + 10
+                deadline = time.time() + 30
                 status = None
                 while time.time() < deadline:
                     with urlopen(

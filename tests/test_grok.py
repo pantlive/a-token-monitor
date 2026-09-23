@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from token_monitor.grok import (
+    decode_grok_project,
+    list_grok_active_sessions,
     parse_grok_log_chunk,
     read_grok_account,
     read_grok_quota,
@@ -236,6 +238,185 @@ class GrokUsageTests(unittest.TestCase):
                 (missing.resolve(),),
             )
         self.assertEqual(resolve_grok_homes(()), ())
+
+
+class GrokActiveSessionTests(unittest.TestCase):
+    """验证按进程打开文件识别 Grok 活动会话。"""
+
+    def _home(self, root: Path, session_id: str = "session-1") -> Path:
+        """构造一个带 summary.json 与会话日志的 Grok 目录。"""
+
+        grok_home = root / ".grok"
+        session_dir = (
+            grok_home / "sessions" / "%2Fworkspace%2Fdemo" / session_id
+        )
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "current_model_id": "grok-4.6",
+                    "info": {"cwd": "/workspace/demo"},
+                    "created_at": "2026-09-20T01:00:00Z",
+                    "updated_at": "2026-09-20T02:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (session_dir / "chat_history.jsonl").write_text("", encoding="utf-8")
+        (session_dir / "updates.jsonl").write_text("", encoding="utf-8")
+        return grok_home
+
+    def _process(
+        self,
+        proc_root: Path,
+        pid: int,
+        *,
+        open_path: Path | None,
+        cwd: Path | None = None,
+        comm: str = "grok",
+    ) -> None:
+        """在临时 /proc 树里写入一个 grok 进程。"""
+
+        directory = proc_root / str(pid)
+        (directory / "fd").mkdir(parents=True, exist_ok=True)
+        (directory / "comm").write_text(f"{comm}\n", encoding="utf-8")
+        (directory / "cmdline").write_bytes(f"{comm}\0".encode("utf-8"))
+        (directory / "stat").write_text(
+            f"{pid} ({comm}) " + " ".join(["S", "1"] + ["0"] * 17 + ["9"]),
+            encoding="utf-8",
+        )
+        if cwd is not None:
+            (directory / "cwd").symlink_to(cwd)
+        if open_path is not None:
+            (directory / "fd" / "3").symlink_to(open_path)
+
+    def test_detects_session_from_open_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = self._home(root)
+            session_dir = (
+                grok_home / "sessions" / "%2Fworkspace%2Fdemo" / "session-1"
+            )
+            proc_root = root / "proc"
+            self._process(proc_root, 4242, open_path=session_dir / "summary.json.lock")
+
+            sessions = list_grok_active_sessions(
+                grok_home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.session_id, "session-1")
+        self.assertEqual(session.thread_id, "grok:session-1")
+        self.assertEqual(session.cwd, "/workspace/demo")
+        self.assertEqual(session.pids, (4242,))
+        self.assertEqual(session.source, "grok-cli")
+        self.assertEqual(session.status.value, "running")
+        # 最近事件取会话目录里最后改动的文件
+        self.assertIn(
+            session.last_event_type,
+            {"updates.jsonl", "chat_history.jsonl", "summary.json"},
+        )
+        self.assertTrue(str(session.jsonl_path).endswith("chat_history.jsonl"))
+        self.assertEqual(session.metadata.get("model"), "grok-4.6")
+
+    def test_merges_multiple_processes_and_ignores_others(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = self._home(root)
+            session_dir = (
+                grok_home / "sessions" / "%2Fworkspace%2Fdemo" / "session-1"
+            )
+            proc_root = root / "proc"
+            self._process(proc_root, 100, open_path=session_dir / "events.jsonl")
+            self._process(proc_root, 101, open_path=session_dir / "terminal")
+            self._process(proc_root, 102, open_path=None, comm="python")
+
+            sessions = list_grok_active_sessions(
+                grok_home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].pids, (100, 101))
+
+    def test_sessions_disappear_when_process_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = self._home(root)
+            proc_root = root / "proc"
+            proc_root.mkdir()
+
+            sessions = list_grok_active_sessions(
+                grok_home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(sessions, ())
+
+    def test_falls_back_to_process_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = self._home(root)
+            workspace = root / "demo"
+            workspace.mkdir()
+            proc_root = root / "proc"
+            self._process(proc_root, 200, open_path=None, cwd=workspace)
+
+            # 索引里的 cwd 与实际工作目录一致时才算命中
+            (grok_home / "sessions" / "%2Fworkspace%2Fdemo" / "session-1" / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "current_model_id": "grok-4.6",
+                        "info": {"cwd": str(workspace)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sessions = list_grok_active_sessions(
+                grok_home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].pids, (200,))
+
+    def test_rotated_session_still_reported_from_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = root / ".grok"
+            session_dir = (
+                grok_home / "sessions" / "%2Fworkspace%2Frotated" / "session-old"
+            )
+            session_dir.mkdir(parents=True)
+            proc_root = root / "proc"
+            self._process(proc_root, 300, open_path=session_dir / "events.jsonl")
+            # 模拟日志轮转：会话目录被移走，进程仍持有旧路径
+            session_dir.rename(session_dir.parent / "session-old.moved")
+
+            sessions = list_grok_active_sessions(
+                grok_home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].session_id, "session-old")
+        self.assertEqual(sessions[0].cwd, "/workspace/rotated")
+        self.assertEqual(sessions[0].pids, (300,))
+
+    def test_decode_grok_project(self) -> None:
+        self.assertEqual(
+            decode_grok_project("%2Fhome%2Flsl%2Fproject%2Fgithub%2FHeart-Plan"),
+            "/home/lsl/project/github/Heart-Plan",
+        )
+        self.assertIsNone(decode_grok_project("not-a-path"))
+        self.assertIsNone(decode_grok_project(""))
 
 
 def _period(state: dict[str, object], key: str) -> dict[str, object]:
