@@ -15,6 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from urllib.parse import unquote
+
+from .agents import scan_running_agents
+from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
 from .quota import QuotaSnapshot, QuotaWindow
 
 
@@ -48,11 +52,14 @@ class GrokAccount:
 
 @dataclass(frozen=True)
 class GrokSessionInfo:
-    """从 summary.json 提取的会话模型和项目。"""
+    """从 summary.json 提取的会话模型、项目和目录。"""
 
     session_id: str
     model: str | None
     cwd: str | None
+    directory: Path | None = None
+    created_at: float | None = None
+    updated_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -173,8 +180,180 @@ def load_session_index(grok_home: Path) -> dict[str, GrokSessionInfo]:
             session_id=session_id,
             model=model,
             cwd=cwd,
+            directory=path.parent,
+            created_at=_timestamp(payload.get("created_at")),
+            updated_at=_timestamp(
+                payload.get("updated_at") or payload.get("last_active_at")
+            ),
         )
     return index
+
+
+def decode_grok_project(name: str) -> str | None:
+    """把会话目录名（URL 编码的项目路径）还原成项目路径。"""
+
+    text = name.strip()
+    if not text:
+        return None
+    try:
+        decoded = unquote(text)
+    except (TypeError, ValueError):  # pragma: no cover - unquote 很少失败
+        return None
+    if not decoded.startswith("/"):
+        return None
+    return decoded
+
+
+def list_grok_active_sessions(
+    grok_home: Path,
+    proc_root: Path = Path("/proc"),
+    now: float | None = None,
+) -> tuple[TrackedSession, ...]:
+    """列出当前有 Grok CLI 进程打开会话文件的会话。
+
+    参照 Kimi / DSH 的做法：以 ``/proc/<pid>/fd`` 里实际打开的会话文件为准，
+    同一个会话被多个进程打开时合并 pids；进程退出后会话自然从列表消失。
+    进程只打开被轮转或删除的旧路径时，仍按路径里的会话目录报告。
+    """
+
+    home = _normalize_path(grok_home)
+    sessions_root = home / "sessions"
+    observed_at = time.time() if now is None else float(now)
+    agents = scan_running_agents(proc_root=proc_root, products=("grok",))
+    index = load_session_index(home)
+    grouped: dict[str, list[int]] = {}
+    open_by_session: dict[str, Path] = {}
+    directory_by_session: dict[str, Path] = {}
+    for agent in agents:
+        for path in agent.open_paths:
+            located = _grok_session_from_path(path, sessions_root)
+            if located is None:
+                continue
+            session_id, directory = located
+            grouped.setdefault(session_id, [])
+            if agent.pid not in grouped[session_id]:
+                grouped[session_id].append(agent.pid)
+            open_by_session.setdefault(session_id, path)
+            directory_by_session.setdefault(session_id, directory)
+        if agent.cwd is not None:
+            # 中文注释：CLI 有时不持有会话文件句柄，退回按工作目录匹配。
+            cwd_text = str(agent.cwd)
+            for session_id, info in index.items():
+                if info.cwd and _same_path(info.cwd, cwd_text):
+                    grouped.setdefault(session_id, [])
+                    if agent.pid not in grouped[session_id]:
+                        grouped[session_id].append(agent.pid)
+                    if info.directory is not None:
+                        directory_by_session.setdefault(session_id, info.directory)
+
+    sessions: list[TrackedSession] = []
+    for session_id, pids in grouped.items():
+        info = index.get(session_id)
+        directory = directory_by_session.get(session_id)
+        if directory is None and info is not None:
+            directory = info.directory
+        project = (
+            decode_grok_project(directory.parent.name)
+            if directory is not None
+            else None
+        )
+        cwd = (info.cwd if info is not None else None) or project
+        last_event_at, last_event_type = _grok_session_activity(directory)
+        if last_event_at is None and info is not None:
+            last_event_at = info.updated_at or info.created_at
+        log_path = _grok_session_log(directory, open_by_session.get(session_id))
+        sessions.append(
+            TrackedSession(
+                thread_id=f"grok:{session_id}",
+                session_id=session_id,
+                jsonl_path=str(log_path) if log_path is not None else None,
+                cwd=cwd,
+                source="grok-cli",
+                status=SessionStatus.RUNNING,
+                confidence=DetectionConfidence.OPEN_FILE,
+                first_seen_at=(
+                    (info.created_at if info is not None else None)
+                    or last_event_at
+                    or observed_at
+                ),
+                last_seen_at=observed_at,
+                pids=tuple(sorted(pids)),
+                last_event_at=last_event_at,
+                last_event_type=last_event_type,
+                metadata={"model": info.model} if info and info.model else {},
+            )
+        )
+    sessions.sort(key=lambda item: item.last_seen_at, reverse=True)
+    return tuple(sessions)
+
+
+def _grok_session_from_path(
+    path: Path,
+    sessions_root: Path,
+) -> tuple[str, Path] | None:
+    """从打开的路径解析出会话 ID 和会话目录。"""
+
+    normalized = _normalize_path(path)
+    root = _normalize_path(sessions_root)
+    if root not in normalized.parents:
+        return None
+    relative = normalized.relative_to(root)
+    parts = relative.parts
+    if len(parts) < 2:
+        return None
+    session_id = parts[1]
+    if not session_id:
+        return None
+    return session_id, root / parts[0] / session_id
+
+
+def _grok_session_activity(
+    directory: Path | None,
+) -> tuple[float | None, str | None]:
+    """返回会话目录里最近改动的文件和它的修改时间。"""
+
+    if directory is None or not directory.is_dir():
+        return None, None
+    latest_at: float | None = None
+    latest_name: str | None = None
+    try:
+        entries = tuple(directory.iterdir())
+    except OSError:
+        return None, None
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            modified = entry.stat().st_mtime
+        except OSError:
+            continue
+        if latest_at is None or modified > latest_at:
+            latest_at = modified
+            latest_name = entry.name
+    return latest_at, latest_name
+
+
+def _grok_session_log(
+    directory: Path | None,
+    open_path: Path | None,
+) -> Path | None:
+    """优先展示会话的 chat_history.jsonl，其次退回进程实际打开的路径。"""
+
+    if directory is not None:
+        for name in ("chat_history.jsonl", "updates.jsonl", "events.jsonl"):
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    return open_path
+
+
+def _same_path(left: str, right: str) -> bool:
+    """比较两个路径是否指向同一位置（忽略符号链接差异）。"""
+
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except OSError:
+        return str(left) == str(right)
 
 
 def parse_grok_log_chunk(

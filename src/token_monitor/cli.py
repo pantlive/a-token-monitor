@@ -35,7 +35,12 @@ from .commandcode import (
     read_commandcode_quota,
     resolve_commandcode_homes,
 )
-from .grok import read_grok_account, read_grok_quota, resolve_grok_homes
+from .grok import (
+    list_grok_active_sessions,
+    read_grok_account,
+    read_grok_quota,
+    resolve_grok_homes,
+)
 from .dsh import (
     list_dsh_active_sessions,
     read_dsh_account,
@@ -1289,6 +1294,19 @@ def _show_sessions(args: argparse.Namespace) -> int:
         for session in account_sessions
     ]
     extra_sessions: list[tuple[str, TrackedSession]] = []
+    for grok_home in resolve_grok_homes(getattr(args, "grok_homes", None)):
+        grok_account = read_grok_account(grok_home)
+        for session in list_grok_active_sessions(grok_home):
+            extra_sessions.append((grok_account.display_name, session))
+            summaries.append(
+                _session_summary(
+                    session,
+                    grok_account.display_name,
+                    account_id=grok_account.account_id,
+                    profile_name=grok_account.profile_name,
+                    product="grok",
+                )
+            )
     for kimi_home in resolve_kimi_homes(getattr(args, "kimi_homes", None)):
         kimi_account = read_kimi_account(kimi_home)
         for session in list_kimi_active_sessions(kimi_home):

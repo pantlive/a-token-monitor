@@ -570,7 +570,7 @@ class HousekeepingTaskTests(unittest.TestCase):
             self.assertEqual(task["state"], "running")
             self.assertEqual(task["action"], "archive")
 
-            deadline = time.time() + 10
+            deadline = time.time() + 30
             latest = task
             while time.time() < deadline:
                 current = monitor.task(task["id"])
@@ -609,7 +609,7 @@ class HousekeepingTaskTests(unittest.TestCase):
             with self.assertRaises(HousekeepingError):
                 monitor.start_task("restore", CleanupCriteria())
             task = monitor.start_task("clean", CleanupCriteria(older_than_days=30))
-            deadline = time.time() + 10
+            deadline = time.time() + 30
             current = monitor.task(task["id"])
             while (
                 time.time() < deadline

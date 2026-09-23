@@ -2,11 +2,6 @@
 
 ## 功能
 
-- [ ] Grok 活动会话与 Kimi / DSH 对齐
-  - 根据 Grok CLI 进程实际打开的日志识别活动会话。
-  - 关联账号、项目目录和 session，并处理多进程、退出及日志轮转。
-  - 使用统一会话字段在 Dashboard 展示和去重。
-
 - [ ] Daemon 不强制 Codex 账号
   - 没有 Codex CLI、`CODEX_HOME` 或有效登录时仍能启动 daemon。
   - 支持仅监控流量、Kimi、DSH 或 Grok。
@@ -53,6 +48,15 @@
   - 在实现 Grok 活动会话和 Claude Code 用量索引时同步接入，避免产生新的平行数据结构。
 
 ## 已完成
+
+- [x] Grok 活动会话与 Kimi / DSH 对齐
+  - 以 `/proc/<pid>/fd` 里 Grok CLI 实际打开的会话文件为准识别活动会话，
+    进程不持有句柄时按工作目录回退匹配。
+  - 关联账号（GROK_HOME 身份）、项目目录（URL 编码目录名还原）和 session，
+    并从 `summary.json` 取模型与创建/更新时间。
+  - 同一会话被多个进程打开时合并 pids，进程退出后自动从列表消失，
+    会话目录被轮转/移动后仍按路径报告。
+  - 使用统一 `TrackedSession` 字段进入 Dashboard 与会话表，thread_id 前缀去重。
 
 - [x] Claude Code 用量索引
   - 从 `~/.claude/projects/**/*.jsonl` 增量读取 token 数据，只读 `message.usage` 等元数据。

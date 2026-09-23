@@ -116,6 +116,10 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
 - JSONL 按字节偏移增量读取，避免重复扫描大型历史文件。
 - 用量页按需汇总 Codex session JSONL、Grok unified 日志、Kimi wire 日志和
   DeepSeek Harness projcache 合计。
+- Grok 活动会话以 Grok CLI 进程实际打开的会话文件为准（`/proc/<pid>/fd`），
+  进程不持有句柄时退回按工作目录匹配；会话目录名里的 URL 编码项目路径会还原成
+  真实目录，模型与创建时间来自 `summary.json`。同一会话被多个进程打开时合并 pids，
+  进程退出后自动消失，会话目录被轮转或移动后仍按原路径报告。
 - Kimi 活动会话以进程打开的 `state.json` / `wire.jsonl` 为准。
 - DeepSeek Harness 活动会话以进程打开的 `session.lock` 为准；身份来自
   `~/.dsh/.anonymous-user-id`，不读取 API Key。DSH 本地没有订阅额度窗口。
