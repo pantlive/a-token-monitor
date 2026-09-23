@@ -1624,7 +1624,8 @@ _DASHBOARD_HTML = (
       countLabel.textContent = `${processes.length} 个进程 · 近 15 秒 ${formatDataSize(totals.burst_bytes || 0)}`;
     }
     if (traffic.source === 'unavailable') {
-      container.innerHTML = '<div class="empty-state">无法读取内核 TCP 计数（INET_DIAG）。异常流量监控暂不可用。</div>';
+      const reason = traffic.reason || '无法读取内核 TCP 计数（INET_DIAG）';
+      container.innerHTML = `<div class="empty-state">${escapeHtml(reason)}。异常流量监控暂不可用。</div>`;
       return;
     }
     if (processes.length === 0) {
@@ -1652,7 +1653,10 @@ _DASHBOARD_HTML = (
         <td><span class="pill ${level}">${status}</span>${warnBytes ? `<div class="muted">阈值 ${escapeHtml(formatDataSize(warnBytes))} / 15s</div>` : ''}</td>
       </tr>`;
     }).join('');
-    container.innerHTML = `<div class="usage-note">只统计离开本机的 TCP 发送字节。回环和进程自己监听的 Web UI（例如 DeepSeek Harness :3080 推给浏览器的会话）不计入外发告警。首次看到一条连接时只记基线，避免把监控启动前的历史流量当成突发上传。</div>
+    const platformNote = traffic.source === 'process-only'
+      ? `<div class="usage-note">${escapeHtml(traffic.reason || '当前平台没有内核 TCP 计数')}，字节列仅供参考。</div>`
+      : '';
+    container.innerHTML = `${platformNote}<div class="usage-note">只统计离开本机的 TCP 发送字节。回环和进程自己监听的 Web UI（例如 DeepSeek Harness :3080 推给浏览器的会话）不计入外发告警。首次看到一条连接时只记基线，避免把监控启动前的历史流量当成突发上传。</div>
       <div class="table-wrap traffic-table"><table>
         <thead><tr><th>Agent</th><th>工作目录</th><th>近 15 秒外发</th><th>近 5 分钟 / 累计</th><th>主要对端</th><th>状态</th></tr></thead>
         <tbody>${rows}</tbody>

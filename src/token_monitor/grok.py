@@ -206,7 +206,7 @@ def decode_grok_project(name: str) -> str | None:
 
 def list_grok_active_sessions(
     grok_home: Path,
-    proc_root: Path = Path("/proc"),
+    proc_root: Path | None = None,
     now: float | None = None,
 ) -> tuple[TrackedSession, ...]:
     """列出当前有 Grok CLI 进程打开会话文件的会话。

@@ -125,7 +125,7 @@ def read_dsh_quota(dsh_home: Path, now: float | None = None) -> QuotaSnapshot | 
 
 def list_dsh_active_sessions(
     dsh_home: Path,
-    proc_root: Path = Path("/proc"),
+    proc_root: Path | None = None,
     now: float | None = None,
 ) -> tuple[TrackedSession, ...]:
     """列出当前有 DSH 进程打开 session.lock 的会话。"""

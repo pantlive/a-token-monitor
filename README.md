@@ -299,9 +299,35 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 金额是 OpenAI / Anthropic 等官方 API 等价估算，不代表 Plus、Claude 订阅或其他
 订阅的实际账单。模型没有已知 API 单价时仍展示 token，但不会计入金额合计。
 
-## WSL 后台服务
+## 部署与后台服务
 
-在已启用 systemd 的 WSL2 中，可以把监控器安装为当前用户的后台服务：
+### 运行环境
+
+- **Python ≥ 3.10**，只使用标准库，没有第三方运行时依赖，也不需要编译工具链。
+  macOS 自带的 `python3` 通常是 3.9，需要 Homebrew、python.org 或 conda 提供的
+  3.10+ 解释器（`environment.yml` 使用 conda-forge 的 3.11，两个平台都可用）。
+- **SQLite** 需要 JSON1 扩展来加速聚合；缺失时（例如很旧的系统 Python）会自动退回
+  Python 侧聚合，功能不受影响，只是检索慢一些。
+- **Codex CLI 是可选的**：没有 Codex、`CODEX_HOME` 或有效登录时 daemon 仍可启动，
+  只监控其他 provider 或仅监控流量与磁盘占用。
+- 状态目录由程序自己创建为 `0700`，锁文件与配置文件为 `0600`；daemon 通过
+  `flock` 保证同一状态目录只有一个实例。
+- Dashboard 默认只监听 `127.0.0.1`；需要局域网或容器外访问时加
+  `--dashboard-host 0.0.0.0`，并自行确认网络可信（页面默认没有鉴权）。
+
+### 平台能力对照
+
+| 能力 | Linux | macOS |
+| --- | --- | --- |
+| 额度查询、用量索引与检索、告警、磁盘与会话管理、Dashboard、健康检查 | ✅ | ✅ |
+| 活动会话与进程证据 | ✅ `/proc` | ✅ `ps` + `lsof`（无 `/proc`） |
+| 异常流量字节统计（`traffic`、流量告警） | ✅ netlink `INET_DIAG` | ⚠️ 平台没有 netlink：只列出 agent 进程与远端连接，不统计字节、不产生流量告警 |
+| 后台服务 | systemd 用户服务 | launchd LaunchAgent |
+| 进程发现依赖 | `/proc`（容器需共享 PID 命名空间） | 系统自带 `ps`、`lsof` |
+
+## Linux（含 WSL2）后台服务
+
+在已启用 systemd 的 Linux / WSL2 中，可以把监控器安装为当前用户的后台服务：
 
 ```bash
 token-monitor \
@@ -313,7 +339,7 @@ token-monitor \
   --dashboard-port 8765
 ```
 
-常用管理命令：
+WSL2 需要先在 `/etc/wsl.conf` 里启用 `systemd=true` 并重启发行版。常用管理命令：
 
 ```bash
 token-monitor --state-dir "$HOME/.token-monitor" service status
@@ -324,9 +350,50 @@ token-monitor --state-dir "$HOME/.token-monitor" service start
 token-monitor --state-dir "$HOME/.token-monitor" service uninstall
 ```
 
-服务配置保存在 `~/.token-monitor/service.json`，systemd 单元保存在
-`~/.config/systemd/user/token-monitor.service`。卸载服务不会删除监控数据库
-或用量索引。状态目录内各文件的用途：
+systemd 单元保存在 `~/.config/systemd/user/token-monitor.service`。
+
+## macOS 后台服务
+
+`service` 子命令会按平台自动选择实现：macOS 上写入 LaunchAgent 并交给 `launchctl`
+管理，参数与 Linux 完全一致：
+
+```bash
+token-monitor \
+  --state-dir "$HOME/.token-monitor" \
+  service install \
+  --dashboard \
+  --dashboard-host 127.0.0.1 \
+  --dashboard-port 8765
+
+token-monitor --state-dir "$HOME/.token-monitor" service status
+token-monitor --state-dir "$HOME/.token-monitor" service logs --lines 100
+token-monitor --state-dir "$HOME/.token-monitor" service uninstall
+```
+
+- LaunchAgent 位于 `~/Library/LaunchAgents/com.token-monitor.daemon.plist`，
+  日志写入 `~/.token-monitor/launchd.log`；卸载会一并移除 plist 与 `service.json`。
+- 想手工安装或审查服务定义时，用 `service plist` 打印当前平台的服务定义
+  （Linux 输出 systemd 单元，macOS 输出 plist），例如：
+  `token-monitor --state-dir "$HOME/.token-monitor" service plist > ~/Library/LaunchAgents/com.token-monitor.daemon.plist`。
+- macOS 上没有 netlink，异常流量面板与 `traffic` 命令会明确提示「只显示进程与远端
+  连接」，不会报错；字节级告警只在 Linux 生效。
+- 活动会话依赖系统自带的 `ps` 与 `lsof`（macOS 默认都有）。若 `lsof` 被裁剪，
+  会话仍能被识别，但缺少「打开了哪个会话文件」的证据，活动会话列表会为空。
+
+## 容器部署
+
+- 监控其他 agent 进程需要看到宿主机的 PID 命名空间：`docker run --pid=host ...`；
+  否则用量索引（纯文件解析）照常工作，但活动会话、进程证据和流量归属都为空。
+- 状态目录挂载到容器内并保持可写，例如 `-v "$HOME/.token-monitor:/state"`，
+  再配 `--state-dir /state`；agent 数据目录（`~/.codex`、`~/.claude`、`~/.grok` 等）
+  按需只读挂载。
+- Dashboard 端口用 `-p 8765:8765` 暴露，容器内需要 `--dashboard-host 0.0.0.0`。
+- 容器里没有 systemd/launchd 时，直接用 `token-monitor ... daemon` 前台运行
+  （进程管理器负责重启）；`service` 子命令会提示无法执行 `systemctl`/`launchctl`。
+- `/healthz`（存活）与 `/readyz`（就绪）可用于容器与反向代理探测。
+
+服务配置保存在 `~/.token-monitor/service.json`（两个平台一致）。卸载服务不会删除
+监控数据库或用量索引。状态目录内各文件的用途：
 
 | 文件 | 内容 |
 | --- | --- |

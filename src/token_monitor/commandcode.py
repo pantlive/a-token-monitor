@@ -517,7 +517,7 @@ def _plan_name(subscription: Mapping[str, Any] | None) -> str | None:
 
 def list_commandcode_active_sessions(
     commandcode_home: Path,
-    proc_root: Path = Path("/proc"),
+    proc_root: Path | None = None,
     now: float | None = None,
 ) -> tuple[TrackedSession, ...]:
     """列出当前有 Command Code 进程打开的活动会话，不读取提示词。"""

@@ -78,8 +78,8 @@ from .scan_dirs import (
 )
 from .service import (
     ServiceConfig,
+    create_service_manager,
     ServiceError,
-    UserServiceManager,
     resolve_executable,
     run_saved_service,
 )
@@ -549,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     service_parser = subparsers.add_parser(
         "service",
-        help="安装和管理无需保持终端打开的 systemd 用户服务",
+        help="安装和管理无需保持终端打开的后台服务（Linux systemd / macOS launchd）",
     )
     service_actions = service_parser.add_subparsers(
         dest="service_action",
@@ -584,8 +584,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="停止并移除后台服务，保留监控数据库",
     )
     service_actions.add_parser(
+        "plist",
+        help="打印当前平台的服务定义（systemd 单元或 launchd plist）",
+    )
+    service_actions.add_parser(
         "run",
-        help="按已保存配置在前台运行（供 systemd 调用）",
+        help="按已保存配置在前台运行（供 systemd / launchd 调用）",
     )
 
     return parser
@@ -1549,16 +1553,24 @@ def _show_traffic(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
         return 1 if snapshot.alerts else 0
+    process_only = snapshot.source == "process-only"
     if snapshot.source == "unavailable":
-        sys.stdout.write("无法读取内核 TCP 计数，异常流量监控不可用。\n")
+        reason = snapshot.reason or "无法读取内核 TCP 计数"
+        sys.stdout.write(f"{reason}；异常流量监控不可用。\n")
         return 2
+    if process_only:
+        sys.stdout.write(
+            f"{snapshot.reason or '当前平台没有内核 TCP 计数'}"
+            "；下面只列出 agent 进程与远端连接。\n"
+        )
     if not snapshot.processes:
         sys.stdout.write("没有发现正在运行的 code agent 进程。\n")
         return 0
-    sys.stdout.write(
-        f"采样间隔 {snapshot.interval_seconds:.1f} 秒 · "
-        f"近 15 秒合计外发 {format_bytes(payload['totals']['burst_bytes'])}\n"
-    )
+    if not process_only:
+        sys.stdout.write(
+            f"采样间隔 {snapshot.interval_seconds:.1f} 秒 · "
+            f"近 15 秒合计外发 {format_bytes(payload['totals']['burst_bytes'])}\n"
+        )
     for process in snapshot.processes:
         remotes = ", ".join(
             item.remote
@@ -1566,6 +1578,12 @@ def _show_traffic(args: argparse.Namespace) -> int:
             if not item.loopback and not item.service
         ) or "无外连"
         status = process.alert_level or "ok"
+        if process_only:
+            sys.stdout.write(
+                f"{process.product} pid {process.pid} | {status} | "
+                f"{process.cwd or '目录未知'} | {remotes}\n"
+            )
+            continue
         sys.stdout.write(
             f"{process.product} pid {process.pid} | {status} | "
             f"15s {format_bytes(process.burst_bytes)} | "
@@ -2193,15 +2211,16 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
 
 
 def _manage_service(args: argparse.Namespace) -> int:
-    """执行一个 systemd 用户服务管理动作。"""
+    """执行一个后台服务管理动作（Linux systemd / macOS launchd）。"""
 
-    manager = UserServiceManager(args.state_dir)
+    manager = create_service_manager(args.state_dir)
     action = args.service_action
     if action == "install":
         manager.install(_service_config(args))
+        location = getattr(manager, "plist_path", None) or manager.unit_path
         sys.stdout.write(
-            "后台服务已安装并启动。使用 service status 查看状态，"
-            "service logs 查看日志。\n"
+            f"后台服务已安装并启动（服务定义: {location}）。"
+            "使用 service status 查看状态，service logs 查看日志。\n"
         )
         return 0
     if action == "start":
@@ -2220,6 +2239,10 @@ def _manage_service(args: argparse.Namespace) -> int:
     if action == "uninstall":
         manager.uninstall()
         sys.stdout.write("后台服务已移除；SQLite 状态仍保留。\n")
+        return 0
+    if action == "plist":
+        render = getattr(manager, "render_plist", None) or manager.render_unit
+        sys.stdout.write(render())
         return 0
     if action == "run":
         return run_saved_service(args.state_dir)

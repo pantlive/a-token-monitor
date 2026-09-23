@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from token_monitor.process_backend import ObservedConnection, reset_cache
 from token_monitor.traffic import (
     SocketCounters,
     TrafficAlert,
@@ -13,6 +16,7 @@ from token_monitor.traffic import (
     TrafficThresholds,
     format_bytes,
     is_loopback,
+    read_tcp_socket_counters,
 )
 
 
@@ -372,6 +376,82 @@ class TrafficMonitorTests(unittest.TestCase):
 
         self.assertEqual(snapshot.processes[0].alert_level, "warn")
         self.assertEqual(len(snapshot.alerts), 1)
+
+
+class PlatformDegradationTests(unittest.TestCase):
+    """没有 netlink（macOS）时退化成 process-only，不再抛异常。"""
+
+    def test_reader_returns_empty_without_netlink(self) -> None:
+        saved = socket.AF_NETLINK
+        del socket.AF_NETLINK
+        try:
+            counters = read_tcp_socket_counters()
+        finally:
+            socket.AF_NETLINK = saved
+
+        self.assertEqual(counters, {})
+
+    def test_poll_without_netlink_reports_process_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _write_process(root, pid=10, comm="grok", command=("grok",))
+            monitor = TrafficMonitor(proc_root=root)
+            connection = ObservedConnection(
+                local_port=52344,
+                remote_ip="93.184.216.34",
+                remote_port=443,
+            )
+            with (
+                mock.patch(
+                    "token_monitor.traffic.netlink_reason",
+                    return_value="macOS 没有 netlink（INET_DIAG）",
+                ),
+                mock.patch(
+                    "token_monitor.traffic.scan_macos_connections",
+                    return_value={10: (connection,)},
+                ),
+                mock.patch(
+                    "token_monitor.traffic.process_root",
+                    return_value=Path("/nonexistent-proc"),
+                ),
+            ):
+                snapshot = monitor.poll(now=1_000.0)
+
+        self.assertEqual(snapshot.source, "process-only")
+        self.assertEqual(snapshot.reason, "macOS 没有 netlink（INET_DIAG）")
+        self.assertEqual(snapshot.alerts, ())
+        self.assertEqual([item.product for item in snapshot.processes], ["grok"])
+        process = snapshot.processes[0]
+        self.assertEqual(process.burst_bytes, 0)
+        self.assertEqual(process.window_bytes, 0)
+        self.assertEqual(process.connections[0].remote, "93.184.216.34:443")
+        self.assertFalse(process.connections[0].loopback)
+        payload = snapshot.to_dict()
+        self.assertEqual(payload["source"], "process-only")
+        self.assertIn("reason", payload)
+
+    def test_poll_survives_a_reader_that_assumes_linux(self) -> None:
+        """注入的 reader 抛 AttributeError 时按不可用处理，不影响主循环。"""
+
+        def broken_reader() -> dict[int, SocketCounters]:
+            raise AttributeError("module 'socket' has no attribute 'AF_NETLINK'")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _write_process(root, pid=10, comm="grok", command=("grok",))
+            monitor = TrafficMonitor(
+                proc_root=root,
+                socket_reader=broken_reader,
+            )
+            snapshot = monitor.poll(now=1_000.0)
+
+        self.assertEqual(snapshot.source, "unavailable")
+        # Linux 上 netlink 本身可用，只是注入的 reader 坏了：reason 由前端兜底文案补
+        self.assertEqual([item.product for item in snapshot.processes], ["grok"])
+        self.assertEqual(snapshot.processes[0].burst_bytes, 0)
+
+    def test_reset_cache_clears_process_backend(self) -> None:
+        reset_cache()  # 不应抛异常，供测试与信号处理调用
 
 
 def _small_thresholds() -> TrafficThresholds:

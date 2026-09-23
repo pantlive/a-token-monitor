@@ -164,7 +164,7 @@ def load_kimi_session_index(kimi_home: Path) -> dict[str, KimiSessionInfo]:
 
 def list_kimi_active_sessions(
     kimi_home: Path,
-    proc_root: Path = Path("/proc"),
+    proc_root: Path | None = None,
     now: float | None = None,
 ) -> tuple[TrackedSession, ...]:
     """列出当前有 Kimi 进程打开的活动会话，不读取提示词。"""

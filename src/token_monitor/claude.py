@@ -225,7 +225,7 @@ _HEADER_READ_BYTES = 64 * 1024
 
 def list_claude_active_sessions(
     claude_home: Path,
-    proc_root: Path = Path("/proc"),
+    proc_root: Path | None = None,
     now: float | None = None,
 ) -> tuple[TrackedSession, ...]:
     """列出当前有 Claude Code 进程打开会话 JSONL 的活动会话。

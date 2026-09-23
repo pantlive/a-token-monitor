@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .agents import identify_agent, product_label
+from .process_backend import (
+    ObservedProcess,
+    netlink_reason,
+    process_root,
+    scan_macos_connections,
+    scan_processes,
+)
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -320,6 +327,7 @@ class TrafficSnapshot:
     processes: tuple[ProcessTraffic, ...]
     alerts: tuple[TrafficAlert, ...]
     interval_seconds: float = 0.0
+    reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为 Dashboard / CLI JSON。"""
@@ -333,6 +341,7 @@ class TrafficSnapshot:
         return {
             "observed_at": self.observed_at,
             "source": self.source,
+            "reason": self.reason,
             "interval_seconds": self.interval_seconds,
             "thresholds": self.thresholds.to_dict(),
             "totals": {
@@ -349,16 +358,6 @@ class TrafficSnapshot:
             "processes": [item.to_dict() for item in self.processes],
             "alerts": [item.to_dict() for item in self.alerts],
         }
-
-
-@dataclass
-class _ProcInfo:
-    pid: int
-    ppid: int
-    comm: str
-    command: tuple[str, ...]
-    start_token: str
-    cwd: Path | None
 
 
 @dataclass
@@ -385,7 +384,7 @@ class TrafficMonitor:
     def __init__(
         self,
         thresholds: TrafficThresholds | None = None,
-        proc_root: Path = Path("/proc"),
+        proc_root: Path | None = None,
         ignore_pids: Sequence[int] | None = None,
         socket_reader: SocketStatsReader | None = None,
         alert_sink: Callable[[Sequence[TrafficAlert]], None] | None = None,
@@ -416,6 +415,7 @@ class TrafficMonitor:
 
         observed_at = time.time() if now is None else float(now)
         processes, source, created = self._collect(observed_at)
+        unavailable_reason = netlink_reason()
         with self._lock:
             interval = (
                 max(0.0, observed_at - self._last_poll_at)
@@ -429,6 +429,7 @@ class TrafficMonitor:
                 processes=processes,
                 alerts=tuple(self._alerts),
                 interval_seconds=interval,
+                reason=unavailable_reason if source != "inet-diag" else None,
             )
             self._snapshot = snapshot
             self._last_poll_at = observed_at
@@ -450,9 +451,13 @@ class TrafficMonitor:
     def _collect(
         self, now: float
     ) -> tuple[tuple[ProcessTraffic, ...], str, tuple[TrafficAlert, ...]]:
-        """读取 /proc 与 socket 计数，计算每个 agent 的外发增量。"""
+        """读取进程与 socket 计数，计算每个 agent 的外发增量。
 
-        proc_map = _scan_processes(self.proc_root)
+        没有 netlink（macOS）时退化成 ``process-only``：只列 agent 进程与
+        ``lsof`` 看到的远端连接，不做字节统计，也不产生流量告警。
+        """
+
+        proc_map = scan_processes(self.proc_root)
         ignored = _descendant_set(proc_map, self.ignore_roots)
         identified: dict[int, str] = {}
         for pid, info in proc_map.items():
@@ -462,14 +467,23 @@ class TrafficMonitor:
             if product is not None:
                 identified[pid] = product
         owners = _attribute_owners(proc_map, identified)
+        if netlink_reason() is not None:
+            results, created = self._collect_process_only(
+                proc_map,
+                identified,
+                owners,
+                now,
+            )
+            return results, "process-only", created
         sockets_by_pid = _scan_socket_inodes(
-            self.proc_root,
+            process_root(self.proc_root),
             tuple(pid for pid, owner in owners.items() if owner is not None),
         )
         try:
             counters = dict(self._socket_reader())
             source = "inet-diag"
-        except OSError:
+        except (OSError, AttributeError):
+            # 中文注释：注入的 reader 可能仍然假设 Linux，失败时按不可用处理。
             counters = {}
             source = "unavailable"
 
@@ -523,10 +537,95 @@ class TrafficMonitor:
         )
         return tuple(results), source, tuple(created)
 
+    def _collect_process_only(
+        self,
+        proc_map: Mapping[int, ObservedProcess],
+        identified: Mapping[int, str],
+        owners: Mapping[int, int | None],
+        now: float,
+    ) -> tuple[tuple[ProcessTraffic, ...], tuple[TrafficAlert, ...]]:
+        """macOS 等没有 netlink 的平台：只报进程和远端连接。"""
+
+        grouped: dict[int, list[int]] = defaultdict(list)
+        for pid, owner in owners.items():
+            if owner is None:
+                continue
+            grouped[owner].append(pid)
+        member_pids = tuple(
+            sorted({pid for pids in grouped.values() for pid in pids})
+        )
+        observed_connections = scan_macos_connections(member_pids)
+        results: list[ProcessTraffic] = []
+        seen_keys: set[str] = set()
+        with self._lock:
+            for owner_pid in sorted(grouped):
+                info = proc_map[owner_pid]
+                product = identified[owner_pid]
+                key = f"{product}:{owner_pid}:{info.start_token}"
+                seen_keys.add(key)
+                state = self._states.get(key)
+                if state is None:
+                    state = _ProcessState(
+                        product=product,
+                        pid=owner_pid,
+                        start_token=info.start_token,
+                    )
+                    self._states[key] = state
+                connections: list[ConnectionTraffic] = []
+                seen_remotes: set[str] = set()
+                for pid in grouped[owner_pid]:
+                    for item in observed_connections.get(pid, ()):
+                        remote = item.remote
+                        if remote is None or remote in seen_remotes:
+                            continue
+                        seen_remotes.add(remote)
+                        connections.append(
+                            ConnectionTraffic(
+                                remote=remote,
+                                bytes_sent=0,
+                                bytes_received=0,
+                                upload_delta=0,
+                                loopback=item.loopback,
+                                service=item.local_port
+                                in _UI_PORTS_BY_PRODUCT.get(product, ()),
+                            )
+                        )
+                connections.sort(
+                    key=lambda entry: (
+                        1 if entry.loopback or entry.service else 0,
+                        entry.remote,
+                    )
+                )
+                display_command = (
+                    _basename(info.command[0]) if info.command else info.comm
+                )
+                results.append(
+                    ProcessTraffic(
+                        product=product,
+                        pid=owner_pid,
+                        start_token=info.start_token,
+                        command=display_command,
+                        cwd=str(info.cwd) if info.cwd is not None else None,
+                        pids=tuple(sorted(grouped[owner_pid])),
+                        external_upload_delta=0,
+                        loopback_upload_delta=0,
+                        observed_external_bytes=0,
+                        burst_bytes=0,
+                        window_bytes=0,
+                        upload_bps=0.0,
+                        alert_level=None,
+                        connections=tuple(connections),
+                    )
+                )
+            for key in [key for key in self._states if key not in seen_keys]:
+                del self._states[key]
+        results.sort(key=lambda item: (item.product, item.pid))
+        return tuple(results), ()
+
     def _update_process(
         self,
         state: _ProcessState,
-        info: _ProcInfo,
+        info: ObservedProcess,
         member_pids: tuple[int, ...],
         sockets_by_pid: Mapping[int, tuple[int, ...]],
         counters: Mapping[int, SocketCounters],
@@ -638,7 +737,7 @@ class TrafficMonitor:
     def _evaluate_alerts(
         self,
         state: _ProcessState,
-        info: _ProcInfo,
+        info: ObservedProcess,
         burst_bytes: int,
         window_bytes: int,
         connections: Sequence[ConnectionTraffic],
@@ -755,8 +854,14 @@ def format_bytes(value: int) -> str:
 
 
 def read_tcp_socket_counters() -> dict[int, SocketCounters]:
-    """通过 NETLINK SOCK_DIAG 读取已建立 TCP 连接的发送字节。"""
+    """通过 NETLINK SOCK_DIAG 读取已建立 TCP 连接的发送字节。
 
+    macOS 等平台没有 ``AF_NETLINK``：这里直接返回空表，让上层退化成
+    ``process-only``，而不是抛 ``AttributeError``。
+    """
+
+    if not hasattr(socket, "AF_NETLINK"):
+        return {}
     counters: dict[int, SocketCounters] = {}
     for family in (socket.AF_INET, socket.AF_INET6):
         for item in _dump_inet_diag(family):
@@ -767,6 +872,8 @@ def read_tcp_socket_counters() -> dict[int, SocketCounters]:
 def _dump_inet_diag(family: int) -> tuple[SocketCounters, ...]:
     """请求一个地址族的 TCP 诊断信息。"""
 
+    if not hasattr(socket, "AF_NETLINK"):
+        return ()
     sockid = struct.pack(
         "@HH16s16sI2I",
         0,
@@ -896,36 +1003,6 @@ def _parse_inet_diag(data: bytes) -> tuple[SocketCounters, ...]:
     return tuple(items)
 
 
-def _scan_processes(proc_root: Path) -> dict[int, _ProcInfo]:
-    """读取 /proc 下可读进程的身份，不打开 socket 描述符。"""
-
-    processes: dict[int, _ProcInfo] = {}
-    try:
-        entries = tuple(proc_root.iterdir())
-    except OSError:
-        return processes
-    for directory in entries:
-        if not directory.name.isdigit():
-            continue
-        try:
-            pid = int(directory.name)
-            command = _read_command(directory / "cmdline")
-            comm = _read_text(directory / "comm")
-            ppid, start_token = _read_stat(directory / "stat")
-            cwd = _read_cwd(directory / "cwd")
-        except (OSError, ValueError):
-            continue
-        processes[pid] = _ProcInfo(
-            pid=pid,
-            ppid=ppid,
-            comm=comm,
-            command=command,
-            start_token=start_token,
-            cwd=cwd,
-        )
-    return processes
-
-
 def _scan_socket_inodes(
     proc_root: Path,
     pids: Sequence[int],
@@ -962,56 +1039,8 @@ def _socket_inode(path: Path) -> int | None:
     return int(match.group(1))
 
 
-def _read_command(path: Path) -> tuple[str, ...]:
-    """读取 NUL 分隔命令行。"""
-
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return ()
-    return tuple(
-        item.decode("utf-8", errors="replace") for item in raw.split(b"\0") if item
-    )
-
-
-def _read_text(path: Path) -> str:
-    """读取 comm 等单行文本。"""
-
-    try:
-        return path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return ""
-
-
-def _read_stat(path: Path) -> tuple[int, str]:
-    """读取 ppid 和 starttime，防止 PID 复用。"""
-
-    content = path.read_text(encoding="utf-8", errors="replace")
-    closing = content.rfind(")")
-    if closing < 0:
-        return 0, ""
-    fields = content[closing + 1 :].split()
-    ppid = int(fields[1]) if len(fields) > 1 else 0
-    start_token = fields[19] if len(fields) > 19 else ""
-    return ppid, start_token
-
-
-def _read_cwd(path: Path) -> Path | None:
-    """读取进程工作目录，目标不存在时保留链接文本。"""
-
-    try:
-        target = path.readlink()
-    except OSError:
-        return None
-    target_path = Path(str(target))
-    try:
-        return target_path.resolve()
-    except OSError:
-        return target_path
-
-
 def _descendant_set(
-    processes: Mapping[int, _ProcInfo],
+    processes: Mapping[int, ObservedProcess],
     roots: Sequence[int] | set[int],
 ) -> set[int]:
     """返回根进程及其全部子孙 PID。"""
@@ -1031,7 +1060,7 @@ def _descendant_set(
 
 
 def _attribute_owners(
-    processes: Mapping[int, _ProcInfo],
+    processes: Mapping[int, ObservedProcess],
     identified: Mapping[int, str],
 ) -> dict[int, int | None]:
     """把进程归到最近的同产品 agent 祖先。"""
@@ -1044,7 +1073,7 @@ def _attribute_owners(
 
 def _owner_pid(
     pid: int,
-    processes: Mapping[int, _ProcInfo],
+    processes: Mapping[int, ObservedProcess],
     identified: Mapping[int, str],
 ) -> int | None:
     """沿 ppid 向上找到应归账的 agent 根进程。"""

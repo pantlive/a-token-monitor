@@ -89,11 +89,11 @@ class ProcessScanner:
     def __init__(
         self,
         session_root: Path | None = None,
-        proc_root: Path = Path("/proc"),
+        proc_root: Path | None = None,
         ignore_pids: tuple[int, ...] | None = None,
     ) -> None:
         self.session_root = (session_root or default_session_root()).expanduser()
-        self.proc_root = proc_root
+        self.proc_root = proc_root if proc_root is not None else Path("/proc")
         self.ignore_pids = set(ignore_pids if ignore_pids is not None else (os.getpid(),))
         try:
             self._session_root_resolved = self.session_root.resolve()
@@ -103,6 +103,10 @@ class ProcessScanner:
     def scan(self) -> tuple[ProcessObservation, ...]:
         """扫描当前可读进程，返回持有 session JSONL 的进程。"""
 
+        from .process_backend import select_backend
+
+        if select_backend(self.proc_root) == "macos":
+            return self._scan_macos()
         if not self.proc_root.is_dir():
             return ()
         observations: list[ProcessObservation] = []
@@ -116,6 +120,31 @@ class ProcessScanner:
             observation = self._scan_process(process_directory)
             if observation is not None:
                 observations.append(observation)
+        return tuple(observations)
+
+    def _scan_macos(self) -> tuple[ProcessObservation, ...]:
+        """macOS：用 ps + lsof 找到持有 session JSONL 的 agent 进程。"""
+
+        from .process_backend import scan_macos_agents
+
+        observations: list[ProcessObservation] = []
+        for agent in scan_macos_agents(ignore_pids=tuple(sorted(self.ignore_pids))):
+            open_paths = {
+                path
+                for path in agent.open_paths
+                if self._is_session_jsonl(path)
+            }
+            if not open_paths:
+                continue
+            observations.append(
+                ProcessObservation(
+                    pid=agent.pid,
+                    start_token=agent.start_token,
+                    cwd=agent.cwd,
+                    command=agent.command,
+                    open_jsonl_paths=tuple(sorted(open_paths, key=str)),
+                )
+            )
         return tuple(observations)
 
     def _scan_process(self, process_directory: Path) -> ProcessObservation | None:
