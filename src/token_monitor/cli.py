@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .accounts import CodexAccount, build_account_specs
+from .claude import resolve_claude_homes
 from .agents import product_label
 from .housekeeping import (
     DEFAULT_SINGLE_WARN_GIB,
@@ -184,6 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "DeepSeek Harness 数据目录，可重复传入；"
             "默认在存在时使用 ~/.dsh 或 DSH_HOME"
+        ),
+    )
+    parser.add_argument(
+        "--claude-home",
+        dest="claude_homes",
+        type=Path,
+        action="append",
+        help=(
+            "Claude Code 数据目录，可重复传入；"
+            "默认在存在时使用 ~/.claude 或 CLAUDE_CONFIG_DIR"
         ),
     )
     parser.add_argument(
@@ -1240,6 +1251,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
         ),
         kimi_homes=tuple(getattr(args, "kimi_homes", None) or ()),
         dsh_homes=tuple(getattr(args, "dsh_homes", None) or ()),
+        claude_homes=tuple(getattr(args, "claude_homes", None) or ()),
     )
     try:
         monitor.start()
@@ -1378,7 +1390,8 @@ def _session_usage_lookup(
     if not wanted:
         return {}, []
     aggregator = UsageAggregator(
-        cache_path=args.state_dir.expanduser() / "usage-index.sqlite3"
+        cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
+        claude_homes=resolve_claude_homes(getattr(args, "claude_homes", None)),
     )
     try:
         aggregator.refresh_index(
@@ -1628,7 +1641,8 @@ def _show_usage_search(args: argparse.Namespace) -> int:
     """按日期、模型和会话检索用量索引中的 token 历史记录。"""
 
     aggregator = UsageAggregator(
-        cache_path=args.state_dir.expanduser() / "usage-index.sqlite3"
+        cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
+        claude_homes=resolve_claude_homes(getattr(args, "claude_homes", None)),
     )
     since, until = _usage_search_bounds(args)
     search = aggregator.search(
@@ -1729,6 +1743,8 @@ def _housekeeping_targets(args: argparse.Namespace) -> tuple[AuditTarget, ...]:
         getattr(args, "commandcode_homes", None)
     ):
         targets.append(AuditTarget("Command Code", "command-code", home))
+    for home in resolve_claude_homes(getattr(args, "claude_homes", None)):
+        targets.append(AuditTarget("Claude Code", "claude", home))
     targets.append(
         AuditTarget("监控状态目录", "state", args.state_dir.expanduser())
     )
@@ -1956,6 +1972,7 @@ def _active_session_paths(
             commandcode_homes=tuple(
                 getattr(args, "commandcode_homes", None) or ()
             ),
+            claude_homes=tuple(getattr(args, "claude_homes", None) or ()),
         )
         paths: set[str] = set()
         for item in monitor.account_monitors:
@@ -2000,6 +2017,7 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         kimi_homes=tuple(getattr(args, "kimi_homes", None) or ()),
         dsh_homes=tuple(getattr(args, "dsh_homes", None) or ()),
         commandcode_homes=tuple(getattr(args, "commandcode_homes", None) or ()),
+        claude_homes=tuple(getattr(args, "claude_homes", None) or ()),
     )
 
 
@@ -2049,6 +2067,10 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
         commandcode_homes=tuple(
             path.expanduser().resolve()
             for path in (getattr(args, "commandcode_homes", None) or ())
+        ),
+        claude_homes=tuple(
+            path.expanduser().resolve()
+            for path in (getattr(args, "claude_homes", None) or ())
         ),
     )
 

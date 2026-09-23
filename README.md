@@ -215,14 +215,22 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
   相同条件重复查询约 1 毫秒。
   索引为每条记录保存长上下文标记，旧索引第一次打开时就地回填一次（不重读 JSONL），
   回填中断后再次打开会继续补齐。
+- Claude Code 用量来自本地会话 JSONL（`~/.claude/projects/<项目>/<会话>.jsonl`）：
+  只读取 assistant 记录的 `message.usage`、模型、时间戳与 `cwd`，不读取提示词或工具输出。
+  同一个 `message.id` 的重复写入只计一次；`subagents/**` 目录在主会话已经内联写入
+  侧链消息时会被跳过，避免重复计数（该判断带 10 分钟缓存）。
+  用量并入按日、模型、项目和会话的统计与 API 等价成本，趋势图和习惯分析同样覆盖；
+  支持断点续扫与日志轮转（文件被替换或截断时自动从零重扫）。
+  可用 `--claude-home` 指定目录，默认在存在时使用 `~/.claude` 或 `CLAUDE_CONFIG_DIR`。
+  金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价估算。
 - `token-monitor usage` 在命令行检索同一份索引：`--days`（0 表示全部历史）或
   `--from` / `--to` 指定日期，`--model`（可重复）、`--session`、`--project`、
   `--query` 筛选，`--group` 选择分组，`--sort` 选择排序，`--limit` / `--offset`
   翻页，`--json` 输出机器可读结果。检索只读状态目录里的用量索引，
   不会触发重新扫描 JSONL，也不会读取对话内容。
 
-金额是 OpenAI API 等价值估算，不代表 Plus 或其他订阅的实际账单。模型没有已知
-API 单价时仍展示 token，但不会计入金额合计。
+金额是 OpenAI / Anthropic 等官方 API 等价估算，不代表 Plus、Claude 订阅或其他
+订阅的实际账单。模型没有已知 API 单价时仍展示 token，但不会计入金额合计。
 
 ## WSL 后台服务
 

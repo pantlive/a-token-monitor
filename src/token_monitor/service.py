@@ -60,6 +60,7 @@ class ServiceConfig:
     kimi_homes: tuple[Path, ...] = ()
     dsh_homes: tuple[Path, ...] = ()
     commandcode_homes: tuple[Path, ...] = ()
+    claude_homes: tuple[Path, ...] = ()
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
     upload_burst_danger_mb: float = 32.0
@@ -99,6 +100,11 @@ class ServiceConfig:
             self,
             "commandcode_homes",
             tuple(_absolute_path(path) for path in self.commandcode_homes),
+        )
+        object.__setattr__(
+            self,
+            "claude_homes",
+            tuple(_absolute_path(path) for path in self.claude_homes),
         )
         if self.session_root is not None:
             object.__setattr__(
@@ -163,6 +169,7 @@ class ServiceConfig:
             "commandcode_homes": [
                 str(path) for path in self.commandcode_homes
             ],
+            "claude_homes": [str(path) for path in self.claude_homes],
             "budget_usd": self.budget_usd,
             "upload_burst_warn_mb": self.upload_burst_warn_mb,
             "upload_burst_danger_mb": self.upload_burst_danger_mb,
@@ -250,6 +257,7 @@ class ServiceConfig:
             commandcode_homes=_optional_path_tuple(
                 raw_payload, "commandcode_homes"
             ),
+            claude_homes=_optional_path_tuple(raw_payload, "claude_homes"),
             budget_usd=_optional_float(raw_payload, "budget_usd"),
             upload_burst_warn_mb=_optional_float(
                 raw_payload, "upload_burst_warn_mb"
@@ -322,6 +330,7 @@ class ServiceConfig:
             kimi_homes=self.kimi_homes,
             dsh_homes=self.dsh_homes,
             commandcode_homes=self.commandcode_homes,
+            claude_homes=self.claude_homes,
         )
 
 

@@ -252,6 +252,7 @@ class AccountTests(unittest.TestCase):
                     kimi_homes=(),
                     dsh_homes=(),
                     commandcode_homes=(),
+                    claude_homes=(),
                 )
                 labels = [target.label for target in monitor.housekeeping.targets]
                 with self.assertLogs(
