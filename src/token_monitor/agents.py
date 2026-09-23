@@ -124,46 +124,20 @@ def identify_agent(
 
 
 def scan_running_agents(
-    proc_root: Path = Path("/proc"),
+    proc_root: Path | None = None,
     products: Sequence[str] | None = None,
     ignore_pids: Sequence[int] | None = None,
 ) -> tuple[RunningAgent, ...]:
-    """扫描 /proc，返回指定产品的进程和它们打开的普通文件。"""
+    """返回指定产品的进程和它们打开的普通文件。
 
-    wanted = set(products) if products is not None else None
-    ignored = set(ignore_pids or ())
-    found: list[RunningAgent] = []
-    try:
-        entries = tuple(proc_root.iterdir())
-    except OSError:
-        return ()
-    for directory in entries:
-        if not directory.name.isdigit():
-            continue
-        try:
-            pid = int(directory.name)
-        except ValueError:
-            continue
-        if pid in ignored:
-            continue
-        command = _read_command(directory / "cmdline")
-        comm = _read_text(directory / "comm")
-        product = identify_agent(command, comm)
-        if product is None:
-            continue
-        if wanted is not None and product not in wanted:
-            continue
-        found.append(
-            RunningAgent(
-                pid=pid,
-                product=product,
-                start_token=_read_start_token(directory / "stat"),
-                cwd=_read_cwd(directory / "cwd"),
-                command=command,
-                open_paths=_read_open_paths(directory / "fd"),
-            )
-        )
-    return tuple(found)
+    Linux 走 ``/proc``；macOS 没有 ``/proc``，由
+    :mod:`token_monitor.process_backend` 改用 ``ps`` + ``lsof``。显式传入
+    ``proc_root``（测试与容器）时始终按 ``/proc`` 语义处理。
+    """
+
+    from .process_backend import scan_agents
+
+    return tuple(scan_agents(proc_root, products, ignore_pids))
 
 
 def _basename(value: str) -> str:

@@ -11,6 +11,19 @@
 
 ## 已完成
 
+- [x] 跨平台部署：Linux + macOS
+  - 新增 `process_backend`：Linux 走 `/proc`，macOS 改用系统自带的 `ps` + `lsof`
+    获取进程树、工作目录与打开的会话文件，结果带秒级缓存避免一轮刷新重复 fork；
+    会话适配器、Codex 进程扫描与流量进程归属统一走这个后端。
+  - macOS 没有 netlink（`INET_DIAG`）：`traffic` 不再抛 `AttributeError`，而是降级成
+    process-only（列出 agent 进程与 `lsof` 远端连接，不统计字节、不产生流量告警），
+    CLI 与 Dashboard 都会说明原因。
+  - `service` 子命令按平台选择实现：Linux systemd 用户服务 / macOS launchd
+    LaunchAgent（plist 由 `plistlib` 生成、日志写 `<state_dir>/launchd.log`），
+    新增 `service plist` 打印当前平台服务定义；两端卸载都会移除服务定义与 `service.json`。
+  - README 新增部署章节：运行环境（Python ≥3.10、SQLite JSON1 降级、Codex 可选）、
+    平台能力对照表、Linux/WSL2、macOS 与容器（`--pid=host`、端口/状态目录挂载）说明。
+
 - [x] 历史数据管理
   - 用量索引、会话历史、异常流量告警分别配置保留天数：
     `--usage-retention-days`（默认 90 天）、`--session-retention-days`（默认 30 天）、

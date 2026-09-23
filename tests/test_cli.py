@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import tempfile
 import time
 import unittest
@@ -1072,6 +1073,77 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
 
+
+    def test_service_plist_prints_systemd_unit(self) -> None:
+        """service plist 在 Linux 打印 systemd 单元。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = main(
+                    ["--state-dir", str(root / "state"), "service", "plist"]
+                )
+
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn("[Unit]", output)
+        self.assertIn("ExecStart=", output)
+        # systemd 单元里每个参数单独加引号
+        self.assertIn('"service" "run"', output)
+
+    def test_service_plist_prints_launchd_plist_on_macos(self) -> None:
+        """service plist 在 macOS 打印 LaunchAgent plist。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            buffer = io.StringIO()
+            with (
+                mock.patch("token_monitor.service.sys.platform", "darwin"),
+                contextlib.redirect_stdout(buffer),
+            ):
+                code = main(
+                    ["--state-dir", str(root / "state"), "service", "plist"]
+                )
+
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn("<key>Label</key>", output)
+        self.assertIn("com.token-monitor.daemon", output)
+        self.assertIn("<key>RunAtLoad</key>", output)
+        self.assertIn("<string>service</string>", output)
+        self.assertIn("<string>run</string>", output)
+        self.assertIn(str(root / "state" / "launchd.log"), output)
+
+    def test_traffic_without_netlink_degrades_instead_of_crashing(self) -> None:
+        """没有 AF_NETLINK 时 traffic 命令给平台说明而不是抛异常。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            buffer = io.StringIO()
+            saved = socket.AF_NETLINK
+            del socket.AF_NETLINK
+            try:
+                with (
+                    mock.patch("token_monitor.cli.time.sleep"),
+                    mock.patch("token_monitor.traffic.time.sleep"),
+                    contextlib.redirect_stdout(buffer),
+                ):
+                    code = main(
+                        [
+                            "--state-dir",
+                            str(root / "state"),
+                            "traffic",
+                            "--sample-seconds",
+                            "1",
+                        ]
+                    )
+            finally:
+                socket.AF_NETLINK = saved
+
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn("netlink", output)
 
     def test_session_usage_note_reads_unified_view(self) -> None:
         """会话行尾的轮数说明统一从视图 usage 字段读取。"""

@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import plistlib
 import shutil
 import signal
 import subprocess
 import sys
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -716,3 +718,205 @@ def _list_string(values: list[Any], index: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ServiceError(f"服务配置 codex_homes[{index}] 必须是非空字符串")
     return value
+
+
+# 中文注释：macOS 用 launchd 的 Label 作为 plist 文件名和 launchctl 目标名。
+LAUNCHD_LABEL = "com.token-monitor.daemon"
+
+
+class LaunchdServiceManager:
+    """安装和控制当前用户的 macOS LaunchAgent 服务。"""
+
+    def __init__(
+        self,
+        state_dir: Path,
+        unit_dir: Path | None = None,
+        python_executable: Path | None = None,
+        label: str = LAUNCHD_LABEL,
+        domain: str | None = None,
+    ) -> None:
+        """创建 launchd 服务管理器，并规范化所有运行路径。"""
+
+        self.state_dir = _absolute_path(state_dir)
+        self.unit_dir = _absolute_path(unit_dir or _default_launchd_unit_dir())
+        self.label = label
+        self.domain = domain or f"gui/{_current_uid()}"
+        self.plist_path = self.unit_dir / f"{label}.plist"
+        self.log_path = self.state_dir / "launchd.log"
+        self.python_executable = _absolute_path(
+            python_executable or Path(sys.executable)
+        )
+
+    @property
+    def config_path(self) -> Path:
+        """返回 LaunchAgent 读取的配置文件。"""
+
+        return self.state_dir / "service.json"
+
+    @property
+    def service_target(self) -> str:
+        """返回 launchctl 使用的 domain/label 目标名。"""
+
+        return f"{self.domain}/{self.label}"
+
+    def install(self, config: ServiceConfig, start: bool = True) -> None:
+        """写入配置和 LaunchAgent plist，并选择是否立即启动。"""
+
+        if _absolute_path(config.state_dir) != self.state_dir:
+            raise ServiceError("服务配置与管理器的 state_dir 不一致")
+        config.save()
+        self.unit_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        plist_content = self.render_plist()
+        temporary_path = self.plist_path.with_suffix(".plist.tmp")
+        temporary_path.write_text(plist_content, encoding="utf-8")
+        temporary_path.chmod(0o600)
+        temporary_path.replace(self.plist_path)
+        self.plist_path.chmod(0o600)
+        # 中文注释：重复安装时先卸载旧服务，bootstrap 才会重新读取
+        # plist；首次安装时 bootout 必然失败，因此忽略它的退出码。
+        self._launchctl("bootout", self.service_target, check=False)
+        self._launchctl("bootstrap", self.domain, str(self.plist_path))
+        if start:
+            self._launchctl("kickstart", "-k", self.service_target)
+
+    def render_plist(self) -> str:
+        """生成只包含稳定启动参数的 LaunchAgent plist。"""
+
+        arguments = (
+            str(self.python_executable),
+            "-m",
+            "token_monitor",
+            "--state-dir",
+            str(self.state_dir),
+            "service",
+            "run",
+        )
+        payload: dict[str, Any] = {
+            "Label": self.label,
+            "ProgramArguments": list(arguments),
+            "RunAtLoad": True,
+            "KeepAlive": {"SuccessfulExit": False},
+            "WorkingDirectory": str(self.state_dir),
+            "StandardOutPath": str(self.log_path),
+            "StandardErrorPath": str(self.log_path),
+            "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+            "ProcessType": "Background",
+        }
+        # 中文注释：用 plistlib 生成合法 XML，避免手写转义规则。
+        return plistlib.dumps(payload, sort_keys=False).decode("utf-8")
+
+    def start(self) -> None:
+        """启动已安装服务。"""
+
+        self._launchctl("kickstart", "-k", self.service_target)
+
+    def stop(self) -> None:
+        """停止服务但保留已安装的 plist。"""
+
+        status = self._launchctl(
+            "kill",
+            "SIGTERM",
+            self.service_target,
+            check=False,
+        )
+        if status != 0:
+            # 中文注释：服务未运行时 kill 会失败，退回 bootout 保证停止生效。
+            self._launchctl("bootout", self.service_target, check=False)
+
+    def restart(self) -> None:
+        """重新启动服务，让进程重新读取 service.json。"""
+
+        self._launchctl("kickstart", "-k", self.service_target)
+
+    def status(self) -> int:
+        """显示 launchd 状态并返回 launchctl 退出码，未安装时为非 0。"""
+
+        return self._launchctl("print", self.service_target, check=False)
+
+    def logs(self, lines: int = 50, follow: bool = False) -> int:
+        """显示服务日志；follow 为真时用 tail 持续跟踪。"""
+
+        if lines <= 0:
+            raise ValueError("日志行数必须大于 0")
+        if follow:
+            try:
+                return _run_command(
+                    ["tail", "-n", str(lines), "-f", str(self.log_path)],
+                    check=False,
+                )
+            except KeyboardInterrupt:
+                # 中文注释：用户只是在退出日志跟踪，后台服务不受影响。
+                return 130
+        if not self.log_path.exists():
+            print(f"日志文件不存在: {self.log_path}；服务还没有写入日志")
+            return 0
+        try:
+            with self.log_path.open(
+                "r",
+                encoding="utf-8",
+                errors="replace",
+            ) as handle:
+                for line in deque(handle, maxlen=lines):
+                    print(line, end="")
+        except OSError as error:
+            raise ServiceError(
+                f"无法读取日志文件 {self.log_path}: {error}"
+            ) from error
+        return 0
+
+    def uninstall(self) -> None:
+        """停止并移除 LaunchAgent 定义；监控数据继续保留。"""
+
+        self._launchctl("bootout", self.service_target, check=False)
+        try:
+            self.plist_path.unlink(missing_ok=True)
+            # 中文注释：与 systemd 版一致，同时删除 service.json。
+            self.config_path.unlink(missing_ok=True)
+        except OSError as error:
+            raise ServiceError(f"无法移除后台服务文件: {error}") from error
+
+    def _launchctl(self, *arguments: str, check: bool = True) -> int:
+        """执行 launchctl，并统一错误语义。"""
+
+        return _run_command(["launchctl", *arguments], check=check)
+
+
+def create_service_manager(
+    state_dir: Path,
+    unit_dir: Path | None = None,
+    python_executable: Path | None = None,
+    platform: str | None = None,
+) -> UserServiceManager | LaunchdServiceManager:
+    """按平台创建后台服务管理器，macOS 使用 launchd。"""
+
+    resolved_platform = sys.platform if platform is None else platform
+    if resolved_platform == "darwin":
+        return LaunchdServiceManager(
+            state_dir=state_dir,
+            unit_dir=unit_dir,
+            python_executable=python_executable,
+        )
+    return UserServiceManager(
+        state_dir=state_dir,
+        unit_dir=unit_dir,
+        python_executable=python_executable,
+    )
+
+
+def launchd_available() -> bool:
+    """判断当前系统是否支持 launchd 用户服务。"""
+
+    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+
+
+def _default_launchd_unit_dir() -> Path:
+    """返回当前用户的 LaunchAgents 目录。"""
+
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+def _current_uid() -> int:
+    """返回当前用户 ID；缺少 getuid 的平台回退到 0。"""
+
+    getuid = getattr(os, "getuid", None)
+    return int(getuid()) if callable(getuid) else 0
