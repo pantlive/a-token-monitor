@@ -280,7 +280,9 @@ def list_grok_active_sessions(
                 pids=tuple(sorted(pids)),
                 last_event_at=last_event_at,
                 last_event_type=last_event_type,
-                metadata={"model": info.model} if info and info.model else {},
+                product="grok",
+                model=info.model if info is not None else None,
+                project=project,
             )
         )
     sessions.sort(key=lambda item: item.last_seen_at, reverse=True)

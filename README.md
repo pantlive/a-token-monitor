@@ -122,6 +122,14 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
 - JSONL 按字节偏移增量读取，避免重复扫描大型历史文件。
 - 用量页按需汇总 Codex session JSONL、Grok unified 日志、Kimi wire 日志和
   DeepSeek Harness projcache 合计。
+- **统一会话模型**：Codex、Grok、Claude Code、Kimi、DeepSeek Harness、Command Code
+  的活动会话都由各自的发现适配器产出同一个 `TrackedSession` 结构，账号、产品、项目、
+  模型、状态、token、开始时间与最后活动时间字段口径一致；公共聚合与 Dashboard 只读这组
+  字段，不再依赖 provider 私有结构。discovery 阶段 token 为 0，由用量索引按
+  `jsonl_path` 统一回填 token / 上下文 / 轮数（长会话提醒也走同一入口）。
+- Claude Code 活动会话以进程实际打开的会话 JSONL 为准（`/proc/<pid>/fd`），
+  项目、模型和开始时间只读文件头部，不读取提示词或工具输出；同一会话被多个进程
+  打开时合并 pids，与 Kimi / DSH / Grok 的识别口径一致。
 - Grok 活动会话以 Grok CLI 进程实际打开的会话文件为准（`/proc/<pid>/fd`），
   进程不持有句柄时退回按工作目录匹配；会话目录名里的 URL 编码项目路径会还原成
   真实目录，模型与创建时间来自 `summary.json`。同一会话被多个进程打开时合并 pids，

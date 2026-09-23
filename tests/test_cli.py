@@ -14,7 +14,13 @@ from unittest import mock
 
 from token_monitor.accounts import build_account_specs
 from token_monitor.alerts import TrafficAlertStore
-from token_monitor.cli import _service_config, build_parser, default_state_dir, main
+from token_monitor.cli import (
+    _service_config,
+    _session_usage_note,
+    build_parser,
+    default_state_dir,
+    main,
+)
 from token_monitor.service import ServiceConfig
 from token_monitor.housekeeping import DEFAULT_TOTAL_WARN_GIB
 from token_monitor.usage import (
@@ -982,6 +988,31 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
 
+
+    def test_session_usage_note_reads_unified_view(self) -> None:
+        """会话行尾的轮数说明统一从视图 usage 字段读取。"""
+
+        view = {
+            "usage": {
+                "turns": 120,
+                "context_tokens": 300_000,
+                "total_tokens": 1_000_000,
+                "model": "claude-sonnet-4-5",
+                "reminder": {"message": "会话建议切换"},
+            }
+        }
+
+        note = _session_usage_note(view)
+        self.assertIn("120 轮", note)
+        self.assertIn("300,000 token", note)
+        self.assertIn("1,000,000 token", note)
+        self.assertIn("claude-sonnet-4-5", note)
+        self.assertIn("建议开新会话", note)
+
+        quiet = {"usage": {**view["usage"], "reminder": None}}
+        self.assertNotIn("建议开新会话", _session_usage_note(quiet))
+        self.assertEqual(_session_usage_note({}), "")
+        self.assertEqual(_session_usage_note(None), "")
 
     def test_service_install_config_without_codex(self) -> None:
         """没有 Codex CLI/CODEX_HOME 也能生成后台服务配置。"""

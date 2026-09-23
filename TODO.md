@@ -33,15 +33,16 @@
   - 修改后安全重载相关 provider，无需重启整个 daemon，且不丢失索引检查点。
   - 限制可配置路径和敏感信息回显，避免通过 Web 任意浏览服务器文件系统。
 
-## 基础架构
-
-- [ ] 统一 Agent 会话模型
-  - 为 Codex、Grok、Claude Code、Kimi、DSH 和 Command Code 定义统一的会话结构。
-  - 统一账号、项目、模型、状态、token、开始时间和最后活动时间等字段。
-  - 将 provider 特有的发现和解析逻辑放入适配器，公共聚合与 Dashboard 只依赖统一模型。
-  - 在实现 Grok 活动会话和 Claude Code 用量索引时同步接入，避免产生新的平行数据结构。
-
 ## 已完成
+
+- [x] 统一 Agent 会话模型
+  - `TrackedSession` 承载统一字段：账号、产品、项目、模型、状态、token、
+    开始时间与最后活动时间（`started_at` / `last_activity_at` / `resolved_project`）。
+  - 各 provider 的发现与解析收敛在适配器里并统一填这组字段：Grok 不再把模型塞进
+    `metadata`，Claude Code 新增活动会话适配器（打开文件识别 + 文件头部元数据）。
+  - 合并了 Dashboard 与 CLI 各自重复的 `_session_summary` / `_display_session_error`，
+    改为共用 `session_view()`；token / 上下文 / 轮数由 `enrich_session_views()` 统一回填。
+  - 公共聚合与 Dashboard 只依赖统一模型，Grok / Claude Code 的接入没有产生平行结构。
 
 - [x] Daemon 不强制 Codex 账号
   - 没有 Codex CLI、`CODEX_HOME` 或有效登录时仍能启动 daemon，Codex 账号变为可选配置。

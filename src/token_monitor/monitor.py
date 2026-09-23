@@ -1092,6 +1092,7 @@ class MultiSessionMonitor:
                 root_thread_id=summary.root_thread_id,
                 auto_resume=not self._is_subagent(summary.source),
                 account_id=self.config.account_id,
+                product="codex",
                 last_offset=(
                     self.jsonl_reader.initial_offset(summary.jsonl_path)
                     if summary.jsonl_path is not None
@@ -1199,6 +1200,7 @@ class MultiSessionMonitor:
             root_thread_id=(metadata.root_thread_id if metadata else None),
             auto_resume=auto_resume,
             account_id=self.config.account_id,
+            product="codex",
         )
 
     def _refresh_session_from_process(

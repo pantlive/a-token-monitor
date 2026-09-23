@@ -25,7 +25,11 @@ from .housekeeping import (
     HousekeepingMonitor,
     empty_housekeeping_report,
 )
-from .claude import read_claude_account, resolve_claude_homes
+from .claude import (
+    list_claude_active_sessions,
+    read_claude_account,
+    resolve_claude_homes,
+)
 from .commandcode import (
     list_commandcode_active_sessions,
     read_commandcode_account,
@@ -50,7 +54,7 @@ from .kimi import (
     read_kimi_quota,
     resolve_kimi_homes,
 )
-from .multi_models import TrackedSession
+from .multi_models import TrackedSession, session_view
 from .quota import QuotaSnapshot
 from .registry import MultiSessionRegistry, RegistryError
 from .traffic import TrafficMonitor, TrafficSnapshot, empty_traffic_snapshot
@@ -58,6 +62,7 @@ from .usage import (
     DEFAULT_SEARCH_DAYS,
     SessionSwitchThresholds,
     UsageAggregator,
+    enrich_session_views,
     search_since_days,
 )
 
@@ -2581,7 +2586,7 @@ def build_dashboard_state(
         "quota": _quota_summary(quota),
         "counts": status_counts,
         "sessions": [
-            _session_summary(
+            session_view(
                 session,
                 account_name,
                 account_id=account_id,
@@ -2740,7 +2745,7 @@ def build_multi_dashboard_state(
                     )
             for session in list_grok_active_sessions(grok_home):
                 sessions.append(
-                    _session_summary(
+                    session_view(
                         session,
                         account_name=grok_account.display_name,
                         account_id=grok_account.account_id,
@@ -2791,7 +2796,7 @@ def build_multi_dashboard_state(
                     )
             for session in list_kimi_active_sessions(kimi_home):
                 sessions.append(
-                    _session_summary(
+                    session_view(
                         session,
                         account_name=kimi_account.display_name,
                         account_id=kimi_account.account_id,
@@ -2841,7 +2846,7 @@ def build_multi_dashboard_state(
                     )
             for session in list_dsh_active_sessions(dsh_home):
                 sessions.append(
-                    _session_summary(
+                    session_view(
                         session,
                         account_name=dsh_account.display_name,
                         account_id=dsh_account.account_id,
@@ -2878,6 +2883,16 @@ def build_multi_dashboard_state(
             }
             if profile not in account["profiles"]:
                 account["profiles"].append(profile)
+            for session in list_claude_active_sessions(claude_home):
+                sessions.append(
+                    session_view(
+                        session,
+                        claude_account.display_name,
+                        account_id=claude_account.account_id,
+                        profile_name=claude_account.profile_name,
+                        codex_home=str(claude_home),
+                    )
+                )
 
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Claude Code', claude_home)
@@ -2922,7 +2937,7 @@ def build_multi_dashboard_state(
                     )
             for session in list_commandcode_active_sessions(commandcode_home):
                 sessions.append(
-                    _session_summary(
+                    session_view(
                         session,
                         account_name=commandcode_account.display_name,
                         account_id=commandcode_account.account_id,
@@ -3044,55 +3059,6 @@ def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
             for window in snapshot.windows
         ],
     }
-
-
-def _session_summary(
-    session: TrackedSession,
-    account_name: str = "codex",
-    account_id: str | None = None,
-    profile_name: str | None = None,
-    codex_home: str | None = None,
-    product: str | None = None,
-) -> dict[str, Any]:
-    """把会话转换成不包含原始提示词的网页字段。"""
-
-    session_account_id = session.account_id or account_id
-    effective_account_name = session.account_id or account_name
-    return {
-        "account": effective_account_name,
-        "account_id": session_account_id,
-        "profile_name": profile_name or account_name,
-        "codex_home": codex_home,
-        "thread_id": session.thread_id,
-        "session_id": session.session_id,
-        "cwd": session.cwd,
-        "source": session.source,
-        "status": session.status.value,
-        "confidence": session.confidence.value,
-        "pids": list(session.pids),
-        "process_backed": session.is_process_backed,
-        "active": session.is_active,
-        "last_event_at": session.last_event_at,
-        "last_event_type": session.last_event_type,
-        "jsonl_path": session.jsonl_path,
-        "last_error": _display_session_error(session.last_error),
-        "quota_reset_at": session.quota_reset_at,
-        "product": product,
-    }
-
-
-def _display_session_error(value: str | None) -> str | None:
-    """隐藏旧版恢复记录，避免历史错误文本重新出现在网页中。"""
-
-    if not value:
-        return None
-    lowered = value.lower()
-    legacy_terms = ("自动恢复", "不自动恢复", "续跑", "resume", "recovery")
-    if any(term in lowered or term in value for term in legacy_terms):
-        if "额度" in value or "quota" in lowered:
-            return "额度限制事件"
-        return "历史会话状态"
-    return value
 
 
 def _insights_window_days(query: str) -> int | None:
@@ -3292,53 +3258,18 @@ def _attach_session_advice(
     aggregator: UsageAggregator | None,
     thresholds: SessionSwitchThresholds,
 ) -> None:
-    """把活动会话的轮数、上下文和长会话提醒并入 /api/state。"""
+    """把统一会话视图的 token 与长会话提醒并入 /api/state。"""
 
     sessions = state.get("sessions")
-    payload: dict[str, Any] = {
+    views = [
+        item for item in sessions if isinstance(item, dict)
+    ] if isinstance(sessions, list) else []
+    _, reminders = enrich_session_views(views, aggregator, thresholds)
+    state["session_advice"] = {
         "thresholds": thresholds.to_dict(),
-        "count": 0,
-        "sessions": [],
+        "count": len(reminders),
+        "sessions": reminders,
     }
-    state["session_advice"] = payload
-    if aggregator is None or not isinstance(sessions, list):
-        return
-    paths = [
-        str(item.get("jsonl_path"))
-        for item in sessions
-        if isinstance(item, dict) and item.get("jsonl_path")
-    ]
-    if not paths:
-        return
-    try:
-        usages = aggregator.session_usages(paths)
-    except (OSError, ValueError):
-        return
-    reminders: list[dict[str, Any]] = []
-    for session in sessions:
-        if not isinstance(session, dict):
-            continue
-        summary = usages.get(str(session.get("jsonl_path") or ""))
-        if summary is None:
-            continue
-        entry = summary.to_dict()
-        reminder = summary.reminder(thresholds)
-        entry["reminder"] = reminder
-        session["usage"] = entry
-        if reminder is None:
-            continue
-        reminders.append(
-            {
-                **reminder,
-                "thread_id": session.get("thread_id"),
-                "account": session.get("account"),
-                "cwd": session.get("cwd"),
-                "project": session.get("cwd"),
-            }
-        )
-    reminders.sort(key=lambda item: -int(item.get("context_tokens") or 0))
-    payload["count"] = len(reminders)
-    payload["sessions"] = reminders
 
 
 def _housekeeping_arguments(raw_query: str) -> dict[str, Any]:

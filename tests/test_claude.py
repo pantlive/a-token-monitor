@@ -12,6 +12,8 @@ from token_monitor.claude import (
     claude_home_for,
     claude_has_inline_sidechains,
     claude_session_id,
+    claude_session_id_from_open_path,
+    list_claude_active_sessions,
     list_claude_transcripts,
     main_transcripts,
     parse_claude_chunk,
@@ -376,6 +378,189 @@ class ClaudeLayoutTests(unittest.TestCase):
 
             self.assertEqual(claude_home_for(path, [home]), home)
             self.assertIsNone(claude_home_for(other, [home]))
+
+
+class ClaudeActiveSessionTests(unittest.TestCase):
+    """验证按进程打开文件识别 Claude Code 活动会话。"""
+
+    def _home(self, root: Path) -> Path:
+        home = root / ".claude"
+        transcript = (
+            home
+            / "projects"
+            / "-home-dev-project-alpha"
+            / "11111111-1111-4111-8111-111111111111.jsonl"
+        )
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "cwd": "/home/dev/project-alpha",
+                            "timestamp": "2026-05-01T10:00:00Z",
+                        }
+                    ),
+                    _assistant_line(
+                        timestamp="2026-05-01T10:01:00Z",
+                        model="claude-sonnet-4-5",
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return home
+
+    def _process(self, proc_root: Path, pid: int, open_path: Path | None) -> None:
+        directory = proc_root / str(pid)
+        (directory / "fd").mkdir(parents=True, exist_ok=True)
+        (directory / "comm").write_text("claude\n", encoding="utf-8")
+        (directory / "cmdline").write_bytes(b"claude\0")
+        (directory / "stat").write_text(
+            f"{pid} (claude) " + " ".join(["S", "1"] + ["0"] * 17 + ["9"]),
+            encoding="utf-8",
+        )
+        if open_path is not None:
+            (directory / "fd" / "3").symlink_to(open_path)
+
+    def test_detects_session_from_open_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            transcript = (
+                home
+                / "projects"
+                / "-home-dev-project-alpha"
+                / "11111111-1111-4111-8111-111111111111.jsonl"
+            )
+            proc_root = root / "proc"
+            self._process(proc_root, 4242, transcript)
+
+            sessions = list_claude_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.thread_id, "claude:11111111-1111-4111-8111-111111111111")
+        self.assertEqual(session.session_id, "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(session.product, "claude")
+        self.assertEqual(session.source, "claude-cli")
+        self.assertEqual(session.project, "/home/dev/project-alpha")
+        self.assertEqual(session.cwd, "/home/dev/project-alpha")
+        self.assertEqual(session.model, "claude-sonnet-4-5")
+        self.assertEqual(session.pids, (4242,))
+        self.assertEqual(session.status.value, "running")
+        self.assertEqual(session.jsonl_path, str(transcript))
+        self.assertIsNotNone(session.started_at)
+        self.assertIsNotNone(session.last_activity_at)
+
+    def test_merges_processes_and_ignores_foreign_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            transcript = (
+                home
+                / "projects"
+                / "-home-dev-project-alpha"
+                / "11111111-1111-4111-8111-111111111111.jsonl"
+            )
+            outside = root / "other" / "notes.jsonl"
+            outside.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("", encoding="utf-8")
+            proc_root = root / "proc"
+            self._process(proc_root, 100, transcript)
+            self._process(proc_root, 101, transcript)
+            self._process(proc_root, 102, outside)
+
+            sessions = list_claude_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].pids, (100, 101))
+
+    def test_no_process_means_no_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            proc_root = root / "proc"
+            proc_root.mkdir()
+
+            sessions = list_claude_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(sessions, ())
+
+    def test_header_without_cwd_still_reports_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".claude"
+            transcript = (
+                home
+                / "projects"
+                / "-home-dev-unknown"
+                / "22222222-2222-4222-8222-222222222222.jsonl"
+            )
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text(
+                json.dumps({"type": "user", "message": "…"}) + "\n",
+                encoding="utf-8",
+            )
+            proc_root = root / "proc"
+            self._process(proc_root, 7, transcript)
+
+            sessions = list_claude_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=1_789_708_700.0,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertIsNone(sessions[0].project)
+        self.assertIsNone(sessions[0].model)
+
+    def test_claude_session_id_from_open_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".claude"
+            self._home(home)
+            inside = (
+                home / "projects" / "-home-dev-project-alpha" / "11111111-1111-4111-8111-11111111.jsonl"
+            )
+            agent = (
+                home
+                / "projects"
+                / "-home-dev-project-alpha"
+                / "11111111-1111-4111-8111-11111111"
+                / "subagents"
+                / "agent-abc.jsonl"
+            )
+            agent.parent.mkdir(parents=True, exist_ok=True)
+            agent.write_text("", encoding="utf-8")
+            outside = root / "elsewhere.jsonl"
+            outside.write_text("", encoding="utf-8")
+
+            root_projects = home / "projects"
+
+        self.assertEqual(
+            claude_session_id_from_open_path(inside, root_projects),
+            "11111111-1111-4111-8111-11111111",
+        )
+        self.assertEqual(
+            claude_session_id_from_open_path(agent, root_projects),
+            "11111111-1111-4111-8111-11111111",
+        )
+        self.assertIsNone(claude_session_id_from_open_path(outside, root_projects))
 
 
 class ClaudeUsageAggregatorTests(unittest.TestCase):

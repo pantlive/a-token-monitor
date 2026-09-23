@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from .agents import scan_running_agents
+from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
 
 # 中文注释：一次解析最多保留的 message.id，用于跨轮次去重。
 _MAX_SEEN_IDS = 400
@@ -89,14 +93,21 @@ def default_claude_home() -> Path:
 def resolve_claude_homes(
     homes: Sequence[Path] | None = None,
 ) -> tuple[Path, ...]:
-    """解析 Claude Code 数据目录列表：显式参数优先，其次环境变量和默认目录。"""
+    """解析 Claude Code 数据目录列表。
 
-    if homes:
+    与其他 provider 保持同一套语义：``None`` 表示自动探测（``CLAUDE_CONFIG_DIR``
+    或 ``~/.claude``，存在才用），显式空列表表示不监控 Claude Code。
+    """
+
+    if homes is not None:
         resolved: list[Path] = []
+        seen: set[Path] = set()
         for home in homes:
             path = Path(home).expanduser()
-            if path not in resolved:
-                resolved.append(path)
+            if path in seen:
+                continue
+            seen.add(path)
+            resolved.append(path)
         return tuple(resolved)
     default = default_claude_home()
     return (default,) if default.is_dir() else ()
@@ -204,6 +215,117 @@ def resolve_sidechain_policy(
             _POLICY_CACHE[home] = (observed_at, include)
     with _POLICY_LOCK:
         return {home: _POLICY_CACHE[home][1] for home in homes}
+
+
+_CWD_PATTERN = re.compile(r'"cwd"\s*:\s*"([^"]{1,1024})"')
+_MODEL_PATTERN = re.compile(r'"model"\s*:\s*"([a-z0-9][a-z0-9._/-]{1,80})"')
+_FIRST_TIMESTAMP_PATTERN = re.compile(r'"timestamp"\s*:\s*"([^"]{8,40})"')
+_HEADER_READ_BYTES = 64 * 1024
+
+
+def list_claude_active_sessions(
+    claude_home: Path,
+    proc_root: Path = Path("/proc"),
+    now: float | None = None,
+) -> tuple[TrackedSession, ...]:
+    """列出当前有 Claude Code 进程打开会话 JSONL 的活动会话。
+
+    与 Kimi / DSH / Grok 对齐：以 ``/proc/<pid>/fd`` 里实际打开的会话文件为准，
+    同一会话被多个进程打开时合并 pids，进程退出后自然消失；项目、模型和开始
+    时间只从会话文件头部读取，不读取提示词或工具输出。
+    """
+
+    home = _normalize_path(claude_home)
+    projects_root = claude_projects_root(home)
+    observed_at = time.time() if now is None else float(now)
+    agents = scan_running_agents(proc_root=proc_root, products=("claude",))
+    grouped: dict[str, list[int]] = {}
+    path_by_session: dict[str, Path] = {}
+    for agent in agents:
+        for path in agent.open_paths:
+            session_id = claude_session_id_from_open_path(path, projects_root)
+            if session_id is None:
+                continue
+            grouped.setdefault(session_id, [])
+            if agent.pid not in grouped[session_id]:
+                grouped[session_id].append(agent.pid)
+            path_by_session.setdefault(session_id, path)
+
+    sessions: list[TrackedSession] = []
+    for session_id, pids in grouped.items():
+        transcript = path_by_session.get(session_id)
+        header = _read_claude_header(transcript)
+        last_event_at = header["modified_at"]
+        sessions.append(
+            TrackedSession(
+                thread_id=f"claude:{session_id}",
+                session_id=session_id,
+                jsonl_path=str(transcript) if transcript is not None else None,
+                cwd=header["project"],
+                source="claude-cli",
+                status=SessionStatus.RUNNING,
+                confidence=DetectionConfidence.OPEN_FILE,
+                first_seen_at=header["started_at"] or observed_at,
+                last_seen_at=observed_at,
+                pids=tuple(sorted(pids)),
+                last_event_at=last_event_at,
+                last_event_type="assistant" if header["model"] else "session",
+                product="claude",
+                model=header["model"],
+                project=header["project"],
+            )
+        )
+    sessions.sort(key=lambda item: item.last_seen_at, reverse=True)
+    return tuple(sessions)
+
+
+def claude_session_id_from_open_path(
+    path: Path,
+    projects_root: Path,
+) -> str | None:
+    """从进程打开的路径解析会话 ID；路径必须在该项目会话根下。"""
+
+    normalized = _normalize_path(path)
+    root = _normalize_path(projects_root)
+    if root not in normalized.parents:
+        return None
+    return claude_session_id(normalized)
+
+
+def _read_claude_header(
+    path: Path | None,
+    *,
+    max_bytes: int = _HEADER_READ_BYTES,
+) -> dict[str, Any]:
+    """只读会话文件头部，取出项目、模型和开始时间。"""
+
+    header: dict[str, Any] = {
+        "project": None,
+        "model": None,
+        "started_at": None,
+        "modified_at": None,
+    }
+    if path is None:
+        return header
+    try:
+        stat_result = path.stat()
+        header["modified_at"] = stat_result.st_mtime
+        with path.open("rb") as handle:
+            chunk = handle.read(max_bytes)
+    except OSError:
+        return header
+    project = _CWD_PATTERN.search(chunk.decode("utf-8", errors="replace"))
+    if project is not None:
+        header["project"] = project.group(1)
+    model = _MODEL_PATTERN.search(chunk.decode("utf-8", errors="replace"))
+    if model is not None:
+        header["model"] = model.group(1)
+    started = _FIRST_TIMESTAMP_PATTERN.search(
+        chunk.decode("utf-8", errors="replace")
+    )
+    if started is not None:
+        header["started_at"] = _timestamp(started.group(1))
+    return header
 
 
 def read_claude_account(home: Path) -> ClaudeAccount:

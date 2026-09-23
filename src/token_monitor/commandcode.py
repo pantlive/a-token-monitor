@@ -570,6 +570,9 @@ def list_commandcode_active_sessions(
                 last_event_type=(
                     info.model if info is not None and info.model else "session"
                 ),
+                product="command-code",
+                model=info.model if info is not None else None,
+                project=info.cwd if info is not None else None,
             )
         )
     sessions.sort(key=lambda item: item.last_seen_at, reverse=True)

@@ -212,6 +212,8 @@ def list_kimi_active_sessions(
                 pids=tuple(sorted(pids)),
                 last_event_at=updated_at,
                 last_event_type=event_type,
+                product="kimi",
+                project=cwd,
             )
         )
     sessions.sort(key=lambda item: item.last_seen_at, reverse=True)
