@@ -26,6 +26,7 @@ from .discovery import (
     default_session_root,
 )
 from .events import EventObservation
+from .health import HealthTracker, sanitize_error
 from .multi_models import (
     DetectionConfidence,
     SessionStatus,
@@ -34,6 +35,11 @@ from .multi_models import (
 from .quota import QuotaSnapshot, merge_sparse_update
 from .quota_fallback import JsonlQuotaFallbackReader, recent_session_paths
 from .registry import MultiSessionRegistry, RegistryError
+from .retention import (
+    DEFAULT_SESSION_RETENTION_DAYS,
+    DEFAULT_USAGE_RETENTION_DAYS,
+    MAX_RETENTION_DAYS,
+)
 from .storage import StateStore
 from .usage import (
     DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
@@ -71,6 +77,8 @@ class MonitorConfig:
     upload_window_warn_mb: float = 64.0
     upload_window_danger_mb: float = 256.0
     alert_retention_days: float = 30.0
+    usage_retention_days: float = DEFAULT_USAGE_RETENTION_DAYS
+    session_retention_days: float = DEFAULT_SESSION_RETENTION_DAYS
     session_turn_warn: int = DEFAULT_SESSION_TURN_WARN
     session_context_warn_tokens: int = DEFAULT_SESSION_CONTEXT_WARN_TOKENS
     disk_warn_gb: float = DEFAULT_SINGLE_WARN_GIB
@@ -120,6 +128,11 @@ class MonitorConfig:
             )
         if self.alert_retention_days <= 0:
             raise ValueError("alert_retention_days 必须大于 0")
+        for name in ("usage_retention_days", "session_retention_days"):
+            if not 0 < getattr(self, name) <= MAX_RETENTION_DAYS:
+                raise ValueError(
+                    f"{name} 必须在 (0, {MAX_RETENTION_DAYS:.0f}] 之间"
+                )
         if self.session_turn_warn <= 0:
             raise ValueError("session_turn_warn 必须大于 0")
         if self.session_context_warn_tokens <= 0:
@@ -173,10 +186,14 @@ class MultiSessionMonitor:
         app_server: AppServerClient | None = None,
         process_scanner: ProcessScanner | None = None,
         jsonl_reader: JsonlSessionReader | None = None,
+        health: HealthTracker | None = None,
     ) -> None:
         self.registry = registry
         self.config = config or MonitorConfig()
         self.logger = logger or logging.getLogger(__name__)
+        # 中文注释：健康登记表由编排层（多账号）或 run()（单账号）提供；
+        # 都没有时保持 None，run() 会自建。
+        self.health = health
         configured_session_root = session_root
         if configured_session_root is None and self.config.codex_home is not None:
             configured_session_root = self.config.codex_home / "sessions"
@@ -202,6 +219,8 @@ class MultiSessionMonitor:
         self._quota_lock = threading.Lock()
         self._quota_is_current = False
         self._last_quota_at: float | None = None
+        self._last_quota_success_at: float | None = None
+        self._last_quota_error: str | None = None
         self._last_reconcile_at: float | None = None
         self._active_app_threads: set[str] = set()
         self._app_thread_status: dict[str, AppServerThread] = {}
@@ -216,6 +235,25 @@ class MultiSessionMonitor:
 
         with self._quota_lock:
             return self._quota
+
+    def quota_health(self) -> dict[str, object]:
+        """返回账号额度链路的健康摘要，供健康检查埋点使用。
+
+        ``app_server_available`` 用 ``self._started`` 区分：未启动时
+        App Server 进程为 None 属于 starting 而非故障，只有启动后进程
+        不存在或已退出才视为不可用。
+        """
+
+        process = getattr(self.app_server, "process", None)
+        app_server_available = (
+            self._started and process is not None and process.poll() is None
+        )
+        return {
+            "last_success_at": self._last_quota_success_at,
+            "last_error": self._last_quota_error,
+            "is_current": self._quota_is_current,
+            "app_server_available": app_server_available,
+        }
 
     def start(self, allow_app_server_failure: bool = False) -> None:
         """启动 App Server 连接并立即主动查询额度。
@@ -259,6 +297,24 @@ class MultiSessionMonitor:
         lock_store = StateStore(self.registry.state_dir)
         try:
             with lock_store.lock():
+                # 中文注释：多账号编排层会注入共享 tracker；单账号进程自建一个，
+                # 注册主循环（关键组件）和账号组件，供 Dashboard /healthz 读取。
+                tracker = self.health
+                if tracker is None:
+                    tracker = HealthTracker()
+                    self.health = tracker
+                tracker.register(
+                    "main-loop",
+                    "监控主循环",
+                    critical=True,
+                    stale_after=max(2 * self.config.scan_interval, 120),
+                )
+                account_label = f"Codex 账号 {self.config.account_name}"
+                tracker.register(
+                    f"account:{self.config.account_name}",
+                    account_label,
+                    stale_after=max(2 * self.config.quota_interval, 300),
+                )
                 if self.config.dashboard:
                     self._dashboard = DashboardServer(
                         registry=self.registry,
@@ -289,6 +345,7 @@ class MultiSessionMonitor:
                             self.registry.state_dir,
                             retention_days=self.config.alert_retention_days,
                         ),
+                        health=tracker,
                     )
                     self._dashboard.start()
                     host, port = self._dashboard.address
@@ -300,7 +357,17 @@ class MultiSessionMonitor:
                 # 中文注释：网页只读取 SQLite，可在额度接口初始化前先提供历史状态。
                 self.start()
                 while not self._stop_event.is_set():
-                    self.run_once()
+                    try:
+                        self.run_once()
+                    except Exception as error:
+                        tracker.record_failure("main-loop", error)
+                        tracker.record_failure(
+                            f"account:{self.config.account_name}",
+                            error,
+                        )
+                        raise
+                    tracker.record_success("main-loop")
+                    self._record_account_health(tracker)
                     self._stop_event.wait(self.config.scan_interval)
         except KeyboardInterrupt:
             self.logger.info("收到中断，保留数据库状态并停止监控")
@@ -329,6 +396,22 @@ class MultiSessionMonitor:
         self._recheck_completed_quota(now=current_time)
         self.finalize_sessions(now=current_time)
 
+    def _record_account_health(self, tracker: HealthTracker) -> None:
+        """按额度链路状态记录账号组件；App Server 不可用算降级而非失败。"""
+
+        key = f"account:{self.config.account_name}"
+        quota = self.quota_health()
+        if not quota["app_server_available"]:
+            tracker.record_success(
+                key,
+                degraded=True,
+                reason="app-server 不可用,使用进程与 JSONL 证据",
+            )
+        elif quota["last_error"] is not None:
+            tracker.record_success(key, quota_error=quota["last_error"])
+        else:
+            tracker.record_success(key)
+
     def refresh_quota(
         self,
         force: bool = False,
@@ -350,6 +433,10 @@ class MultiSessionMonitor:
             if fallback is not None:
                 self._set_quota(fallback)
                 self._quota_is_current = True
+                self._last_quota_success_at = current_time
+                # 中文注释：fallback 成功仍保留 App Server 的错误原因，
+                # 供 quota_health 以 details 形式上报降级原因。
+                self._last_quota_error = sanitize_error(error)
                 self.logger.warning(
                     "App Server 额度查询失败，使用最近本地 JSONL 快照: %s",
                     error,
@@ -358,10 +445,13 @@ class MultiSessionMonitor:
                 return fallback
             self.logger.warning("主动查询额度失败，保留上次快照: %s", error)
             self._quota_is_current = False
+            self._last_quota_error = sanitize_error(error)
             self._last_quota_at = current_time
             return self.quota
         self._set_quota(snapshot)
         self._quota_is_current = True
+        self._last_quota_success_at = current_time
+        self._last_quota_error = None
         self._last_quota_at = current_time
         self.logger.debug(
             "额度快照已更新：%d 个窗口，来源 %s",

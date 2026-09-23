@@ -10,7 +10,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from token_monitor.accounts import build_account_specs
+from token_monitor.accounts import (
+    _path_suffix,
+    build_account_specs,
+    build_additional_account_spec,
+)
 from token_monitor.alerts import AlertStoreError
 from token_monitor.multi_models import (
     DetectionConfidence,
@@ -376,6 +380,114 @@ class AccountTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             MultiAccountMonitor(accounts=(), state_dir=None)
+
+
+class AdditionalAccountSpecTests(unittest.TestCase):
+    """验证热新增账号的命名和状态目录分配约定。"""
+
+    def test_allocates_state_dir_under_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            state_dir = root / "state"
+            existing = build_account_specs((root / ".codex",), state_dir=state_dir)
+
+            added = build_additional_account_spec(
+                root / ".codex-work",
+                state_dir,
+                existing,
+            )
+
+        self.assertEqual(added.name, "codex-work")
+        self.assertEqual(added.home, root / ".codex-work")
+        self.assertEqual(added.session_root, root / ".codex-work" / "sessions")
+        self.assertEqual(added.state_dir, state_dir / "accounts" / "codex-work")
+
+    def test_readding_default_home_reuses_legacy_state_dir(self) -> None:
+        """默认目录被重新加回空账号集时复用旧 state_dir，保住历史检查点。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            state_dir = root / "state"
+            default_home = root / "default-codex"
+            with patch.dict(os.environ, {"CODEX_HOME": str(default_home)}):
+                added = build_additional_account_spec(default_home, state_dir, [])
+
+        self.assertEqual(added.state_dir, state_dir)
+        self.assertEqual(added.home, default_home)
+
+    def test_default_home_with_existing_accounts_uses_accounts_dir(self) -> None:
+        """已有账号占用旧 state_dir 时，默认目录也只能分配到 accounts/ 下。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            state_dir = root / "state"
+            default_home = root / "default-codex"
+            existing = build_account_specs((root / ".codex-other",), state_dir)
+            self.assertEqual(existing[0].state_dir, state_dir)
+            with patch.dict(os.environ, {"CODEX_HOME": str(default_home)}):
+                added = build_additional_account_spec(
+                    default_home,
+                    state_dir,
+                    existing,
+                )
+
+        self.assertNotEqual(added.state_dir, state_dir)
+        self.assertEqual(added.state_dir.parent, state_dir / "accounts")
+
+    def test_same_dirname_gets_unique_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            state_dir = root / "state"
+            existing = build_account_specs((root / ".codex",), state_dir=state_dir)
+
+            added = build_additional_account_spec(
+                root / "work" / ".codex",
+                state_dir,
+                existing,
+            )
+
+        self.assertEqual(existing[0].name, "codex")
+        self.assertTrue(added.name.startswith("codex-"))
+        self.assertNotEqual(added.name, existing[0].name)
+
+    def test_state_dir_collision_gets_path_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            state_dir = root / "state"
+            existing = build_account_specs(
+                (root / ".codex", root / ".codex-work"),
+                state_dir=state_dir,
+            )
+            colliding_home = root / "other" / ".codex-work"
+
+            added = build_additional_account_spec(colliding_home, state_dir, existing)
+
+        suffix = _path_suffix(colliding_home)
+        self.assertEqual(added.name, f"codex-work-{suffix}")
+        self.assertEqual(
+            added.state_dir,
+            state_dir / "accounts" / f"codex-work-{suffix}",
+        )
+        self.assertNotIn(
+            added.state_dir,
+            {account.state_dir for account in existing},
+        )
+
+    def test_reads_account_id_from_auth_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            state_dir = root / "state"
+            home = root / ".codex-work"
+            home.mkdir()
+            (home / "auth.json").write_text(
+                json.dumps({"tokens": {"account_id": "account-hot-added"}}),
+                encoding="utf-8",
+            )
+            existing = build_account_specs((root / ".codex",), state_dir=state_dir)
+
+            added = build_additional_account_spec(home, state_dir, existing)
+
+        self.assertEqual(added.account_id, "account-hot-added")
 
 
 def _sample_alert() -> TrafficAlert:

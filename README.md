@@ -108,6 +108,55 @@ Dashboard 是 Python 服务内嵌的 HTML、CSS 和 JavaScript，不需要单独
 折叠为摘要按钮，点击「展开 N 个活动会话」再展开完整会话表，「收起会话列表」
 恢复折叠，折叠状态在 5 秒自动刷新之间保持。
 
+## Web 端扫描目录管理
+
+Dashboard 的「扫描目录」面板可以查看、添加和移除各 provider（Codex / Grok /
+Kimi Code / DeepSeek Harness / Command Code / Claude Code）的数据目录，
+修改立即热重载生效，无需重启 daemon，也不丢失用量索引检查点。
+
+目录来源的优先级为：Web 配置 > 命令行参数（`--codex-home` 等）> 自动探测默认目录。
+Web 配置持久化在状态目录的 `scan-dirs.json`（默认 `~/.token-monitor/scan-dirs.json`）；
+把某个 provider 的目录清空表示显式禁用该 provider，在面板中「重置」则回退到
+命令行参数或自动探测。
+
+为保证安全，只允许配置当前用户主目录之内、确实存在且可读的目录；`~/.ssh`
+等敏感目录和监控状态目录本身不可作为扫描目录，网页也不提供任意路径浏览。
+
+## 健康检查
+
+Dashboard 端口同时提供两个探测端点，便于 systemd、DevDeck、容器和反向代理
+监控 daemon：
+
+- `GET /healthz`：存活检查。主循环在阈值内（`max(2×扫描间隔, 120s)`）有心跳
+  返回 200 `{"status": "ok"}`，主循环卡死或从未完成首轮返回 503
+  `{"status": "stuck"}`。
+- `GET /readyz`：就绪检查。所有关键组件（主循环）正常返回 200
+  `{"status": "ready"}`；关键组件失败或尚未完成启动返回 503
+  `{"status": "not_ready"}`。单个非关键组件（某 provider、流量采集、
+  用量索引器、housekeeping）故障只会让整体状态显示为降级，不影响就绪状态码。
+
+`/readyz` 的响应体携带逐组件状态：最后成功时间、最近错误（主目录路径脱敏为
+`~`，不暴露凭据）和是否过期；`/api/state` 的 `health` 字段提供同样的摘要，
+Dashboard 顶栏据此显示「正常 / 部分降级 / 启动中 / 异常」指示，点击可查看
+异常组件和最近错误。daemon 重启后组件状态从「启动中」开始，首轮成功后转为正常。
+
+## 历史数据管理
+
+用量索引、会话历史和异常流量告警三类历史数据分别配置保留天数：
+
+- 用量索引明细：默认 90 天（`--usage-retention-days`，daemon 和 service install
+  均支持）。
+- 已结束会话历史：默认 30 天（`--session-retention-days`）。
+- 异常流量告警：默认 30 天（`--alert-retention-days`）。
+
+Dashboard 设置页的「历史数据」子块展示状态目录及各类索引的磁盘占用，并可在线
+修改用量与会话的保留天数（Web 配置优先于命令行参数，持久化在状态目录的
+`settings.json`，修改立即生效无需重启）。子块内提供清理预览——明确将删除的
+数据范围和预计释放空间——确认后立即清理；daemon 也会每天按生效保留期自动清理
+过期历史并在删除后压缩（VACUUM）数据库。清理只删除过期的历史行：绝不影响仍在
+活动的会话和用量索引的增量读取检查点；自动清理失败时记录原因，并通过健康组件
+徽标在 Dashboard 顶栏提示。
+
 ## 监控内容
 
 - **Codex 账号是可选的**：没有 Codex CLI、`CODEX_HOME` 或有效登录时 daemon 仍可启动，
@@ -285,6 +334,8 @@ token-monitor --state-dir "$HOME/.token-monitor" service uninstall
 | `usage-index.sqlite3` | 用量索引与增量读取检查点 |
 | `traffic-alerts.sqlite3` | 异常流量告警历史（保留天数由 `--alert-retention-days` 控制） |
 | `service.json` | `service install` 保存的 daemon 配置 |
+| `scan-dirs.json` | Dashboard「扫描目录」面板保存的 Web 扫描目录覆盖配置 |
+| `settings.json` | 设置页「历史数据」保存的 Web 保留天数覆盖配置 |
 | `archives/` | 会话归档：`codex-sessions-*.tar.gz` 及其 `.manifest.json` |
 
 Dashboard 除页面和只读接口（`/api/state`、`/api/usage`、`/api/usage/search`、

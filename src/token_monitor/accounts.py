@@ -108,6 +108,49 @@ def build_account_specs(
     return tuple(accounts)
 
 
+def build_additional_account_spec(
+    home: Path,
+    state_dir: Path,
+    existing: Sequence[CodexAccount],
+) -> CodexAccount:
+    """为运行中热新增的 ``CODEX_HOME`` 构造账号配置。
+
+    命名和状态目录沿用 ``build_account_specs`` 的约定：已有账号为空且目录
+    就是默认 ``~/.codex`` 时复用旧版 ``state_dir``，重新加回默认账号因此能
+    恢复它之前的检查点；其他情况一律放到 ``state_dir/accounts`` 下，并避开
+    与现有账号的名称和状态目录冲突。
+    """
+
+    normalized_home = _normalize_path(home)
+    normalized_state_dir = state_dir.expanduser()
+    used_names = {account.name for account in existing}
+    name = _unique_name(normalized_home, used_names)
+    default_home = _normalize_path(default_codex_home())
+    if not existing and normalized_home == default_home:
+        account_state_dir = normalized_state_dir
+    else:
+        # 中文注释：与 _account_state_dir 的非默认分支保持同一套约定，但
+        # 热新增账号永不复用旧版 state_dir——已有账号时它总被旧账号占用。
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized_home.name)
+        safe_name = safe_name.strip("._") or f"account-{len(existing) + 2}"
+        account_state_dir = normalized_state_dir / "accounts" / safe_name
+        used_state_dirs = {account.state_dir for account in existing}
+        if (
+            account_state_dir in used_state_dirs
+            or account_state_dir == normalized_state_dir
+        ):
+            account_state_dir = account_state_dir.with_name(
+                f"{account_state_dir.name}-{_path_suffix(normalized_home)}"
+            )
+    return CodexAccount(
+        name=name,
+        home=normalized_home,
+        session_root=normalized_home / "sessions",
+        state_dir=account_state_dir,
+        account_id=read_codex_account_id(normalized_home),
+    )
+
+
 def read_codex_account_id(codex_home: Path) -> str | None:
     """从一个 ``CODEX_HOME`` 的本地认证状态读取账号 ID。
 

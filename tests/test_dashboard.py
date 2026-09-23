@@ -20,10 +20,13 @@ from token_monitor.housekeeping import (
 )
 from token_monitor.dashboard import (
     _DASHBOARD_HTML,
+    _SETTINGS_HTML,
     DashboardConfig,
     DashboardServer,
     build_multi_dashboard_state,
 )
+from token_monitor.health import HealthTracker
+from token_monitor.retention import RetentionController, RetentionError
 from token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
@@ -31,6 +34,7 @@ from token_monitor.multi_models import (
 )
 from token_monitor.quota import QuotaSnapshot, QuotaWindow
 from token_monitor.registry import MultiSessionRegistry
+from token_monitor.scan_dirs import ScanDirsController
 from token_monitor.traffic import TrafficAlert
 from token_monitor.usage import UsageAggregator
 
@@ -1926,6 +1930,996 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertIn('data-section-toggle="housekeeping"', html)
         self.assertIn('id="housekeeping-body"', html)
         self.assertIn("按需查看", html)
+
+
+class ScanDirsDashboardTests(unittest.TestCase):
+    """验证扫描目录的查询与在线管理接口。"""
+
+    _CLI_HOMES = {
+        "codex": None,
+        "claude": None,
+        "commandcode": None,
+        "dsh": None,
+        "grok": None,
+        "kimi": None,
+    }
+
+    @staticmethod
+    def _home(root: Path) -> Path:
+        """构造一个带 Codex 典型目录结构的假主目录。"""
+
+        home = root / "home"
+        (home / ".codex" / "sessions").mkdir(parents=True)
+        return home
+
+    def _controller(self, root: Path, home: Path) -> ScanDirsController:
+        """在临时目录上构造扫描目录控制器；校验范围指向假主目录。"""
+
+        return ScanDirsController(
+            state_dir=root / "state",
+            cli_homes=dict(self._CLI_HOMES),
+            home_dir=home,
+        )
+
+    def _server(
+        self,
+        root: Path,
+        controller: ScanDirsController | None,
+    ) -> DashboardServer:
+        """启动一个只绑定回环随机端口的 Dashboard。"""
+
+        server = DashboardServer(
+            registries={},
+            config=DashboardConfig(port=0),
+            grok_homes=(),
+            kimi_homes=(),
+            dsh_homes=(),
+            commandcode_homes=(),
+            claude_homes=(),
+            scan_dirs=controller,
+        )
+        server.start()
+        return server
+
+    @staticmethod
+    def _post(url: str, payload: object) -> tuple[int, dict]:
+        """发送 JSON POST 请求；出错状态码也解析响应体后返回。"""
+
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    @staticmethod
+    def _provider(payload: dict, key: str) -> dict:
+        """从快照里取出单个 provider 的条目。"""
+
+        for provider in payload["providers"]:
+            if provider["key"] == key:
+                return provider
+        raise AssertionError(f"快照中缺少 provider: {key}")
+
+    def test_get_returns_snapshot_with_all_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            server = self._server(root, self._controller(root, home))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/api/scan-dirs", timeout=5) as response:
+                    payload = json.load(response)
+                    self.assertEqual(response.status, 200)
+                head_request = Request(
+                    f"{base_url}/api/scan-dirs",
+                    method="HEAD",
+                )
+                with urlopen(head_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b"")
+            finally:
+                server.close()
+
+        self.assertTrue(payload["available"])
+        self.assertIn("updated_at", payload)
+        self.assertEqual(payload["priority"], ["web", "cli", "auto"])
+        self.assertEqual(len(payload["providers"]), 6)
+        self.assertEqual(
+            [provider["key"] for provider in payload["providers"]],
+            ["codex", "claude", "commandcode", "dsh", "grok", "kimi"],
+        )
+        codex = self._provider(payload, "codex")
+        self.assertEqual(codex["source"], "auto")
+        self.assertIsNone(codex["override_dirs"])
+        self.assertEqual(codex["cli_option"], "--codex-home")
+
+    def test_get_without_controller_reports_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = self._server(root, None)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/api/scan-dirs", timeout=5) as response:
+                    payload = json.load(response)
+                    self.assertEqual(response.status, 200)
+            finally:
+                server.close()
+
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["providers"], [])
+
+    def test_add_remove_reset_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            extra = home / ".codex-work"
+            (extra / "sessions").mkdir(parents=True)
+            server = self._server(root, self._controller(root, home))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                add_status, added = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "add", "provider": "codex", "path": str(extra)},
+                )
+                outside_status, outside = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "add", "provider": "codex", "path": "/etc"},
+                )
+                unconfirmed_status, unconfirmed = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {
+                        "action": "remove",
+                        "provider": "codex",
+                        "path": str(extra),
+                    },
+                )
+                remove_status, removed = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {
+                        "action": "remove",
+                        "provider": "codex",
+                        "path": str(extra),
+                        "confirm": True,
+                    },
+                )
+                reset_status, reset = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "reset", "provider": "codex", "confirm": True},
+                )
+                persisted = (root / "state" / "scan-dirs.json").is_file()
+            finally:
+                server.close()
+
+        self.assertEqual(add_status, 200)
+        self.assertTrue(added["ok"])
+        self.assertEqual(added["action"], "add")
+        codex = self._provider(added, "codex")
+        self.assertEqual(codex["source"], "web")
+        self.assertEqual(codex["override_dirs"], [str(extra)])
+        self.assertEqual(codex["directories"][0]["path"], str(extra))
+        self.assertTrue(codex["directories"][0]["ok"])
+        self.assertTrue(codex["directories"][0]["structure_ok"])
+        self.assertTrue(persisted)
+
+        self.assertEqual(outside_status, 400)
+        self.assertEqual(outside["error"], "invalid_scan_dir")
+        self.assertIn("主目录", outside["message"])
+
+        self.assertEqual(unconfirmed_status, 400)
+        self.assertEqual(unconfirmed["error"], "invalid_scan_dir_action")
+
+        self.assertEqual(remove_status, 200)
+        self.assertTrue(removed["ok"])
+        codex_after_remove = self._provider(removed, "codex")
+        self.assertEqual(codex_after_remove["override_dirs"], [])
+        self.assertEqual(codex_after_remove["directories"], [])
+        self.assertFalse(codex_after_remove["enabled"])
+
+        self.assertEqual(reset_status, 200)
+        self.assertTrue(reset["ok"])
+        codex_after_reset = self._provider(reset, "codex")
+        self.assertEqual(codex_after_reset["source"], "auto")
+        self.assertIsNone(codex_after_reset["override_dirs"])
+
+    def test_reset_requires_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            server = self._server(root, self._controller(root, home))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "reset", "provider": "codex"},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_scan_dir_action")
+
+    def test_invalid_requests_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            server = self._server(root, self._controller(root, home))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                unknown_action = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "wipe", "provider": "codex"},
+                )
+                unknown_provider = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {
+                        "action": "add",
+                        "provider": "emacs",
+                        "path": str(home / ".emacs"),
+                    },
+                )
+                non_string_path = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "add", "provider": "codex", "path": 123},
+                )
+                missing_path = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "add", "provider": "codex"},
+                )
+            finally:
+                server.close()
+
+        for status, payload in (
+            unknown_action,
+            unknown_provider,
+            non_string_path,
+            missing_path,
+        ):
+            self.assertEqual(status, 400)
+            self.assertEqual(payload["error"], "invalid_scan_dir_action")
+
+    def test_post_without_controller_returns_503(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = self._server(root, None)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    f"{base_url}/api/scan-dirs",
+                    {"action": "reset", "provider": "codex", "confirm": True},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "scan_dirs_unavailable")
+
+    def test_page_contains_scan_dirs_section(self) -> None:
+        """主页只保留指向 /settings 的链接；扫描目录管理在独立设置页。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            server = self._server(root, self._controller(root, home))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/", timeout=5) as response:
+                    html = response.read().decode("utf-8")
+                with urlopen(f"{base_url}/settings", timeout=5) as response:
+                    settings_html = response.read().decode("utf-8")
+                    self.assertEqual(response.status, 200)
+                head_request = Request(f"{base_url}/settings", method="HEAD")
+                with urlopen(head_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b"")
+            finally:
+                server.close()
+
+        # 主页：设置入口改为指向独立页面的普通链接，不再内嵌扫描目录区块。
+        self.assertIn("设置", html)
+        self.assertIn('href="/settings"', html)
+        self.assertNotIn('data-nav-target="settings"', html)
+        self.assertNotIn('id="settings"', html)
+        self.assertNotIn('id="scan-dirs"', html)
+        self.assertNotIn("/api/scan-dirs", html)
+
+        # 设置页：第一个子块是扫描目录管理，结构与 JS 保持完整。
+        self.assertIn("<title>设置 - Token Monitor</title>", settings_html)
+        self.assertIn("返回 Dashboard", settings_html)
+        self.assertIn('href="/"', settings_html)
+        self.assertIn('id="settings-body"', settings_html)
+        self.assertIn('id="scan-dirs"', settings_html)
+        self.assertIn('id="scan-dirs-content"', settings_html)
+        self.assertIn('id="scan-dirs-count"', settings_html)
+        self.assertIn('id="scan-dirs-refresh-button"', settings_html)
+        self.assertIn("/api/scan-dirs", settings_html)
+        self.assertIn("refreshScanDirs", settings_html)
+        self.assertIn("优先级：Web 配置", settings_html)
+        # 设置页打开时直接加载扫描目录，不再走主页的懒加载机制。
+        self.assertLess(
+            settings_html.find('id="scan-dirs"'),
+            settings_html.find('id="scan-dirs-content"'),
+        )
+        self.assertLess(
+            settings_html.find('id="settings-body"'),
+            settings_html.find('id="scan-dirs"'),
+        )
+
+    def test_update_accounts_swaps_registries(self) -> None:
+        """update_accounts 应在不重启服务的情况下替换 /api/state 的账号集合。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            registry_a = MultiSessionRegistry(root / "state-a")
+            registry_b = MultiSessionRegistry(root / "state-b")
+            server = DashboardServer(
+                registries={"codex": registry_a},
+                config=DashboardConfig(port=0),
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-a",
+                        "profile_name": "codex",
+                    }
+                },
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+            server.start()
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/api/state", timeout=5) as response:
+                    before = json.load(response)
+                server.update_accounts(
+                    {"codex": registry_b},
+                    {
+                        "codex": {
+                            "account_id": "account-b",
+                            "profile_name": "codex",
+                        }
+                    },
+                )
+                with urlopen(f"{base_url}/api/state", timeout=5) as response:
+                    after = json.load(response)
+            finally:
+                server.close()
+
+        self.assertEqual(
+            [account["name"] for account in before["accounts"]],
+            ["account-a"],
+        )
+        self.assertEqual(
+            [account["name"] for account in after["accounts"]],
+            ["account-b"],
+        )
+        self.assertEqual(server.registry, registry_b)
+
+
+class HealthEndpointTests(unittest.TestCase):
+    """验证 /healthz、/readyz 与 /api/state 的健康上报。"""
+
+    def _server(self, health: HealthTracker | None = None, **kwargs) -> DashboardServer:
+        """启动一个只绑定回环随机端口的 Dashboard。"""
+
+        options = {
+            "registries": {},
+            "config": DashboardConfig(port=0),
+            "grok_homes": (),
+            "kimi_homes": (),
+            "dsh_homes": (),
+            "commandcode_homes": (),
+            "claude_homes": (),
+            "health": health,
+        }
+        options.update(kwargs)
+        server = DashboardServer(**options)
+        server.start()
+        return server
+
+    @staticmethod
+    def _get(base_url: str, path: str) -> tuple[int, dict]:
+        """GET 并解析 JSON；出错状态码也解析响应体后返回。"""
+
+        try:
+            with urlopen(f"{base_url}{path}", timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    @staticmethod
+    def _head(base_url: str, path: str) -> tuple[int, bytes]:
+        """HEAD 请求；返回状态码与（应为空的）响应体。"""
+
+        request = Request(f"{base_url}{path}", method="HEAD")
+        try:
+            with urlopen(request, timeout=5) as response:
+                return response.status, response.read()
+        except HTTPError as error:
+            return error.code, error.read()
+
+    def test_healthz_and_readyz_without_tracker(self) -> None:
+        server = self._server()
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            healthz_status, healthz = self._get(base_url, "/healthz")
+            readyz_status, readyz = self._get(base_url, "/readyz")
+            head_status, head_body = self._head(base_url, "/healthz")
+        finally:
+            server.close()
+
+        self.assertEqual(healthz_status, 200)
+        self.assertEqual(healthz["status"], "ok")
+        self.assertIn("updated_at", healthz)
+        self.assertEqual(readyz_status, 200)
+        self.assertEqual(readyz["status"], "ok")
+        self.assertEqual(head_status, 200)
+        self.assertEqual(head_body, b"")
+
+    def test_healthz_ok_when_main_loop_ok(self) -> None:
+        tracker = HealthTracker()
+        tracker.register("main-loop", "主循环", critical=True)
+        tracker.record_success("main-loop")
+        server = self._server(health=tracker)
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/healthz")
+            head_status, head_body = self._head(base_url, "/healthz")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertGreaterEqual(payload["uptime_seconds"], 0)
+        self.assertIn("updated_at", payload)
+        self.assertEqual(head_status, 200)
+        self.assertEqual(head_body, b"")
+
+    def test_healthz_stuck_when_main_loop_starting(self) -> None:
+        """主循环登记后从未成功（starting）视为卡死。"""
+
+        tracker = HealthTracker()
+        tracker.register("main-loop", "主循环", critical=True)
+        server = self._server(health=tracker)
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/healthz")
+            head_status, _ = self._head(base_url, "/healthz")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "stuck")
+        self.assertEqual(payload["main_loop"], "starting")
+        self.assertEqual(head_status, 503)
+
+    def test_healthz_stuck_when_main_loop_degraded(self) -> None:
+        """主循环数据过期（degraded）同样视为卡死。"""
+
+        tracker = HealthTracker()
+        tracker.register("main-loop", "主循环", critical=True, stale_after=30)
+        tracker.record_success("main-loop", now=time.time() - 120)
+        server = self._server(health=tracker)
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/healthz")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "stuck")
+        self.assertEqual(payload["main_loop"], "degraded")
+
+    def test_readyz_ignores_non_critical_provider_failure(self) -> None:
+        """非关键 provider failed 只拉低 overall，不影响就绪判定。"""
+
+        tracker = HealthTracker()
+        tracker.register("main-loop", "主循环", critical=True)
+        tracker.record_success("main-loop")
+        tracker.record_failure("provider:grok", RuntimeError("模拟 Grok 读取失败"))
+        server = self._server(health=tracker)
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/readyz")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["overall"], "failed")
+        grok = next(
+            item for item in payload["components"] if item["key"] == "provider:grok"
+        )
+        self.assertEqual(grok["status"], "failed")
+        self.assertFalse(grok["critical"])
+        self.assertIn("模拟 Grok 读取失败", grok["last_error"])
+
+    def test_readyz_not_ready_when_critical_failed(self) -> None:
+        tracker = HealthTracker()
+        tracker.register("main-loop", "主循环", critical=True)
+        tracker.record_failure("main-loop", RuntimeError("模拟主循环崩溃"))
+        server = self._server(health=tracker)
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/readyz")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "not_ready")
+        self.assertEqual(payload["overall"], "failed")
+        main_loop = next(
+            item for item in payload["components"] if item["key"] == "main-loop"
+        )
+        self.assertTrue(main_loop["critical"])
+        self.assertEqual(main_loop["status"], "failed")
+
+    def test_state_includes_health_snapshot(self) -> None:
+        tracker = HealthTracker()
+        tracker.register("main-loop", "主循环", critical=True)
+        tracker.record_success("main-loop")
+        server = self._server(health=tracker)
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/api/state")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 200)
+        self.assertIn("health", payload)
+        self.assertEqual(payload["health"]["overall"], "ok")
+        self.assertIn("uptime_seconds", payload["health"])
+        keys = {item["key"] for item in payload["health"]["components"]}
+        self.assertIn("main-loop", keys)
+
+    def test_state_health_field_none_without_tracker(self) -> None:
+        server = self._server()
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            status, payload = self._get(base_url, "/api/state")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(payload.get("health"))
+
+    def test_provider_failure_recorded_and_state_still_200(self) -> None:
+        """provider 读取抛错时记为 failed，且 /api/state 本身仍返回 200。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = root / ".grok"
+            grok_home.mkdir()
+            tracker = HealthTracker()
+            server = self._server(health=tracker, grok_homes=(grok_home,))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with (
+                    mock.patch(
+                        "token_monitor.dashboard.read_grok_account",
+                        side_effect=RuntimeError("模拟 Grok 目录损坏"),
+                    ),
+                    self.assertLogs("token_monitor.dashboard", level="ERROR"),
+                ):
+                    status, payload = self._get(base_url, "/api/state")
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(tracker.component_status("provider:grok"), "failed")
+        products = [item.get("product") for item in payload["accounts"]]
+        self.assertNotIn("grok", products)
+
+    def test_housekeeping_refresh_failure_degrades_state(self) -> None:
+        """housekeeping.refresh 抛错时 /api/state 仍 200，磁盘摘要降级为不可用。"""
+
+        class FailingHousekeeping:
+            def latest(self) -> dict:
+                return {"observed_at": None}
+
+            def refresh(self) -> dict:
+                raise OSError("模拟磁盘不可读")
+
+        server = self._server(housekeeping=FailingHousekeeping())
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            with self.assertLogs("token_monitor.dashboard", level="ERROR"):
+                status, payload = self._get(base_url, "/api/state")
+        finally:
+            server.close()
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["housekeeping"]["available"])
+
+    def test_page_contains_health_indicator(self) -> None:
+        self.assertIn('id="health-indicator"', _DASHBOARD_HTML)
+        self.assertIn('id="health-detail"', _DASHBOARD_HTML)
+        self.assertIn("renderHealth", _DASHBOARD_HTML)
+
+
+class HistoryDashboardTests(unittest.TestCase):
+    """验证历史数据管理的查询、保留期配置与清理端点。
+
+    中文注释:retention.py 依赖的 store 方法(如 registry.count_sessions)
+    由并行开发实现,这里用轻量 fake manager 验证端点行为,保留期控制
+    使用真实的 RetentionController(只依赖 settings.json)。
+    """
+
+    class _FakeHistoryManager:
+        """实现 HistoryDataManager 的鸭子类型接口。"""
+
+        def __init__(self) -> None:
+            self._last_cleanup: dict | None = None
+            self.fail_cleanup = False
+
+        @property
+        def retention_days(self) -> dict[str, float]:
+            return {"usage_days": 90.0, "session_days": 30.0, "alert_days": 14.0}
+
+        @property
+        def last_cleanup(self) -> dict | None:
+            return self._last_cleanup
+
+        def db_sizes(self) -> list[dict]:
+            return [{"key": "usage-index", "label": "用量索引", "bytes": 2048}]
+
+        def preview(self, now: float | None = None) -> dict:
+            return {
+                "observed_at": time.time(),
+                "kinds": [
+                    {
+                        "kind": "usage",
+                        "cutoff": 1000.0,
+                        "rows_to_delete": 3,
+                        "total_rows": 10,
+                        "db_bytes": 2048,
+                        "estimated_free_bytes": 600,
+                    }
+                ],
+                "dbs": self.db_sizes(),
+                "estimated_free_bytes": 600,
+            }
+
+        def cleanup(self, now: float | None = None) -> dict:
+            result: dict = {
+                "observed_at": time.time(),
+                "deleted": {"usage": 3, "sessions": 1, "alerts": 0},
+                "freed_bytes": 700,
+                "vacuumed": ["usage"],
+                "vacuum_skipped": [],
+                "errors": [],
+            }
+            if self.fail_cleanup:
+                result["errors"] = ["用量索引删除失败: 模拟磁盘错误"]
+                self._last_cleanup = result
+                raise RetentionError("用量索引删除失败: 模拟磁盘错误")
+            self._last_cleanup = result
+            return result
+
+    def _server(
+        self,
+        root: Path,
+        *,
+        manager: "_FakeHistoryManager | None" = None,
+        with_controller: bool = True,
+    ) -> tuple[DashboardServer, "_FakeHistoryManager | None", RetentionController | None]:
+        """启动带 fake manager 和真实保留期控制器的回环 Dashboard。"""
+
+        controller = (
+            RetentionController(
+                state_dir=root / "state",
+                cli_values={"usage_days": 90.0, "session_days": 30.0},
+            )
+            if with_controller
+            else None
+        )
+        server = DashboardServer(
+            registries={},
+            config=DashboardConfig(port=0),
+            grok_homes=(),
+            kimi_homes=(),
+            dsh_homes=(),
+            commandcode_homes=(),
+            claude_homes=(),
+            history=manager,
+            retention=controller,
+        )
+        server.start()
+        return server, manager, controller
+
+    @staticmethod
+    def _get(base_url: str, path: str) -> tuple[int, dict]:
+        try:
+            with urlopen(f"{base_url}{path}", timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    @staticmethod
+    def _post(base_url: str, path: str, payload: object) -> tuple[int, dict]:
+        request = Request(
+            f"{base_url}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    def test_get_without_manager_reports_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=None)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._get(base_url, "/api/history")
+                head_request = Request(f"{base_url}/api/history", method="HEAD")
+                with urlopen(head_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b"")
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["available"])
+        self.assertIn("updated_at", payload)
+
+    def test_get_returns_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manager = self._FakeHistoryManager()
+            server, _, _ = self._server(root, manager=manager)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._get(base_url, "/api/history")
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["available"])
+        self.assertEqual(
+            payload["retention_days"],
+            {"usage_days": 90.0, "session_days": 30.0, "alert_days": 14.0},
+        )
+        self.assertEqual(payload["dbs"][0]["key"], "usage-index")
+        self.assertIsNone(payload["last_cleanup"])
+        self.assertNotIn("preview", payload)
+        retention = payload["retention"]
+        self.assertEqual(retention["usage_days"]["value"], 90.0)
+        self.assertEqual(retention["usage_days"]["source"], "cli")
+        self.assertIsNone(retention["usage_days"]["override"])
+        self.assertEqual(retention["session_days"]["source"], "cli")
+
+    def test_get_with_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._get(base_url, "/api/history?preview=1")
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        preview = payload["preview"]
+        self.assertEqual(preview["kinds"][0]["kind"], "usage")
+        self.assertEqual(preview["kinds"][0]["rows_to_delete"], 3)
+        self.assertEqual(preview["estimated_free_bytes"], 600)
+
+    def test_cleanup_requires_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url, "/api/history", {"action": "cleanup"}
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_history_action")
+
+    def test_cleanup_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manager = self._FakeHistoryManager()
+            server, _, _ = self._server(root, manager=manager)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "cleanup", "confirm": True},
+                )
+                get_status, state = self._get(base_url, "/api/history")
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"]["deleted"]["usage"], 3)
+        self.assertEqual(payload["result"]["freed_bytes"], 700)
+        self.assertEqual(get_status, 200)
+        self.assertIsNotNone(state["last_cleanup"])
+        self.assertEqual(state["last_cleanup"]["deleted"]["sessions"], 1)
+
+    def test_cleanup_partial_failure_returns_500(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manager = self._FakeHistoryManager()
+            manager.fail_cleanup = True
+            server, _, _ = self._server(root, manager=manager)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "cleanup", "confirm": True},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["error"], "history_cleanup_failed")
+        self.assertIn("模拟磁盘错误", payload["message"])
+        self.assertEqual(payload["result"]["deleted"]["usage"], 3)
+        self.assertEqual(payload["result"]["errors"], ["用量索引删除失败: 模拟磁盘错误"])
+
+    def test_set_retention_persists_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "set-retention", "usage_days": 45, "session_days": 10},
+                )
+            finally:
+                server.close()
+            reloaded = RetentionController(
+                state_dir=root / "state",
+                cli_values={"usage_days": 90.0, "session_days": 30.0},
+            ).effective()
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["retention"]["usage_days"]["value"], 45)
+        self.assertEqual(payload["retention"]["usage_days"]["source"], "web")
+        self.assertEqual(payload["retention"]["session_days"]["value"], 10)
+        # 中文注释:配置已落盘,新控制器能读到同样的覆盖。
+        self.assertEqual(reloaded, {"usage_days": 45.0, "session_days": 10.0})
+
+    def test_set_retention_rejects_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                missing_status, missing = self._post(
+                    base_url, "/api/history", {"action": "set-retention"}
+                )
+                bad_type_status, bad_type = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "set-retention", "usage_days": "abc"},
+                )
+                bad_range_status, bad_range = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "set-retention", "session_days": -5},
+                )
+            finally:
+                server.close()
+
+        for status in (missing_status, bad_type_status, bad_range_status):
+            self.assertEqual(status, 400)
+        for payload in (missing, bad_type, bad_range):
+            self.assertEqual(payload["error"], "invalid_retention")
+
+    def test_reset_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "set-retention", "usage_days": 45},
+                )
+                no_confirm_status, no_confirm = self._post(
+                    base_url, "/api/history", {"action": "reset-retention"}
+                )
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "reset-retention", "confirm": True},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(no_confirm_status, 400)
+        self.assertEqual(no_confirm["error"], "invalid_history_action")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["retention"]["usage_days"]["value"], 90.0)
+        self.assertEqual(payload["retention"]["usage_days"]["source"], "cli")
+
+    def test_set_retention_without_controller_returns_503(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(
+                root,
+                manager=self._FakeHistoryManager(),
+                with_controller=False,
+            )
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "set-retention", "usage_days": 45},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "retention_unavailable")
+
+    def test_post_without_manager_returns_503(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=None)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "cleanup", "confirm": True},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "history_unavailable")
+
+    def test_unknown_action_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url, "/api/history", {"action": "explode"}
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_history_action")
+
+    def test_settings_page_contains_history_section(self) -> None:
+        self.assertIn('id="history-settings"', _SETTINGS_HTML)
+        self.assertIn('id="history-content"', _SETTINGS_HTML)
+        self.assertIn('id="history-preview-content"', _SETTINGS_HTML)
+        self.assertIn("refreshHistory", _SETTINGS_HTML)
+        self.assertIn("/api/history", _SETTINGS_HTML)
+        # 主页不出现历史数据设置区块。
+        self.assertNotIn('id="history-settings"', _DASHBOARD_HTML)
+        self.assertNotIn("/api/history", _DASHBOARD_HTML)
 
 
 if __name__ == "__main__":

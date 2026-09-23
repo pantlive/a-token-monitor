@@ -46,6 +46,7 @@ from .claude import (
     resolve_claude_homes,
     resolve_sidechain_policy,
 )
+from .health import sanitize_error
 from .kimi import (
     KimiSessionInfo,
     kimi_wire_session_id,
@@ -55,7 +56,6 @@ from .kimi import (
     resolve_kimi_homes,
 )
 from .registry import MultiSessionRegistry
-
 
 _TOKEN_FIELDS = (
     "input_tokens",
@@ -787,6 +787,46 @@ class _UsageIndexStore:
         except (OSError, sqlite3.DatabaseError):
             # 中文注释：索引损坏时不影响 Dashboard 继续使用内存增量解析。
             raise
+
+    def count_deltas(self) -> int:
+        """返回用量增量明细的总行数，供历史数据预览使用。"""
+
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT COUNT(*) FROM usage_delta").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def count_deltas_before(self, cutoff: float) -> int:
+        """返回时间早于 ``cutoff`` 的用量增量行数。"""
+
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM usage_delta WHERE timestamp < ?",
+                (float(cutoff),),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def delete_deltas_before(self, cutoff: float) -> int:
+        """删除时间早于 ``cutoff`` 的用量增量，返回删除行数。
+
+        中文注释：只删 ``usage_delta`` 明细，绝不动 ``usage_file_state`` 里的
+        增量读取检查点，否则已解析文件会被当作新文件全量重读。
+        """
+
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                "DELETE FROM usage_delta WHERE timestamp < ?",
+                (float(cutoff),),
+            )
+        return int(cursor.rowcount or 0)
+
+    def vacuum(self) -> None:
+        """删除历史行后压缩索引文件;数据库繁忙时把错误抛给上层处理。"""
+
+        with closing(self._connect()) as connection:
+            connection.execute("VACUUM")
+
+    def close(self) -> None:
+        """本类只使用短连接，没有需要释放的持久资源;为调用方统一接口保留。"""
 
     def load(self, path: Path) -> _CachedFile | None:
         """读取一个文件的持久化解析状态；损坏记录按未缓存处理。"""
@@ -1927,6 +1967,8 @@ class UsageAggregator:
         self._index_cursor = 0
         self._deduplicated_files = 0
         self._deduplicated_bytes = 0
+        self._last_indexed_at: float | None = None
+        self._last_index_error: str | None = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
@@ -1978,7 +2020,7 @@ class UsageAggregator:
                     < self.refresh_interval
                 ):
                     return cached_snapshot
-            return self._index_once(registries, metadata_by_profile, now, scope)
+            return self._run_index_once(registries, metadata_by_profile, now, scope)
 
     def close(self) -> None:
         """停止后台索引线程。"""
@@ -1988,6 +2030,56 @@ class UsageAggregator:
         self._worker = None
         if worker is not None and worker.is_alive():
             worker.join(timeout=2)
+
+    def update_homes(
+        self,
+        *,
+        grok_homes: Sequence[Path] | None = None,
+        kimi_homes: Sequence[Path] | None = None,
+        dsh_homes: Sequence[Path] | None = None,
+        claude_homes: Sequence[Path] | None = None,
+    ) -> None:
+        """热更新各 provider 的扫描目录；None 保持不变，显式元组（含空）替换。
+
+        只替换实例属性，下一轮 ``_index_once``/``_build_sources`` 自动按新目录
+        建源；被移除目录的内存缓存和索引行由 ``_remove_stale_cache`` 和
+        ``store.prune`` 在下一轮清出，不删除磁盘上的索引文件。
+        """
+
+        with self._lock:
+            if grok_homes is not None:
+                self._grok_homes = resolve_grok_homes(grok_homes)
+                self._grok_sessions = {
+                    home: index
+                    for home, index in self._grok_sessions.items()
+                    if home in self._grok_homes
+                }
+                self._grok_sessions_at = {
+                    home: cached_at
+                    for home, cached_at in self._grok_sessions_at.items()
+                    if home in self._grok_homes
+                }
+            if kimi_homes is not None:
+                self._kimi_homes = resolve_kimi_homes(kimi_homes)
+                self._kimi_sessions = {
+                    home: index
+                    for home, index in self._kimi_sessions.items()
+                    if home in self._kimi_homes
+                }
+                self._kimi_sessions_at = {
+                    home: cached_at
+                    for home, cached_at in self._kimi_sessions_at.items()
+                    if home in self._kimi_homes
+                }
+            if dsh_homes is not None:
+                self._dsh_homes = resolve_dsh_homes(dsh_homes)
+            if claude_homes is not None:
+                self._claude_homes = resolve_claude_homes(claude_homes)
+                self._claude_sidechain_cache = {
+                    home: cached
+                    for home, cached in self._claude_sidechain_cache.items()
+                    if home in self._claude_homes
+                }
 
     def _ensure_worker(self) -> None:
         """启动一次性的后台索引线程。"""
@@ -2011,11 +2103,19 @@ class UsageAggregator:
             with self._lock:
                 job = self._job
                 if job is not None:
-                    snapshot = self._index_once(*job)
-                    indexing = snapshot.get("indexing")
-                    if isinstance(indexing, Mapping):
-                        complete = bool(indexing.get("complete", True))
-                        read_bytes = int(indexing.get("read_bytes_this_refresh") or 0)
+                    try:
+                        snapshot = self._run_index_once(*job)
+                    except Exception:  # noqa: BLE001 - 索引失败不能杀掉后台线程
+                        # 中文注释：错误已由 _run_index_once 记录；下一轮按
+                        # 完整节奏重试，避免异常造成忙等。
+                        complete = True
+                    else:
+                        indexing = snapshot.get("indexing")
+                        if isinstance(indexing, Mapping):
+                            complete = bool(indexing.get("complete", True))
+                            read_bytes = int(
+                                indexing.get("read_bytes_this_refresh") or 0
+                            )
             delay = self._background_delay(complete, read_bytes)
             if self._stop.wait(timeout=delay):
                 return
@@ -2032,6 +2132,34 @@ class UsageAggregator:
             min(1.0, self.read_budget_bytes / self.index_bytes_per_sec),
         )
         return max(minimum_delay, read_bytes / self.index_bytes_per_sec)
+
+    def _run_index_once(
+        self,
+        registries: Mapping[str, MultiSessionRegistry],
+        metadata_by_profile: Mapping[str, Mapping[str, str | None]],
+        now: float | None,
+        scope: tuple[tuple[str, str, str, str], ...] | None = None,
+    ) -> dict[str, Any]:
+        """执行一轮索引并维护健康摘要；异常记录后原样抛出。"""
+
+        try:
+            snapshot = self._index_once(registries, metadata_by_profile, now, scope)
+        except Exception as error:
+            self._last_index_error = sanitize_error(error)
+            raise
+        self._last_indexed_at = time.time()
+        self._last_index_error = None
+        return snapshot
+
+    def index_health(self) -> dict[str, object]:
+        """返回用量索引的健康摘要；未启用后台索引时 worker_alive 为 None。"""
+
+        worker = self._worker
+        return {
+            "last_indexed_at": self._last_indexed_at,
+            "last_error": self._last_index_error,
+            "worker_alive": worker.is_alive() if worker is not None else None,
+        }
 
     def _index_once(
         self,
@@ -2624,7 +2752,7 @@ class UsageAggregator:
 
         metadata_by_profile = account_metadata or {}
         with self._lock:
-            return self._index_once(registries, metadata_by_profile, now)
+            return self._run_index_once(registries, metadata_by_profile, now)
 
     def session_usages(self, paths: Sequence[str]) -> dict[str, SessionUsage]:
         """按 JSONL 路径返回会话的轮数、上下文和累计用量。"""

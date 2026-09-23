@@ -177,6 +177,12 @@ class TrafficAlertStore:
         self._writer_lock = threading.Lock()
         self._last_prune_at = 0.0
 
+    @property
+    def db_path(self) -> Path:
+        """告警历史 SQLite 文件路径，供历史数据管理器统计占用。"""
+
+        return self.database_file
+
     # ---------------------------------------------------------------- 写入
 
     def record(
@@ -184,13 +190,15 @@ class TrafficAlertStore:
         alerts: Sequence[TrafficAlert],
         now: float | None = None,
     ) -> tuple[StoredAlert, ...]:
-        """落盘一批新告警，合并窗口内的重复告警，并顺带执行过期清理。"""
+        """落盘一批新告警，并合并窗口内的重复告警。
+
+        中文注释:过期清理由 HistoryDataManager 按天统一调用 prune 执行,
+        写入路径不再顺带清理,避免偶发的大批量删除拖慢告警落盘。
+        """
 
         observed_at = time.time() if now is None else float(now)
         with self._writer_lock:
             self._ensure_database()
-            if self._prune_due(observed_at):
-                self._prune_locked(observed_at)
             if not alerts:
                 return ()
             stored: list[StoredAlert] = []
@@ -412,6 +420,33 @@ class TrafficAlertStore:
             raise AlertStoreError(f"更新告警已读状态失败: {error}") from error
 
     # ---------------------------------------------------------------- 清理
+
+    def count_all(self) -> int:
+        """返回全部历史告警条数，供历史数据预览使用。"""
+
+        if not self.database_file.exists():
+            return 0
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS total FROM traffic_alerts"
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise AlertStoreError(f"统计告警总数失败: {error}") from error
+        return int(row["total"] or 0) if row is not None else 0
+
+    def vacuum(self) -> None:
+        """先截断 WAL 再压缩告警数据库;数据库忙时抛错由上层跳过。"""
+
+        if not self.database_file.exists():
+            return
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("VACUUM")
+            self._protect_database_files()
+        except sqlite3.Error as error:
+            raise AlertStoreError(f"压缩告警历史数据库失败: {error}") from error
 
     def count_before(self, timestamp: float) -> int:
         """返回早于指定时间的历史告警条数，用于清理预览。"""
