@@ -15,12 +15,18 @@ from unittest import mock
 from token_monitor.accounts import build_account_specs
 from token_monitor.alerts import TrafficAlertStore
 from token_monitor.cli import (
+    _monitor,
     _service_config,
     _session_usage_note,
     build_parser,
     default_state_dir,
     main,
 )
+from token_monitor.retention import (
+    DEFAULT_SESSION_RETENTION_DAYS,
+    DEFAULT_USAGE_RETENTION_DAYS,
+)
+from token_monitor.scan_dirs import ScanDirsConfig, ScanDirsController
 from token_monitor.service import ServiceConfig
 from token_monitor.housekeeping import DEFAULT_TOTAL_WARN_GIB
 from token_monitor.usage import (
@@ -49,6 +55,19 @@ def _sample_alert(observed_at: float | None = None) -> TrafficAlert:
         command="codex",
         cwd="/home/dev/project",
     )
+
+
+def _missing_provider_env(root: Path) -> dict[str, str]:
+    """把所有 provider 的默认目录指向不存在的路径，隔离自动探测。"""
+
+    return {
+        "CODEX_HOME": str(root / "missing-codex"),
+        "GROK_HOME": str(root / "missing-grok"),
+        "KIMI_CODE_HOME": str(root / "missing-kimi"),
+        "DSH_HOME": str(root / "missing-dsh"),
+        "COMMANDCODE_HOME": str(root / "missing-commandcode"),
+        "CLAUDE_CONFIG_DIR": str(root / "missing-claude"),
+    }
 
 
 class CliTests(unittest.TestCase):
@@ -211,6 +230,74 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parser.parse_args(["daemon", "--budget-usd", invalid])
 
+    def test_parser_accepts_retention_days_options(self) -> None:
+        """daemon 和 service install 应接受用量与会话历史保留天数参数。"""
+
+        parser = build_parser()
+        daemon_args = parser.parse_args(["daemon"])
+        self.assertEqual(
+            daemon_args.usage_retention_days,
+            DEFAULT_USAGE_RETENTION_DAYS,
+        )
+        self.assertEqual(
+            daemon_args.session_retention_days,
+            DEFAULT_SESSION_RETENTION_DAYS,
+        )
+
+        explicit = parser.parse_args(
+            [
+                "daemon",
+                "--usage-retention-days",
+                "45",
+                "--session-retention-days",
+                "7.5",
+            ]
+        )
+        self.assertEqual(explicit.usage_retention_days, 45.0)
+        self.assertEqual(explicit.session_retention_days, 7.5)
+
+        install_args = parser.parse_args(
+            ["service", "install", "--usage-retention-days", "120"]
+        )
+        self.assertEqual(install_args.usage_retention_days, 120.0)
+        self.assertEqual(
+            install_args.session_retention_days,
+            DEFAULT_SESSION_RETENTION_DAYS,
+        )
+
+        for invalid in ("0", "-3"):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(
+                    ["daemon", "--usage-retention-days", invalid]
+                )
+            with self.assertRaises(SystemExit):
+                parser.parse_args(
+                    ["daemon", "--session-retention-days", invalid]
+                )
+
+    def test_service_config_passes_retention_days(self) -> None:
+        """service install 参数中的保留天数应透传到持久化配置。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            args = build_parser().parse_args(
+                [
+                    "--state-dir",
+                    str(root / "state"),
+                    "service",
+                    "install",
+                    "--usage-retention-days",
+                    "45",
+                    "--session-retention-days",
+                    "7.5",
+                ]
+            )
+            with mock.patch.dict(os.environ, _missing_provider_env(root)):
+                config = _service_config(args)
+
+        self.assertEqual(config.usage_retention_days, 45.0)
+        self.assertEqual(config.session_retention_days, 7.5)
+
     def test_default_state_dir_reuses_legacy_directory(self) -> None:
         """改名后旧状态目录存在时应继续使用，避免升级丢失历史。"""
 
@@ -244,7 +331,8 @@ class CliTests(unittest.TestCase):
         """quota 子命令应展示 Kimi /usages 返回的窗口。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            kimi_home = Path(temporary_directory) / ".kimi-code"
+            root = Path(temporary_directory)
+            kimi_home = root / ".kimi-code"
             credentials = kimi_home / "credentials"
             credentials.mkdir(parents=True)
             (credentials / "kimi-code.json").write_text(
@@ -266,15 +354,8 @@ class CliTests(unittest.TestCase):
                 raw_limit_ids=("kimi",),
             )
             with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
                 mock.patch("token_monitor.cli._accounts", return_value=()),
-                mock.patch(
-                    "token_monitor.cli.resolve_grok_homes",
-                    return_value=(),
-                ),
-                mock.patch(
-                    "token_monitor.cli.resolve_commandcode_homes",
-                    return_value=(),
-                ),
                 mock.patch(
                     "token_monitor.cli.read_kimi_quota",
                     return_value=snapshot,
@@ -282,7 +363,15 @@ class CliTests(unittest.TestCase):
             ):
                 buffer = io.StringIO()
                 with contextlib.redirect_stdout(buffer):
-                    exit_code = main(["--kimi-home", str(kimi_home), "quota"])
+                    exit_code = main(
+                        [
+                            "--state-dir",
+                            str(root / "state"),
+                            "--kimi-home",
+                            str(kimi_home),
+                            "quota",
+                        ]
+                    )
 
             self.assertEqual(exit_code, 0)
             output = buffer.getvalue()
@@ -295,7 +384,8 @@ class CliTests(unittest.TestCase):
         """Kimi 配额读取失败时应提示但不影响退出码。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            kimi_home = Path(temporary_directory) / ".kimi-code"
+            root = Path(temporary_directory)
+            kimi_home = root / ".kimi-code"
             credentials = kimi_home / "credentials"
             credentials.mkdir(parents=True)
             (credentials / "kimi-code.json").write_text(
@@ -303,15 +393,8 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
                 mock.patch("token_monitor.cli._accounts", return_value=()),
-                mock.patch(
-                    "token_monitor.cli.resolve_grok_homes",
-                    return_value=(),
-                ),
-                mock.patch(
-                    "token_monitor.cli.resolve_commandcode_homes",
-                    return_value=(),
-                ),
                 mock.patch(
                     "token_monitor.cli.read_kimi_quota",
                     return_value=None,
@@ -319,7 +402,15 @@ class CliTests(unittest.TestCase):
             ):
                 buffer = io.StringIO()
                 with contextlib.redirect_stdout(buffer):
-                    exit_code = main(["--kimi-home", str(kimi_home), "quota"])
+                    exit_code = main(
+                        [
+                            "--state-dir",
+                            str(root / "state"),
+                            "--kimi-home",
+                            str(kimi_home),
+                            "quota",
+                        ]
+                    )
 
             self.assertEqual(exit_code, 0)
             self.assertIn("配额暂不可读", buffer.getvalue())
@@ -346,7 +437,8 @@ class CliTests(unittest.TestCase):
         """quota 子命令应展示 Command Code 订阅额度窗口和本月扣费。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            home = Path(temporary_directory) / ".commandcode"
+            root = Path(temporary_directory)
+            home = root / ".commandcode"
             home.mkdir(parents=True)
             (home / "auth.json").write_text(
                 json.dumps(
@@ -380,11 +472,8 @@ class CliTests(unittest.TestCase):
                 },
             )
             with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
                 mock.patch("token_monitor.cli._accounts", return_value=()),
-                mock.patch(
-                    "token_monitor.cli.resolve_grok_homes",
-                    return_value=(),
-                ),
                 mock.patch(
                     "token_monitor.cli.read_commandcode_quota",
                     return_value=snapshot,
@@ -393,7 +482,13 @@ class CliTests(unittest.TestCase):
                 buffer = io.StringIO()
                 with contextlib.redirect_stdout(buffer):
                     exit_code = main(
-                        ["--commandcode-home", str(home), "quota"]
+                        [
+                            "--state-dir",
+                            str(root / "state"),
+                            "--commandcode-home",
+                            str(home),
+                            "quota",
+                        ]
                     )
 
             self.assertEqual(exit_code, 0)
@@ -409,18 +504,16 @@ class CliTests(unittest.TestCase):
         """Command Code 配额读取失败时应提示但不影响退出码。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            home = Path(temporary_directory) / ".commandcode"
+            root = Path(temporary_directory)
+            home = root / ".commandcode"
             home.mkdir(parents=True)
             (home / "auth.json").write_text(
                 json.dumps({"apiKey": "SECRET-API-KEY", "userName": "tester"}),
                 encoding="utf-8",
             )
             with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
                 mock.patch("token_monitor.cli._accounts", return_value=()),
-                mock.patch(
-                    "token_monitor.cli.resolve_grok_homes",
-                    return_value=(),
-                ),
                 mock.patch(
                     "token_monitor.cli.read_commandcode_quota",
                     return_value=None,
@@ -429,7 +522,13 @@ class CliTests(unittest.TestCase):
                 buffer = io.StringIO()
                 with contextlib.redirect_stdout(buffer):
                     exit_code = main(
-                        ["--commandcode-home", str(home), "quota"]
+                        [
+                            "--state-dir",
+                            str(root / "state"),
+                            "--commandcode-home",
+                            str(home),
+                            "quota",
+                        ]
                     )
 
             output = buffer.getvalue()
@@ -757,22 +856,7 @@ class CliTests(unittest.TestCase):
 
             buffer = io.StringIO()
             with (
-                mock.patch(
-                    "token_monitor.cli.resolve_grok_homes",
-                    return_value=(),
-                ),
-                mock.patch(
-                    "token_monitor.cli.resolve_kimi_homes",
-                    return_value=(),
-                ),
-                mock.patch(
-                    "token_monitor.cli.resolve_dsh_homes",
-                    return_value=(),
-                ),
-                mock.patch(
-                    "token_monitor.cli.resolve_commandcode_homes",
-                    return_value=(),
-                ),
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
                 contextlib.redirect_stdout(buffer),
             ):
                 code = main(
@@ -1039,17 +1123,112 @@ class CliTests(unittest.TestCase):
             root = Path(temporary_directory)
             buffer = io.StringIO()
             with (
-                mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "missing")}),
-                mock.patch("token_monitor.cli.resolve_grok_homes", return_value=()),
-                mock.patch("token_monitor.cli.resolve_kimi_homes", return_value=()),
-                mock.patch("token_monitor.cli.resolve_dsh_homes", return_value=()),
-                mock.patch(
-                    "token_monitor.cli.resolve_commandcode_homes",
-                    return_value=(),
-                ),
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
                 contextlib.redirect_stdout(buffer),
             ):
                 code = main(["--state-dir", str(root / "state"), "quota"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("未发现任何账号", buffer.getvalue())
+
+    def test_daemon_monitor_prefers_web_scan_dirs(self) -> None:
+        """daemon 组装监控器时 Web 扫描目录覆盖优先于命令行参数。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state_dir = root / "state"
+            state_dir.mkdir()
+            cli_grok = root / "cli-grok"
+            web_grok = root / "web-grok"
+            ScanDirsConfig(overrides={"grok": (web_grok,)}).save(
+                state_dir / "scan-dirs.json"
+            )
+            args = build_parser().parse_args(
+                [
+                    "--state-dir",
+                    str(state_dir),
+                    "--grok-home",
+                    str(cli_grok),
+                    "daemon",
+                ]
+            )
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                mock.patch(
+                    "token_monitor.cli.MultiAccountMonitor"
+                ) as monitor_class,
+            ):
+                monitor = _monitor(args)
+            kwargs = monitor_class.call_args.kwargs
+
+        self.assertIs(monitor, monitor_class.return_value)
+        self.assertEqual(kwargs["grok_homes"], (web_grok,))
+        self.assertEqual(kwargs["accounts"], ())
+        # 没有覆盖也没有命令行参数的 provider 传 None，保留自动探测。
+        self.assertIsNone(kwargs["kimi_homes"])
+        self.assertIsNone(kwargs["dsh_homes"])
+        self.assertIsNone(kwargs["commandcode_homes"])
+        self.assertIsNone(kwargs["claude_homes"])
+        self.assertIsInstance(
+            kwargs["scan_dirs_controller"],
+            ScanDirsController,
+        )
+
+    def test_daemon_monitor_uses_cli_homes_without_web_override(self) -> None:
+        """没有 Web 覆盖时命令行参数优先于自动探测。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state_dir = root / "state"
+            state_dir.mkdir()
+            cli_grok = root / "cli-grok"
+            cli_grok.mkdir()
+            auto_grok = root / "auto-grok"
+            auto_grok.mkdir()
+            env = _missing_provider_env(root)
+            env["GROK_HOME"] = str(auto_grok)
+            args = build_parser().parse_args(
+                [
+                    "--state-dir",
+                    str(state_dir),
+                    "--grok-home",
+                    str(cli_grok),
+                    "daemon",
+                ]
+            )
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch(
+                    "token_monitor.cli.MultiAccountMonitor"
+                ) as monitor_class,
+            ):
+                _monitor(args)
+            kwargs = monitor_class.call_args.kwargs
+
+        self.assertEqual(kwargs["grok_homes"], (cli_grok,))
+        self.assertIsInstance(
+            kwargs["scan_dirs_controller"],
+            ScanDirsController,
+        )
+
+    def test_one_shot_command_tolerates_corrupt_scan_dirs_config(self) -> None:
+        """scan-dirs.json 损坏时一次性命令降级为命令行/自动探测而不是报错。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state_dir = root / "state"
+            state_dir.mkdir()
+            (state_dir / "scan-dirs.json").write_text(
+                "{ 这不是合法 JSON",
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                mock.patch("token_monitor.cli._accounts", return_value=()),
+                contextlib.redirect_stdout(buffer),
+            ):
+                code = main(["--state-dir", str(state_dir), "quota"])
 
         self.assertEqual(code, 2)
         self.assertIn("未发现任何账号", buffer.getvalue())

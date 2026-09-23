@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from token_monitor.retention import (
+    DEFAULT_SESSION_RETENTION_DAYS,
+    DEFAULT_USAGE_RETENTION_DAYS,
+)
+from token_monitor.scan_dirs import ScanDirsConfig, ScanDirsError
 from token_monitor.service import (
     LEGACY_SERVICE_NAME,
     SERVICE_NAME,
@@ -221,6 +227,92 @@ class ServiceTests(unittest.TestCase):
                     budget_usd=0,
                 )
 
+    def test_config_round_trip_with_retention_days(self) -> None:
+        """用量与会话历史保留天数应随服务配置完整往返。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = ServiceConfig(
+                state_dir=root / "state",
+                codex_homes=(root / ".codex",),
+                session_root=None,
+                verbose=False,
+                codex_path=str(root / "bin" / "codex"),
+                scan_interval=2.0,
+                reconcile_interval=30.0,
+                quota_interval=300.0,
+                dashboard=False,
+                dashboard_host="127.0.0.1",
+                dashboard_port=8765,
+                grok_homes=(),
+                usage_retention_days=45.0,
+                session_retention_days=7.5,
+            )
+
+            config.save()
+            loaded = ServiceConfig.load(config.config_path)
+
+            self.assertEqual(loaded, config)
+            self.assertEqual(loaded.usage_retention_days, 45.0)
+            self.assertEqual(loaded.session_retention_days, 7.5)
+
+    def test_legacy_config_without_retention_days_loads_defaults(self) -> None:
+        """缺少保留天数字段的旧配置应加载为默认保留天数。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = self._config(root)
+            config.save()
+            payload = json.loads(config.config_path.read_text(encoding="utf-8"))
+            payload.pop("usage_retention_days", None)
+            payload.pop("session_retention_days", None)
+            config.config_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            loaded = ServiceConfig.load(config.config_path)
+
+            self.assertEqual(
+                loaded.usage_retention_days,
+                DEFAULT_USAGE_RETENTION_DAYS,
+            )
+            self.assertEqual(
+                loaded.session_retention_days,
+                DEFAULT_SESSION_RETENTION_DAYS,
+            )
+
+    def test_retention_days_must_be_valid(self) -> None:
+        """保留天数为 0、负数或布尔值时应拒绝配置。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for field, value in (
+                ("usage_retention_days", 0),
+                ("usage_retention_days", -3.0),
+                ("usage_retention_days", True),
+                ("session_retention_days", 0),
+                ("session_retention_days", -3.0),
+                ("session_retention_days", True),
+            ):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        ServiceConfig(
+                            state_dir=root / "state",
+                            codex_homes=(root / ".codex",),
+                            session_root=None,
+                            verbose=False,
+                            codex_path=str(root / "bin" / "codex"),
+                            scan_interval=2.0,
+                            reconcile_interval=30.0,
+                            quota_interval=300.0,
+                            dashboard=False,
+                            dashboard_host="127.0.0.1",
+                            dashboard_port=8765,
+                            grok_homes=(),
+                            **{field: value},
+                        )
+
     def test_invalid_schema_is_rejected(self) -> None:
         """配置版本不匹配时必须拒绝猜测性启动。"""
 
@@ -413,13 +505,100 @@ class ServiceTests(unittest.TestCase):
 
             config.save()
             loaded = ServiceConfig.load(config.config_path)
-            monitor = loaded.build_monitor()
-            registries = dict(monitor.registries)
-            monitor.close()
+            # 中文注释：codex_homes 为空表示「未配置」，build_monitor 会退回
+            # 自动探测；把 CODEX_HOME 指向不存在的路径以保持测试隔离。
+            with patch.dict(os.environ, {"CODEX_HOME": str(root / "missing")}):
+                monitor = loaded.build_monitor()
+                try:
+                    registries = dict(monitor.registries)
+                finally:
+                    monitor.close()
+                built_accounts = config.build_monitor().accounts
 
         self.assertEqual(loaded.codex_homes, ())
-        self.assertEqual(config.build_monitor().accounts, ())
+        self.assertEqual(built_accounts, ())
         self.assertEqual(registries, {})
+
+    def test_build_monitor_prefers_web_scan_dirs(self) -> None:
+        """Web 扫描目录覆盖应优先于 service.json 持久化的目录。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            persisted_grok = root / "persisted-grok"
+            web_grok = root / "web-grok"
+            config = ServiceConfig(
+                state_dir=root / "state",
+                codex_homes=(root / ".codex",),
+                session_root=None,
+                verbose=False,
+                codex_path="codex",
+                scan_interval=2.0,
+                reconcile_interval=30.0,
+                quota_interval=300.0,
+                dashboard=False,
+                dashboard_host="127.0.0.1",
+                dashboard_port=8765,
+                grok_homes=(persisted_grok,),
+            )
+            config.save()
+            ScanDirsConfig(overrides={"grok": (web_grok,)}).save(
+                config.state_dir / "scan-dirs.json"
+            )
+
+            monitor = config.build_monitor()
+            try:
+                grok_homes = monitor.grok_homes
+            finally:
+                monitor.close()
+
+        self.assertEqual(grok_homes, (web_grok,))
+
+    def test_build_monitor_auto_detects_when_persisted_homes_empty(self) -> None:
+        """持久化目录为空时应传 None，让监控器保留自动探测而不是禁用 provider。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = root / "auto-grok"
+            grok_home.mkdir()
+            config = ServiceConfig(
+                state_dir=root / "state",
+                codex_homes=(root / ".codex",),
+                session_root=None,
+                verbose=False,
+                codex_path="codex",
+                scan_interval=2.0,
+                reconcile_interval=30.0,
+                quota_interval=300.0,
+                dashboard=False,
+                dashboard_host="127.0.0.1",
+                dashboard_port=8765,
+                grok_homes=(),
+            )
+            config.save()
+
+            with patch.dict(os.environ, {"GROK_HOME": str(grok_home)}):
+                monitor = config.build_monitor()
+                try:
+                    grok_homes = monitor.grok_homes
+                finally:
+                    monitor.close()
+
+        self.assertEqual(grok_homes, (grok_home,))
+
+    def test_build_monitor_rejects_corrupt_scan_dirs_config(self) -> None:
+        """scan-dirs.json 损坏时 build_monitor 必须报错而不是静默忽略。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = self._config(root)
+            config.save()
+            (config.state_dir / "scan-dirs.json").write_text(
+                "{ 这不是合法 JSON",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ScanDirsError):
+                config.build_monitor()
 
     @staticmethod
     def _config(root: Path) -> ServiceConfig:

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .accounts import CodexAccount, build_account_specs
-from .claude import list_claude_active_sessions, read_claude_account, resolve_claude_homes
+from .claude import list_claude_active_sessions, read_claude_account
 from .agents import product_label
 from .housekeeping import (
     DEFAULT_SINGLE_WARN_GIB,
@@ -33,25 +33,21 @@ from .commandcode import (
     list_commandcode_active_sessions,
     read_commandcode_account,
     read_commandcode_quota,
-    resolve_commandcode_homes,
 )
 from .grok import (
     list_grok_active_sessions,
     read_grok_account,
     read_grok_quota,
-    resolve_grok_homes,
 )
 from .dsh import (
     list_dsh_active_sessions,
     read_dsh_account,
     read_dsh_quota,
-    resolve_dsh_homes,
 )
 from .kimi import (
     list_kimi_active_sessions,
     read_kimi_account,
     read_kimi_quota,
-    resolve_kimi_homes,
 )
 from .app_server import AppServerClient, AppServerConfig, AppServerError
 from .discovery import ProcessScanner
@@ -67,6 +63,19 @@ from .models import JobState
 from .registry import MultiSessionRegistry, RegistryError
 from .quota import QuotaSnapshot
 from .quota_fallback import read_jsonl_quota, recent_session_paths
+from .retention import (
+    DEFAULT_SESSION_RETENTION_DAYS,
+    DEFAULT_USAGE_RETENTION_DAYS,
+)
+from .scan_dirs import (
+    EffectiveScanDirs,
+    ProviderDirsState,
+    ScanDirsConfig,
+    ScanDirsController,
+    ScanDirsError,
+    load_effective_scan_dirs,
+    resolve_effective,
+)
 from .service import (
     ServiceConfig,
     ServiceError,
@@ -641,6 +650,26 @@ def _add_daemon_options(parser: argparse.ArgumentParser) -> None:
             f"（默认: {DEFAULT_RETENTION_DAYS:g}）"
         ),
     )
+    parser.add_argument(
+        "--usage-retention-days",
+        type=_positive_float,
+        default=DEFAULT_USAGE_RETENTION_DAYS,
+        help=(
+            "用量索引历史保留天数，超期自动清理"
+            f"（默认: {DEFAULT_USAGE_RETENTION_DAYS:g}；"
+            "可在 Dashboard 设置页「历史数据」在线覆盖）"
+        ),
+    )
+    parser.add_argument(
+        "--session-retention-days",
+        type=_positive_float,
+        default=DEFAULT_SESSION_RETENTION_DAYS,
+        help=(
+            "已结束会话历史保留天数，超期自动清理"
+            f"（默认: {DEFAULT_SESSION_RETENTION_DAYS:g}；"
+            "可在 Dashboard 设置页「历史数据」在线覆盖）"
+        ),
+    )
     _add_upload_threshold_options(parser)
 
 
@@ -786,6 +815,41 @@ def _accounts(args: argparse.Namespace) -> tuple[CodexAccount, ...]:
         state_dir=args.state_dir,
         session_root=getattr(args, "session_root", None),
     )
+
+
+def _cli_scan_homes(args: argparse.Namespace) -> dict[str, Sequence[Path] | None]:
+    """从 CLI 参数收集各 provider 数据目录；未传入时为 None。"""
+
+    return {
+        "codex": getattr(args, "codex_homes", None),
+        "claude": getattr(args, "claude_homes", None),
+        "commandcode": getattr(args, "commandcode_homes", None),
+        "dsh": getattr(args, "dsh_homes", None),
+        "grok": getattr(args, "grok_homes", None),
+        "kimi": getattr(args, "kimi_homes", None),
+    }
+
+
+def _effective_scan_dirs(args: argparse.Namespace) -> EffectiveScanDirs:
+    """解析一次性命令的生效扫描目录（Web 配置 > 命令行参数 > 自动探测）。"""
+
+    cli_homes = _cli_scan_homes(args)
+    try:
+        return load_effective_scan_dirs(args.state_dir, cli_homes)
+    except ScanDirsError as error:
+        # 中文注释：只读命令不应被损坏的 Web 配置阻断，
+        # 记录警告后按命令行参数和自动探测继续。
+        logging.getLogger(__name__).warning(
+            "扫描目录配置损坏，本次忽略 Web 配置: %s",
+            error,
+        )
+        return resolve_effective(ScanDirsConfig(), cli_homes)
+
+
+def _daemon_homes(state: ProviderDirsState) -> tuple[Path, ...] | None:
+    """自动探测来源传 None 交给监控器探测，其余来源按生效列表原样传入。"""
+
+    return None if state.source == "auto" else state.effective
 
 
 def _state_summary(state: JobState) -> dict[str, object]:
@@ -940,6 +1004,7 @@ def _show_quota(args: argparse.Namespace) -> int:
     """主动读取所有配置账号的额度并输出精确窗口字段。"""
 
     accounts = _accounts(args)
+    effective_dirs = _effective_scan_dirs(args)
     results: list[dict[str, object]] = []
     errors: list[dict[str, str]] = []
     snapshots: list[tuple[CodexAccount, QuotaSnapshot]] = []
@@ -962,7 +1027,7 @@ def _show_quota(args: argparse.Namespace) -> int:
         results.append(summary)
         snapshots.append((account, snapshot))
 
-    for grok_home in resolve_grok_homes(getattr(args, "grok_homes", None)):
+    for grok_home in effective_dirs.homes("grok"):
         if not grok_home.is_dir():
             continue
         try:
@@ -987,7 +1052,7 @@ def _show_quota(args: argparse.Namespace) -> int:
         # Kimi 配额走官方 /usages 接口；读取失败时只输出账号与登录状态。
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Grok', grok_home)
-    for kimi_home in resolve_kimi_homes(getattr(args, "kimi_homes", None)):
+    for kimi_home in effective_dirs.homes("kimi"):
         if not kimi_home.is_dir():
             continue
         try:
@@ -1017,7 +1082,7 @@ def _show_quota(args: argparse.Namespace) -> int:
 
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Kimi', kimi_home)
-    for dsh_home in resolve_dsh_homes(getattr(args, "dsh_homes", None)):
+    for dsh_home in effective_dirs.homes("dsh"):
         if not dsh_home.is_dir():
             continue
         try:
@@ -1048,9 +1113,7 @@ def _show_quota(args: argparse.Namespace) -> int:
         # Command Code 订阅额度走官方后台接口；读取失败时只输出账号与登录状态。
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('DeepSeek Harness', dsh_home)
-    for commandcode_home in resolve_commandcode_homes(
-        getattr(args, "commandcode_homes", None)
-    ):
+    for commandcode_home in effective_dirs.homes("commandcode"):
         if not commandcode_home.is_dir():
             continue
         try:
@@ -1238,6 +1301,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
     if args.restore is not None or args.archive or args.clean:
         return _session_housekeeping(args)
     accounts = _accounts(args)
+    effective_dirs = _effective_scan_dirs(args)
     monitor = MultiAccountMonitor(
         accounts=accounts,
         state_dir=args.state_dir,
@@ -1247,9 +1311,11 @@ def _show_sessions(args: argparse.Namespace) -> int:
             session_turn_warn=args.session_turn_warn,
             session_context_warn_tokens=args.session_context_warn_tokens,
         ),
-        kimi_homes=tuple(getattr(args, "kimi_homes", None) or ()),
-        dsh_homes=tuple(getattr(args, "dsh_homes", None) or ()),
-        claude_homes=tuple(getattr(args, "claude_homes", None) or ()),
+        grok_homes=effective_dirs.homes("grok"),
+        kimi_homes=effective_dirs.homes("kimi"),
+        dsh_homes=effective_dirs.homes("dsh"),
+        commandcode_homes=effective_dirs.homes("commandcode"),
+        claude_homes=effective_dirs.homes("claude"),
     )
     try:
         monitor.start()
@@ -1287,7 +1353,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
         for session in account_sessions
     ]
     extra_sessions: list[tuple[str, TrackedSession]] = []
-    for grok_home in resolve_grok_homes(getattr(args, "grok_homes", None)):
+    for grok_home in effective_dirs.homes("grok"):
         if not grok_home.is_dir():
             continue
         try:
@@ -1305,7 +1371,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
                 )
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Grok', grok_home)
-    for kimi_home in resolve_kimi_homes(getattr(args, "kimi_homes", None)):
+    for kimi_home in effective_dirs.homes("kimi"):
         if not kimi_home.is_dir():
             continue
         try:
@@ -1323,7 +1389,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
                 )
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Kimi', kimi_home)
-    for dsh_home in resolve_dsh_homes(getattr(args, "dsh_homes", None)):
+    for dsh_home in effective_dirs.homes("dsh"):
         if not dsh_home.is_dir():
             continue
         try:
@@ -1341,9 +1407,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
                 )
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('DeepSeek Harness', dsh_home)
-    for commandcode_home in resolve_commandcode_homes(
-        getattr(args, "commandcode_homes", None)
-    ):
+    for commandcode_home in effective_dirs.homes("commandcode"):
         if not commandcode_home.is_dir():
             continue
         try:
@@ -1361,7 +1425,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
                 )
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Command Code', commandcode_home)
-    for claude_home in resolve_claude_homes(getattr(args, "claude_homes", None)):
+    for claude_home in effective_dirs.homes("claude"):
         if not claude_home.is_dir():
             continue
         try:
@@ -1433,7 +1497,7 @@ def _enrich_session_summaries(
 
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        claude_homes=resolve_claude_homes(getattr(args, "claude_homes", None)),
+        claude_homes=_effective_scan_dirs(args).homes("claude"),
     )
     try:
         aggregator.refresh_index(
@@ -1681,7 +1745,7 @@ def _show_usage_search(args: argparse.Namespace) -> int:
 
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        claude_homes=resolve_claude_homes(getattr(args, "claude_homes", None)),
+        claude_homes=_effective_scan_dirs(args).homes("claude"),
     )
     since, until = _usage_search_bounds(args)
     search = aggregator.search(
@@ -1772,17 +1836,16 @@ def _housekeeping_targets(args: argparse.Namespace) -> tuple[AuditTarget, ...]:
                 sessions_root=account.home / "sessions",
             )
         )
-    for home in resolve_grok_homes(getattr(args, "grok_homes", None)):
+    effective_dirs = _effective_scan_dirs(args)
+    for home in effective_dirs.homes("grok"):
         targets.append(AuditTarget("Grok", "grok", home))
-    for home in resolve_kimi_homes(getattr(args, "kimi_homes", None)):
+    for home in effective_dirs.homes("kimi"):
         targets.append(AuditTarget("Kimi Code", "kimi", home))
-    for home in resolve_dsh_homes(getattr(args, "dsh_homes", None)):
+    for home in effective_dirs.homes("dsh"):
         targets.append(AuditTarget("DeepSeek Harness", "dsh", home))
-    for home in resolve_commandcode_homes(
-        getattr(args, "commandcode_homes", None)
-    ):
+    for home in effective_dirs.homes("commandcode"):
         targets.append(AuditTarget("Command Code", "command-code", home))
-    for home in resolve_claude_homes(getattr(args, "claude_homes", None)):
+    for home in effective_dirs.homes("claude"):
         targets.append(AuditTarget("Claude Code", "claude", home))
     targets.append(
         AuditTarget("监控状态目录", "state", args.state_dir.expanduser())
@@ -2001,17 +2064,16 @@ def _active_session_paths(
     """返回读取活动会话 JSONL 路径的回调，用于保护正在运行的会话。"""
 
     def collect() -> set[str]:
+        effective_dirs = _effective_scan_dirs(args)
         monitor = MultiAccountMonitor(
             accounts=_accounts(args),
             state_dir=args.state_dir,
             config=MonitorConfig(auto_resume=False),
-            grok_homes=tuple(getattr(args, "grok_homes", None) or ()),
-            kimi_homes=tuple(getattr(args, "kimi_homes", None) or ()),
-            dsh_homes=tuple(getattr(args, "dsh_homes", None) or ()),
-            commandcode_homes=tuple(
-                getattr(args, "commandcode_homes", None) or ()
-            ),
-            claude_homes=tuple(getattr(args, "claude_homes", None) or ()),
+            grok_homes=effective_dirs.homes("grok"),
+            kimi_homes=effective_dirs.homes("kimi"),
+            dsh_homes=effective_dirs.homes("dsh"),
+            commandcode_homes=effective_dirs.homes("commandcode"),
+            claude_homes=effective_dirs.homes("claude"),
         )
         paths: set[str] = set()
         for item in monitor.account_monitors:
@@ -2026,7 +2088,16 @@ def _active_session_paths(
 def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
     """根据 daemon 参数创建多账号监控器。"""
 
-    accounts = _accounts(args)
+    # 中文注释：daemon 的扫描目录按 Web 配置 > 命令行参数 > 自动探测解析；
+    # controller 交给监控器，Dashboard 修改配置后可热重载。
+    controller = ScanDirsController(args.state_dir, _cli_scan_homes(args))
+    effective_dirs = controller.effective()
+    codex_state = effective_dirs.state("codex")
+    accounts = build_account_specs(
+        homes=(None if codex_state.source == "auto" else codex_state.effective),
+        state_dir=args.state_dir,
+        session_root=getattr(args, "session_root", None),
+    )
 
     config = MonitorConfig(
         codex_path=args.codex,
@@ -2043,6 +2114,8 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         upload_window_warn_mb=args.upload_window_warn_mb,
         upload_window_danger_mb=args.upload_window_alert_mb,
         alert_retention_days=args.alert_retention_days,
+        usage_retention_days=args.usage_retention_days,
+        session_retention_days=args.session_retention_days,
         session_turn_warn=args.session_turn_warn,
         session_context_warn_tokens=args.session_context_warn_tokens,
         disk_warn_gb=args.disk_warn_gb,
@@ -2052,11 +2125,12 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         accounts=accounts,
         state_dir=args.state_dir,
         config=config,
-        grok_homes=tuple(getattr(args, "grok_homes", None) or ()),
-        kimi_homes=tuple(getattr(args, "kimi_homes", None) or ()),
-        dsh_homes=tuple(getattr(args, "dsh_homes", None) or ()),
-        commandcode_homes=tuple(getattr(args, "commandcode_homes", None) or ()),
-        claude_homes=tuple(getattr(args, "claude_homes", None) or ()),
+        grok_homes=_daemon_homes(effective_dirs.state("grok")),
+        kimi_homes=_daemon_homes(effective_dirs.state("kimi")),
+        dsh_homes=_daemon_homes(effective_dirs.state("dsh")),
+        commandcode_homes=_daemon_homes(effective_dirs.state("commandcode")),
+        claude_homes=_daemon_homes(effective_dirs.state("claude")),
+        scan_dirs_controller=controller,
     )
 
 
@@ -2089,6 +2163,8 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
         upload_window_warn_mb=args.upload_window_warn_mb,
         upload_window_danger_mb=args.upload_window_alert_mb,
         alert_retention_days=args.alert_retention_days,
+        usage_retention_days=args.usage_retention_days,
+        session_retention_days=args.session_retention_days,
         session_turn_warn=args.session_turn_warn,
         session_context_warn_tokens=args.session_context_warn_tokens,
         disk_warn_gb=args.disk_warn_gb,

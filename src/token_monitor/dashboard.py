@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
@@ -48,6 +48,7 @@ from .grok import (
     read_grok_quota,
     resolve_grok_homes,
 )
+from .health import HealthTracker, sanitize_error
 from .kimi import (
     list_kimi_active_sessions,
     read_kimi_account,
@@ -57,6 +58,8 @@ from .kimi import (
 from .multi_models import TrackedSession, session_view
 from .quota import QuotaSnapshot
 from .registry import MultiSessionRegistry, RegistryError
+from .retention import HistoryDataManager, RetentionController, RetentionError
+from .scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
 from .traffic import TrafficMonitor, TrafficSnapshot, empty_traffic_snapshot
 from .usage import (
     DEFAULT_SEARCH_DAYS,
@@ -72,14 +75,8 @@ _MAX_REQUEST_BYTES = 64 * 1024
 # 中文注释：结束不超过该时间的会话仍显示在会话表里，方便单独归档。
 _RECENT_FINISHED_SECONDS = 24 * 3600.0
 
-_DASHBOARD_HTML = r"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark light">
-  <title>Token Monitor</title>
-  <style>
+# 中文注释：主页与设置页共用的基础样式。
+_BASE_CSS = r"""
     :root {
       color-scheme: dark;
       --bg: #10141c;
@@ -132,7 +129,6 @@ _DASHBOARD_HTML = r"""<!doctype html>
     }
     .sidebar-link:hover, .sidebar-link.active { border-color: var(--line); color: var(--text); background: var(--panel-soft); }
     .sidebar-foot { margin: 24px 10px 0; color: var(--muted); font-size: 12px; }
-    #overview, #accounts, #usage { scroll-margin-top: 24px; }
     header { display: flex; justify-content: space-between; gap: 16px; align-items: end; }
     h1 { margin: 0; font-size: 26px; letter-spacing: .01em; }
     h2 { margin: 0 0 14px; font-size: 17px; }
@@ -203,6 +199,10 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .quota-meta dd { margin: 0; color: var(--text); text-align: right; }
     .panel { margin-top: 24px; padding: 18px; overflow: hidden; }
     .panel-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 19px; }
+    .section-description { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .section-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+    .section-count { padding: 4px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); white-space: nowrap; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 900px; }
     th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -241,19 +241,6 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .usage-models { display: grid; gap: 3px; min-width: 180px; }
     .usage-model { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
     .usage-number { white-space: nowrap; }
-    @media (max-width: 900px) {
-      .app-shell { display: block; }
-      .sidebar { position: static; min-height: 0; margin-bottom: 16px; }
-      .sidebar-brand { padding-bottom: 10px; }
-      .sidebar nav { display: flex; overflow-x: auto; }
-      .sidebar-link { flex: 0 0 auto; white-space: nowrap; }
-      .sidebar-foot { display: none; }
-    }
-    @media (max-width: 760px) {
-      body { padding: 14px; }
-      header { align-items: start; flex-direction: column; }
-      .cards { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
-    }
 
     /* Stitch 运维控制台视觉：用深色 graphite、violet 主色和 cyan 状态色重排信息层级。 */
     :root {
@@ -363,8 +350,16 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .service-state, .live-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-strong); font-size: 12px; }
     .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(52, 211, 153, .1); }
     .status-dot.error { background: var(--red); box-shadow: 0 0 0 4px rgba(251, 113, 133, .1); }
+    .health-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 99px; background: none; color: var(--muted-strong); font-size: 11px; cursor: pointer; }
+    .health-badge .health-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .health-badge.ok { border-color: #1f6f52; color: #6ee7b7; background: var(--green-soft); }
+    .health-badge.degraded { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
+    .health-badge.failed { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .health-badge.starting { color: var(--muted); }
+    .health-detail { margin: -14px 0 20px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted-strong); font-size: 12px; }
+    .health-detail ul { margin: 8px 0 0; padding-left: 18px; }
+    .health-detail li { margin: 4px 0; }
     .sidebar-foot { margin: 0; color: #66798d; font-size: 11px; }
-    #overview, #accounts, #usage, #insights, #traffic { scroll-margin-top: 88px; }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 72px; margin-bottom: 34px; border-bottom: 1px solid var(--line-soft); }
     .breadcrumb { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
     .breadcrumb strong { color: var(--muted-strong); font-weight: 600; }
@@ -383,13 +378,85 @@ _DASHBOARD_HTML = r"""<!doctype html>
     h3 { margin: 0; }
     .hero-description { margin: 8px 0 0; color: var(--muted); }
     .hero-context { display: flex; align-items: center; gap: 10px; padding-bottom: 3px; }
-    .scope-badge { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); font-size: 12px; }
-    .scope-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
     .muted { color: var(--muted); }
     .error { display: none; margin: 0 0 20px; padding: 12px 14px; border: 1px solid #6c2e43; border-radius: 9px; color: #fda4af; background: var(--red-soft); }
+    .card, .panel { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .account-subtitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0 10px; color: var(--muted-strong); font-size: 12px; font-weight: 650; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); }
+    table { width: 100%; min-width: 900px; border-collapse: collapse; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: rgba(255, 255, 255, .018); }
+    th { color: #71859a; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+    td { color: var(--muted-strong); font-size: 12px; }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 99px; font-size: 11px; white-space: nowrap; }
+    .pill.running { color: var(--green); background: var(--green-soft); }
+    .pill.limit_blocked { color: var(--yellow); background: var(--yellow-soft); }
+    .pill.waiting_for_approval { color: var(--blue); background: var(--blue-soft); }
+    .pill.failed, .pill.orphaned, .pill.danger { color: var(--red); background: var(--red-soft); }
+    .pill.warn { color: var(--yellow); background: var(--yellow-soft); }
+    .pill.ok { color: var(--green); background: var(--green-soft); }
+    .pill.other { color: var(--muted); background: var(--panel-soft); }
+    .usage-filter select:focus, .refresh-button:focus-visible, .usage-tab:focus-visible, .sidebar-link:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    .usage-note { margin: 0 0 13px; color: var(--muted); font-size: 11px; }
+    .empty-state { padding: 26px 12px; color: var(--muted); text-align: center; }
+    .empty-state .empty-title { display: block; color: var(--muted-strong); font-weight: 650; }
+    .empty-state .empty-hint { display: block; margin-top: 5px; font-size: 11px; }
+    /* 工具栏与表单控件：统一深色输入框，替换浏览器默认外观。 */
+    .toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px 13px; margin: 0 0 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .field { display: grid; gap: 5px; min-width: 0; }
+    .field-label { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+    .field select, .field input { min-width: 128px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 12px; }
+    .field select { padding-right: 28px; cursor: pointer; }
+    .field input::placeholder { color: #6c8098; }
+    .field.wide select, .field.wide input { min-width: 208px; }
+    .field input[type="date"] { color-scheme: dark; }
+    .field select:focus, .field input:focus { border-color: var(--cyan); outline: 2px solid rgba(34, 211, 238, .35); outline-offset: 1px; }
+    .toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+    .toolbar-note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+    /* 按钮：一个基础样式加少量语义变体，替换此前到处复用的 .refresh-button。 */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+    .btn:hover { border-color: #3d5670; color: var(--text); background: var(--surface-hover); }
+    .btn.primary { border-color: #2a6f86; color: #a5f3fc; background: var(--cyan-soft); }
+    .btn.primary:hover { border-color: var(--cyan); background: #16404f; }
+    .btn.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
+    .btn.warn:hover { border-color: var(--yellow); }
+    .btn.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .btn.danger:hover { border-color: var(--red); }
+    .btn.mini { padding: 6px 10px; font-size: 11px; }
+    .btn[disabled] { opacity: .55; cursor: not-allowed; }
+    .btn:focus-visible, .chip-button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    /* 表格：紧凑两行单元格 + 数字对齐 + 截断长路径。 */
+    table.tight { min-width: 0; }
+    table.tight th, table.tight td { padding: 10px 12px; }
+    table.tight td { font-size: 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .cell-main { color: var(--muted-strong); font-size: 12px; }
+    .cell-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); background: var(--panel); font-size: 11px; white-space: nowrap; }
+    .chip.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
+    .chip.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .chip.ok { border-color: #1f6f52; color: #6ee7b7; background: var(--green-soft); }
+    .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .chip-button { padding: 0; border: 0; color: var(--cyan); background: none; cursor: pointer; font: inherit; font-size: 11px; text-align: left; }
+    .chip-button:hover { text-decoration: underline; }
+    /* 目录与归档卡片。 */
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .mini-card { padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .mini-card-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .mini-card-title { color: var(--text); font-size: 13px; font-weight: 700; }
+    .mini-card-path { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .criteria-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 12px; }
+"""
+
+
+# 中文注释：主页独有的样式（KPI、账号卡片、用量、告警、习惯分析、磁盘管理等）。
+_DASHBOARD_CSS = r"""
+    #overview, #accounts, #usage, #insights, #traffic { scroll-margin-top: 88px; }
+    .scope-badge { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); font-size: 12px; }
+    .scope-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
     .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 13px; margin-bottom: 34px; }
-    .card, .panel, .kpi-card { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-    .kpi-card { position: relative; min-height: 142px; padding: 17px 17px 14px; overflow: hidden; box-shadow: var(--shadow); }
+    .kpi-card { position: relative; min-height: 142px; padding: 17px 17px 14px; overflow: hidden; box-shadow: var(--shadow); border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
     .kpi-card::after { position: absolute; top: 0; right: 20px; left: 20px; height: 2px; background: var(--accent); content: ''; opacity: .82; }
     .kpi-card.accent-violet { --accent: var(--violet); }
     .kpi-card.accent-yellow { --accent: var(--yellow); }
@@ -418,10 +485,6 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .section-block.is-collapsed { padding-bottom: 18px; }
     .section-block.is-collapsed .section-body { display: none; }
     .section-body { margin-top: 2px; }
-    .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 19px; }
-    .section-description { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-    .section-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
-    .section-count { padding: 4px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); white-space: nowrap; }
     .account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 15px; align-items: start; }
     .account-block { padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
     .account-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
@@ -433,7 +496,6 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .account-side { display: grid; justify-items: end; gap: 7px; text-align: right; }
     .plan-badge { padding: 4px 8px; border: 1px solid #345064; border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
     .account-activity { color: var(--muted); font-size: 11px; }
-    .account-subtitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0 10px; color: var(--muted-strong); font-size: 12px; font-weight: 650; }
     .account-block .account-subtitle:first-of-type { margin-top: 17px; }
     .quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 11px; }
     .quota-card { padding: 15px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
@@ -447,25 +509,10 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .quota-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; color: var(--muted); font-size: 11px; }
     .quota-meta dt, .quota-meta dd { margin: 0; }
     .quota-meta dd { color: var(--muted-strong); text-align: right; overflow-wrap: anywhere; }
-    .table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); }
-    table { width: 100%; min-width: 900px; border-collapse: collapse; }
-    th, td { padding: 11px 12px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: rgba(255, 255, 255, .018); }
-    th { color: #71859a; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
-    td { color: var(--muted-strong); font-size: 12px; }
     .session-table table { min-width: 1020px; }
     .session-id { color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
     .cwd, .event, .error-text { max-width: 340px; overflow-wrap: anywhere; }
     td .muted { margin-top: 2px; font-size: 11px; }
-    .pill { display: inline-block; padding: 3px 8px; border-radius: 99px; font-size: 11px; white-space: nowrap; }
-    .pill.running { color: var(--green); background: var(--green-soft); }
-    .pill.limit_blocked { color: var(--yellow); background: var(--yellow-soft); }
-    .pill.waiting_for_approval { color: var(--blue); background: var(--blue-soft); }
-    .pill.failed, .pill.orphaned, .pill.danger { color: var(--red); background: var(--red-soft); }
-    .pill.warn { color: var(--yellow); background: var(--yellow-soft); }
-    .pill.ok { color: var(--green); background: var(--green-soft); }
-    .pill.other { color: var(--muted); background: var(--panel-soft); }
     .traffic-table table { min-width: 1080px; }
     .traffic-remote { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
     .usage-tabs { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 14px; }
@@ -477,12 +524,10 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .usage-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
     .usage-filter { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
     .usage-filter select { min-width: 220px; padding: 8px 30px 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); cursor: pointer; }
-    .usage-filter select:focus, .refresh-button:focus-visible, .usage-tab:focus-visible, .sidebar-link:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
     .usage-summary { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
     .usage-summary-item { padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); }
     .usage-summary-label { color: var(--muted); font-size: 11px; }
     .usage-summary-value { margin-top: 3px; color: var(--text); font-size: 17px; font-weight: 700; }
-    .usage-note { margin: 0 0 13px; color: var(--muted); font-size: 11px; }
     .usage-table table { min-width: 1180px; }
     .usage-models { display: grid; gap: 3px; min-width: 180px; }
     .usage-model { color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
@@ -536,9 +581,6 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .top-project-label { color: var(--muted-strong); font-size: 12px; overflow-wrap: anywhere; }
     .top-project-value { color: var(--text); font-size: 12px; font-weight: 650; white-space: nowrap; }
     .top-project .bar { margin: 6px 0 0; }
-    .empty-state { padding: 26px 12px; color: var(--muted); text-align: center; }
-    .empty-state .empty-title { display: block; color: var(--muted-strong); font-weight: 650; }
-    .empty-state .empty-hint { display: block; margin-top: 5px; font-size: 11px; }
     /* 统计小块：区块顶部的关键数字，避免把结论埋进表格。 */
     .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; margin: 0 0 14px; }
     .stat { padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
@@ -548,55 +590,11 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .stat-value.danger { color: var(--red); }
     .stat-value.ok { color: var(--green); }
     .stat-foot { margin-top: 3px; color: var(--muted); font-size: 11px; }
-    /* 工具栏与表单控件：统一深色输入框，替换浏览器默认外观。 */
-    .toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px 13px; margin: 0 0 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
-    .field { display: grid; gap: 5px; min-width: 0; }
-    .field-label { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
-    .field select, .field input { min-width: 128px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 12px; }
-    .field select { padding-right: 28px; cursor: pointer; }
-    .field input::placeholder { color: #6c8098; }
-    .field.wide select, .field.wide input { min-width: 208px; }
-    .field input[type="date"] { color-scheme: dark; }
-    .field select:focus, .field input:focus { border-color: var(--cyan); outline: 2px solid rgba(34, 211, 238, .35); outline-offset: 1px; }
-    .toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
-    .toolbar-note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
-    /* 按钮：一个基础样式加少量语义变体，替换此前到处复用的 .refresh-button。 */
-    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; transition: border-color .15s ease, background .15s ease, color .15s ease; }
-    .btn:hover { border-color: #3d5670; color: var(--text); background: var(--surface-hover); }
-    .btn.primary { border-color: #2a6f86; color: #a5f3fc; background: var(--cyan-soft); }
-    .btn.primary:hover { border-color: var(--cyan); background: #16404f; }
-    .btn.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
-    .btn.warn:hover { border-color: var(--yellow); }
-    .btn.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
-    .btn.danger:hover { border-color: var(--red); }
-    .btn.mini { padding: 6px 10px; font-size: 11px; }
-    .btn[disabled] { opacity: .55; cursor: not-allowed; }
-    .btn:focus-visible, .chip-button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
     .table-actions { display: flex; justify-content: center; margin-top: 12px; }
-    /* 表格：紧凑两行单元格 + 数字对齐 + 截断长路径。 */
-    table.tight { min-width: 0; }
-    table.tight th, table.tight td { padding: 10px 12px; }
-    table.tight td { font-size: 12px; }
     td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
-    .cell-main { color: var(--muted-strong); font-size: 12px; }
-    .cell-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }
     .truncate { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row-unread td:first-child { box-shadow: inset 2px 0 0 var(--cyan); }
     .row-unread .cell-main { color: var(--text); font-weight: 650; }
-    .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); background: var(--panel); font-size: 11px; white-space: nowrap; }
-    .chip.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
-    .chip.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
-    .chip.ok { border-color: #1f6f52; color: #6ee7b7; background: var(--green-soft); }
-    .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-    .chip-button { padding: 0; border: 0; color: var(--cyan); background: none; cursor: pointer; font: inherit; font-size: 11px; text-align: left; }
-    .chip-button:hover { text-decoration: underline; }
-    /* 目录与归档卡片。 */
-    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-    .mini-card { padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
-    .mini-card-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
-    .mini-card-title { color: var(--text); font-size: 13px; font-weight: 700; }
-    .mini-card-path { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .mini-card-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 13px; }
     .metric-label { color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
     .metric-value { margin-top: 2px; font-size: 14px; font-weight: 700; }
@@ -604,8 +602,13 @@ _DASHBOARD_HTML = r"""<!doctype html>
     .ratio span { display: block; height: 100%; }
     .ratio .ratio-sessions { background: var(--violet); }
     .ratio .ratio-other { background: #2f4a63; }
-    .criteria-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 12px; }
     .action-result { margin: 0 0 12px; }
+"""
+
+
+# 中文注释：两页共用的响应式覆盖；必须放在各页独有样式之后，否则媒体查询里的
+# 覆盖会被后面的同名非媒体规则压回去。
+_RESPONSIVE_CSS = r"""
     @media (max-width: 1100px) {
       main { padding-right: 28px; padding-left: 28px; }
       .sidebar { width: 208px; }
@@ -650,7 +653,29 @@ _DASHBOARD_HTML = r"""<!doctype html>
       .breadcrumb { font-size: 11px; }
       .refresh-button span { display: none; }
     }
-  </style>
+"""
+
+
+# 中文注释：设置页独有的样式；设置子块平级排列，之后可直接追加新的设置项。
+_SETTINGS_CSS = r"""
+    .settings-block { scroll-margin-top: 88px; }
+"""
+
+
+_DASHBOARD_HTML = (
+    r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Token Monitor</title>
+  <style>
+"""
+    + _BASE_CSS
+    + _DASHBOARD_CSS
+    + _RESPONSIVE_CSS
+    + r"""  </style>
 </head>
 <body>
 <div class="app-shell">
@@ -674,6 +699,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
       <a class="sidebar-link" data-nav-target="alert-history" href="#alert-history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/></svg><span>告警历史</span></a>
       <a class="sidebar-link" data-nav-target="usage-search" href="#usage-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 20 20"/></svg><span>用量检索</span></a>
       <a class="sidebar-link" data-nav-target="housekeeping" href="#housekeeping"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span>磁盘与会话管理</span></a>
+      <a class="sidebar-link" href="/settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg><span>设置</span></a>
     </nav>
     <div class="sidebar-bottom">
       <div class="service-state"><span id="service-dot" class="status-dot"></span><span id="service-state">监控服务在线</span></div>
@@ -686,9 +712,12 @@ _DASHBOARD_HTML = r"""<!doctype html>
       <div class="breadcrumb"><span>Token Monitor</span><span class="breadcrumb-separator">/</span><strong>Dashboard</strong></div>
       <div class="topbar-actions">
         <div class="live-indicator"><span class="status-dot"></span><span id="service-sync">等待首次同步</span></div>
+        <button id="health-indicator" class="health-badge" type="button" style="display:none" aria-expanded="false"></button>
         <button id="refresh-button" class="refresh-button" type="button" aria-label="立即刷新状态"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
       </div>
     </header>
+
+    <div id="health-detail" class="health-detail" style="display:none"></div>
 
     <section id="overview" class="page-hero">
       <div>
@@ -877,6 +906,14 @@ _DASHBOARD_HTML = r"""<!doctype html>
     if (seconds === null || seconds === undefined) return '未知';
     return new Date(Number(seconds) * 1000).toLocaleString();
   };
+  const formatRelativeTime = (seconds) => {
+    if (seconds === null || seconds === undefined) return '未知';
+    const delta = Math.max(0, Date.now() / 1000 - Number(seconds));
+    if (delta < 60) return `${Math.floor(delta)} 秒前`;
+    if (delta < 3600) return `${Math.floor(delta / 60)} 分钟前`;
+    if (delta < 86400) return `${(delta / 3600).toFixed(1)} 小时前`;
+    return `${(delta / 86400).toFixed(1)} 天前`;
+  };
   const formatDay = (seconds) => {
     if (seconds === null || seconds === undefined) return '未知';
     const moment = new Date(Number(seconds) * 1000);
@@ -975,6 +1012,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
   let selectedUsageProject = '';
   let latestState = null;
   let latestUsageState = null;
+  let latestHealthState = null;
   let usagePollTimer = 0;
   let latestInsightsState = null;
   let insightsPollTimer = 0;
@@ -2248,6 +2286,61 @@ _DASHBOARD_HTML = r"""<!doctype html>
       });
     });
   };
+  // 运行健康徽标：读取 state.health，可点击展开未正常组件的明细。
+  const healthStatusMeta = {
+    ok: { label: '正常', className: 'ok' },
+    starting: { label: '启动中', className: 'starting' },
+    degraded: { label: '部分降级', className: 'degraded' },
+    failed: { label: '异常', className: 'failed' }
+  };
+  const healthComponentStatusLabel = { ok: '正常', starting: '启动中', degraded: '数据过期', failed: '失败' };
+  const unhealthyComponents = (health) => {
+    const components = health && Array.isArray(health.components) ? health.components : [];
+    return components.filter((component) => component && component.status !== 'ok');
+  };
+  const renderHealthPanel = () => {
+    const panel = document.getElementById('health-detail');
+    if (!panel) return;
+    const unhealthy = unhealthyComponents(latestHealthState);
+    if (!unhealthy.length) {
+      panel.innerHTML = '';
+      panel.style.display = 'none';
+      return;
+    }
+    const items = unhealthy.map((component) => {
+      const statusLabel = healthComponentStatusLabel[component.status] || component.status || '未知';
+      const successAt = component.last_success_at ? `${formatRelativeTime(component.last_success_at)}（${formatTime(component.last_success_at)}）` : '从未成功';
+      const errorNote = component.last_error ? `<div class="cell-sub">${escapeHtml(component.last_error)}</div>` : '';
+      return `<li><strong>${escapeHtml(component.label || component.key)}</strong> · ${escapeHtml(statusLabel)} · 上次成功 ${escapeHtml(successAt)}${errorNote}</li>`;
+    }).join('');
+    panel.innerHTML = `<div>以下组件未处于正常状态：</div><ul>${items}</ul>`;
+  };
+  const renderHealth = (state) => {
+    const badge = document.getElementById('health-indicator');
+    const panel = document.getElementById('health-detail');
+    if (!badge) return;
+    latestHealthState = state && state.health && typeof state.health === 'object' ? state.health : null;
+    if (!latestHealthState || !latestHealthState.overall) {
+      badge.style.display = 'none';
+      badge.setAttribute('aria-expanded', 'false');
+      if (panel) {
+        panel.innerHTML = '';
+        panel.style.display = 'none';
+      }
+      return;
+    }
+    const meta = healthStatusMeta[latestHealthState.overall] || healthStatusMeta.failed;
+    badge.className = `health-badge ${meta.className}`;
+    badge.innerHTML = `<span class="health-dot"></span><span>${escapeHtml(meta.label)}</span>`;
+    badge.style.display = '';
+    badge.title = `运行健康：${meta.label}（点击查看组件明细）`;
+    if (panel && panel.style.display !== 'none') {
+      renderHealthPanel();
+      if (panel.innerHTML) {
+        panel.style.display = 'block';
+      }
+    }
+  };
   const refresh = async () => {
     const refreshButton = document.getElementById('refresh-button');
     if (refreshButton) {
@@ -2276,6 +2369,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
       }
       document.getElementById('service-sync').textContent = `已同步 ${formatTime(state.updated_at)}`;
       document.getElementById('service-state').textContent = '监控服务在线';
+      renderHealth(state);
       document.querySelectorAll('.status-dot').forEach((dot) => dot.classList.remove('error'));
       renderAccounts(state);
       renderTraffic(state);
@@ -2299,6 +2393,21 @@ _DASHBOARD_HTML = r"""<!doctype html>
     }
   };
   document.getElementById('refresh-button')?.addEventListener('click', refresh);
+  document.getElementById('health-indicator')?.addEventListener('click', () => {
+    const badge = document.getElementById('health-indicator');
+    const panel = document.getElementById('health-detail');
+    if (!badge || !panel) return;
+    const expanded = panel.style.display !== 'none';
+    if (expanded) {
+      panel.style.display = 'none';
+      badge.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    renderHealthPanel();
+    const visible = Boolean(panel.innerHTML);
+    panel.style.display = visible ? 'block' : 'none';
+    badge.setAttribute('aria-expanded', String(visible));
+  });
   document.getElementById('usage-load-button')?.addEventListener('click', refreshUsage);
   document.getElementById('insights-load-button')?.addEventListener('click', refreshInsights);
   document.getElementById('alert-history-load-button')?.addEventListener('click', () => {
@@ -2391,6 +2500,382 @@ _DASHBOARD_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+)
+
+
+# 中文注释：独立设置页与主页共用 _BASE_CSS / _RESPONSIVE_CSS，只追加设置页独有样式；
+# 设置子块（如扫描目录）平级放在 #settings-body 内，之后可直接追加新的设置项。
+_SETTINGS_HTML = (
+    r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>设置 - Token Monitor</title>
+  <style>
+"""
+    + _BASE_CSS
+    + _SETTINGS_CSS
+    + _RESPONSIVE_CSS
+    + r"""  </style>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="设置导航">
+    <div class="sidebar-brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5h10v15H7z"/><path d="M10 8h4M10 12h4M10 16h2"/></svg>
+      </div>
+      <div><div class="brand-name">Token <span>Monitor</span></div><small>本地 code agent 控制台</small></div>
+    </div>
+    <div class="sidebar-label">工作台</div>
+    <nav>
+      <a class="sidebar-link" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12H4"/><path d="M11 5l-7 7 7 7"/></svg><span>返回 Dashboard</span></a>
+    </nav>
+    <div class="sidebar-label">设置项</div>
+    <nav>
+      <a class="sidebar-link active" href="#scan-dirs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg><span>扫描目录</span></a>
+      <a class="sidebar-link" href="#history-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/></svg><span>历史数据</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-foot">修改立即生效 · 只记录元数据</div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div class="breadcrumb"><span>Token Monitor</span><span class="breadcrumb-separator">/</span><strong>设置</strong></div>
+      <div class="topbar-actions">
+        <button id="scan-dirs-refresh-button" class="refresh-button" type="button" aria-label="刷新扫描目录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
+      </div>
+    </header>
+
+    <section class="page-hero">
+      <div>
+        <div class="eyebrow">Settings</div>
+        <h1>设置</h1>
+        <p class="hero-description">Dashboard 的在线设置项。当前包含扫描目录管理和历史数据管理；之后的设置项会以平级子块追加到本页。</p>
+      </div>
+    </section>
+
+    <div id="error" class="error" role="alert"></div>
+
+    <div id="settings-body">
+      <section id="scan-dirs" class="panel settings-block">
+        <div class="panel-heading">
+          <div><div class="section-kicker">Scan directories</div><h2>扫描目录</h2><p class="section-description">管理各 code agent 的数据扫描目录。优先级：Web 配置 &gt; 命令行参数 &gt; 自动探测；Web 配置保存在状态目录的 scan-dirs.json，重启后仍然生效。新增目录必须已存在、可读且位于当前用户主目录之内，修改后立即生效并触发账号热重载。命令行参数可用卡片上标注的选项覆盖单个 provider，Web 配置则对所有 provider 生效。</p></div>
+          <div class="section-meta"><span class="section-count" id="scan-dirs-count">等待加载</span></div>
+        </div>
+        <div id="scan-dirs-content"><div class="empty-state"><span class="empty-title">正在读取扫描目录…</span></div></div>
+      </section>
+      <section id="history-settings" class="panel settings-block">
+        <div class="panel-heading">
+          <div><div class="section-kicker">History data</div><h2>历史数据</h2><p class="section-description">管理用量索引、会话历史和告警历史的保留期与手动清理。保留天数优先级：Web 配置 &gt; 命令行参数 &gt; 默认值；告警保留天数只读展示，不可在线修改。清理只删除过期的历史行：活动会话和额度恢复记录始终保留，删除后对数据库做压缩。「预计释放」为按行数比例的估算值。</p></div>
+          <div class="section-meta"><span class="section-count" id="history-count">等待加载</span></div>
+        </div>
+        <div id="history-content"><div class="empty-state"><span class="empty-title">正在读取历史数据状态…</span></div></div>
+        <div id="history-preview-content"></div>
+        <div id="history-result"></div>
+      </section>
+    </div>
+  </main>
+</div>
+<script>
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+  const formatTime = (seconds) => {
+    if (seconds === null || seconds === undefined) return '未知';
+    return new Date(Number(seconds) * 1000).toLocaleString();
+  };
+  const formatDataSize = (value) => {
+    const amount = Math.max(0, Number(value || 0));
+    if (amount < 1024) return `${Math.round(amount)} B`;
+    if (amount < 1024 * 1024) return `${(amount / 1024).toFixed(amount >= 10240 ? 0 : 1)} KiB`;
+    if (amount < 1024 * 1024 * 1024) return `${(amount / 1024 / 1024).toFixed(amount >= 10 * 1024 * 1024 ? 1 : 2)} MiB`;
+    return `${(amount / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+  };
+  // 扫描目录：展示每个 provider 的生效目录，支持在线添加、移除和恢复默认。
+  const scanDirsSourceLabel = (source) => ({ web: 'Web 配置', cli: '命令行', auto: '自动探测' })[source] || source || '未知';
+  const scanDirsSourceClass = (source) => source === 'web' ? 'ok' : source === 'cli' ? 'warn' : 'other';
+  const renderScanDirs = (payload) => {
+    const container = document.getElementById('scan-dirs-content');
+    const countLabel = document.getElementById('scan-dirs-count');
+    if (!container) return;
+    if (!payload || payload.available === false) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">该运行模式不支持在线管理扫描目录</span><span class="empty-hint">请以 daemon 或 service 模式运行。</span></div>';
+      if (countLabel) countLabel.textContent = '不可用';
+      return;
+    }
+    const providers = Array.isArray(payload.providers) ? payload.providers : [];
+    const dirCount = providers.reduce((total, provider) => total + (Array.isArray(provider.directories) ? provider.directories.length : 0), 0);
+    if (countLabel) countLabel.textContent = `${providers.length} 个来源 · ${dirCount} 个目录`;
+    const cards = providers.map((provider) => {
+      const directories = Array.isArray(provider.directories) ? provider.directories : [];
+      const rows = directories.map((directory) => {
+        const statusPill = !directory.ok
+          ? '<span class="pill danger">不可读或不存在</span>'
+          : directory.structure_ok
+            ? '<span class="pill ok">正常</span>'
+            : '<span class="pill warn">结构存疑</span>';
+        const notes = [...(directory.errors || []), ...(directory.warnings || [])];
+        const note = notes.length ? `<div class="cell-sub">${notes.map(escapeHtml).join('；')}</div>` : '';
+        return `<tr>
+          <td><span class="mono">${escapeHtml(directory.path)}</span>${note}</td>
+          <td>${statusPill}</td>
+          <td><button class="btn mini danger" type="button" data-scan-dirs-remove="${escapeHtml(provider.key)}" data-scan-dirs-path="${escapeHtml(directory.path)}">移除</button></td>
+        </tr>`;
+      }).join('');
+      const table = directories.length
+        ? `<div class="table-wrap"><table class="tight"><thead><tr><th>目录</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : '<div class="empty-state"><span class="empty-title">当前没有生效的扫描目录</span></div>';
+      const disabled = provider.enabled ? '' : ' <span class="pill other">已禁用</span>';
+      const reset = Array.isArray(provider.override_dirs)
+        ? `<button class="btn mini warn" type="button" data-scan-dirs-reset="${escapeHtml(provider.key)}">恢复默认</button>`
+        : '';
+      return `<article class="mini-card">
+        <div class="mini-card-head">
+          <div><div class="mini-card-title">${escapeHtml(provider.name)}${disabled}</div><div class="mini-card-path">默认 ${escapeHtml(provider.default_dir)} · 也可用 ${escapeHtml(provider.cli_option)} 指定</div></div>
+          <span class="pill ${scanDirsSourceClass(provider.source)}">${escapeHtml(scanDirsSourceLabel(provider.source))}</span>
+        </div>
+        ${table}
+        <div class="criteria-row">
+          <label class="field wide">新增目录<input type="text" data-scan-dirs-input="${escapeHtml(provider.key)}" placeholder="例如 ~/.codex-work"></label>
+          <div class="toolbar-actions">
+            <button class="btn mini primary" type="button" data-scan-dirs-add="${escapeHtml(provider.key)}">添加</button>
+            ${reset}
+          </div>
+        </div>
+      </article>`;
+    }).join('');
+    container.innerHTML = cards ? `<div class="card-grid">${cards}</div>` : '<div class="empty-state"><span class="empty-title">没有已知的 provider</span></div>';
+    container.querySelectorAll('[data-scan-dirs-add]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const provider = button.dataset.scanDirsAdd || '';
+        const input = container.querySelector(`[data-scan-dirs-input="${provider}"]`);
+        const path = input ? String(input.value || '').trim() : '';
+        if (!path) {
+          window.alert('请先填写要添加的目录路径。');
+          return;
+        }
+        mutateScanDirs({ action: 'add', provider, path });
+      });
+    });
+    container.querySelectorAll('[data-scan-dirs-remove]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const path = button.dataset.scanDirsPath || '';
+        if (!window.confirm(`确认从扫描目录中移除？\n${path}`)) return;
+        mutateScanDirs({ action: 'remove', provider: button.dataset.scanDirsRemove || '', path, confirm: true });
+      });
+    });
+    container.querySelectorAll('[data-scan-dirs-reset]').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (!window.confirm('确认恢复该 provider 的默认扫描目录？Web 配置将被清除。')) return;
+        mutateScanDirs({ action: 'reset', provider: button.dataset.scanDirsReset || '', confirm: true });
+      });
+    });
+  };
+  const refreshScanDirs = async () => {
+    const container = document.getElementById('scan-dirs-content');
+    const button = document.getElementById('scan-dirs-refresh-button');
+    if (button) {
+      button.disabled = true;
+      button.classList.add('is-spinning');
+    }
+    try {
+      const response = await fetch('/api/scan-dirs', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      renderScanDirs(await response.json());
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">读取扫描目录失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.classList.remove('is-spinning');
+      }
+    }
+  };
+  const mutateScanDirs = async (body) => {
+    const container = document.getElementById('scan-dirs-content');
+    try {
+      const response = await fetch('/api/scan-dirs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      renderScanDirs(payload);
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">操作失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
+  // 历史数据：保留期配置、索引占用、清理预览与手动清理。
+  const historySourceLabel = (source) => ({ web: 'Web 配置', cli: '配置默认' })[source] || source || '未知';
+  const historySourceClass = (source) => source === 'web' ? 'ok' : 'other';
+  const historyKindLabel = { usage: '用量历史', sessions: '会话历史', alerts: '告警历史' };
+  const historyDeletedTotal = (deleted) => ['usage', 'sessions', 'alerts']
+    .reduce((sum, key) => sum + Number((deleted || {})[key] || 0), 0);
+  const renderHistory = (payload) => {
+    const container = document.getElementById('history-content');
+    const countLabel = document.getElementById('history-count');
+    if (!container) return;
+    if (!payload || payload.available === false) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">该运行模式不支持在线管理历史数据</span><span class="empty-hint">请以 daemon 或 service 模式运行。</span></div>';
+      if (countLabel) countLabel.textContent = '不可用';
+      return;
+    }
+    const retention = payload.retention || {};
+    const days = payload.retention_days || {};
+    const dbs = Array.isArray(payload.dbs) ? payload.dbs : [];
+    const totalBytes = dbs.reduce((sum, item) => sum + Number(item.bytes || 0), 0);
+    if (countLabel) countLabel.textContent = `索引共 ${formatDataSize(totalBytes)}`;
+    const retentionField = (key, label) => {
+      const entry = retention[key] || {};
+      const value = entry.value ?? days[key] ?? '';
+      const badge = entry.source
+        ? ` <span class="pill ${historySourceClass(entry.source)}">${escapeHtml(historySourceLabel(entry.source))}</span>`
+        : '';
+      return `<label class="field wide">${escapeHtml(label)}${badge}<input type="number" min="1" max="3650" step="1" data-history-days="${key}" value="${escapeHtml(String(value))}"></label>`;
+    };
+    const dbRows = dbs.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${escapeHtml(formatDataSize(item.bytes))}</td></tr>`).join('');
+    const lastCleanup = payload.last_cleanup;
+    const lastCleanupLine = lastCleanup
+      ? `上次清理：${escapeHtml(formatTime(lastCleanup.observed_at))} · 删除 ${historyDeletedTotal(lastCleanup.deleted)} 行 · 释放 ${escapeHtml(formatDataSize(lastCleanup.freed_bytes || 0))}${Array.isArray(lastCleanup.errors) && lastCleanup.errors.length ? ' · 存在部分失败' : ''}`
+      : '尚未执行过清理';
+    container.innerHTML = `
+      <div class="account-subtitle"><span>保留天数</span></div>
+      <div class="criteria-row">
+        ${retentionField('usage_days', '用量历史保留天数')}
+        ${retentionField('session_days', '会话历史保留天数')}
+        <div class="toolbar-actions">
+          <button class="btn mini primary" type="button" id="history-save-button">保存</button>
+          <button class="btn mini warn" type="button" id="history-reset-button">恢复默认</button>
+        </div>
+      </div>
+      <div class="usage-note">告警历史保留 ${escapeHtml(String(days.alert_days ?? '—'))} 天（只读，由运行配置决定）。</div>
+      <div class="account-subtitle"><span>索引与状态数据占用</span></div>
+      <div class="table-wrap"><table class="tight"><thead><tr><th>数据</th><th>占用</th></tr></thead><tbody>${dbRows || '<tr><td colspan="2">暂无数据</td></tr>'}</tbody></table></div>
+      <div class="criteria-row">
+        <div class="toolbar-actions">
+          <button class="btn mini" type="button" id="history-preview-button">预览将清理的数据</button>
+          <button class="btn mini danger" type="button" id="history-cleanup-button">立即清理</button>
+        </div>
+      </div>
+      <div class="usage-note" id="history-last-cleanup">${lastCleanupLine}</div>`;
+    document.getElementById('history-save-button')?.addEventListener('click', () => {
+      const body = { action: 'set-retention' };
+      [['usage_days', '[data-history-days="usage_days"]'], ['session_days', '[data-history-days="session_days"]']].forEach(([key, selector]) => {
+        const input = container.querySelector(selector);
+        const raw = input ? String(input.value || '').trim() : '';
+        const value = Number(raw);
+        if (raw !== '' && Number.isFinite(value)) body[key] = value;
+      });
+      if (body.usage_days === undefined && body.session_days === undefined) {
+        window.alert('请填写要保存的保留天数。');
+        return;
+      }
+      mutateHistory(body);
+    });
+    document.getElementById('history-reset-button')?.addEventListener('click', () => {
+      if (!window.confirm('确认恢复默认保留天数？Web 配置将被清除。')) return;
+      mutateHistory({ action: 'reset-retention', confirm: true });
+    });
+    document.getElementById('history-preview-button')?.addEventListener('click', refreshHistoryPreview);
+    document.getElementById('history-cleanup-button')?.addEventListener('click', () => {
+      if (!window.confirm('确认立即清理过期历史数据？删除不可撤销，活动会话和额度恢复记录会保留。')) return;
+      mutateHistory({ action: 'cleanup', confirm: true });
+    });
+  };
+  const renderHistoryPreview = (preview) => {
+    const container = document.getElementById('history-preview-content');
+    if (!container) return;
+    const kinds = preview && Array.isArray(preview.kinds) ? preview.kinds : [];
+    if (!kinds.length) {
+      container.innerHTML = '';
+      return;
+    }
+    const rows = kinds.map((kind) => `<tr>
+      <td>${escapeHtml(historyKindLabel[kind.kind] || kind.kind)}</td>
+      <td>${escapeHtml(formatTime(kind.cutoff))}</td>
+      <td>${Number(kind.rows_to_delete || 0).toLocaleString('zh-CN')} / ${Number(kind.total_rows || 0).toLocaleString('zh-CN')}</td>
+      <td>${escapeHtml(formatDataSize(kind.db_bytes))}</td>
+      <td>${escapeHtml(formatDataSize(kind.estimated_free_bytes))}（预计）</td>
+    </tr>`).join('');
+    container.innerHTML = `
+      <div class="account-subtitle"><span>将清理的数据（预计）</span></div>
+      <div class="table-wrap"><table class="tight"><thead><tr><th>类别</th><th>截止时间</th><th>将删行数 / 总行数</th><th>当前占用</th><th>预计释放</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="usage-note">预计释放合计 ${escapeHtml(formatDataSize(preview.estimated_free_bytes || 0))}，为按行数比例的估算值；实际释放以清理结果为准。</div>`;
+  };
+  const renderHistoryCleanupResult = (result, errorMessage) => {
+    const container = document.getElementById('history-result');
+    if (!container) return;
+    const deleted = result && result.deleted && typeof result.deleted === 'object' ? result.deleted : {};
+    const breakdown = Object.keys(deleted)
+      .map((key) => `${escapeHtml(historyKindLabel[key] || key)} ${Number(deleted[key] || 0)} 行`)
+      .join(' · ');
+    const errors = result && Array.isArray(result.errors) ? result.errors : [];
+    const title = errorMessage ? '清理部分失败' : '清理完成';
+    container.innerHTML = `<div class="empty-state"><span class="empty-title">${title}：删除 ${historyDeletedTotal(deleted)} 行，释放 ${escapeHtml(formatDataSize(result ? result.freed_bytes || 0 : 0))}</span>${breakdown ? `<span class="empty-hint">${breakdown}</span>` : ''}${errorMessage ? `<span class="empty-hint">${escapeHtml(errorMessage)}</span>` : ''}${errors.length ? `<span class="empty-hint">${errors.map(escapeHtml).join('；')}</span>` : ''}</div>`;
+  };
+  const refreshHistory = async () => {
+    const container = document.getElementById('history-content');
+    try {
+      const response = await fetch('/api/history', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      renderHistory(await response.json());
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">读取历史数据状态失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
+  const refreshHistoryPreview = async () => {
+    const container = document.getElementById('history-preview-content');
+    try {
+      const response = await fetch('/api/history?preview=1', { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      renderHistoryPreview(payload.preview);
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">预览失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
+  const mutateHistory = async (body) => {
+    const resultBox = document.getElementById('history-result');
+    try {
+      const response = await fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        const error = new Error(payload.message || `HTTP ${response.status}`);
+        error.payload = payload;
+        throw error;
+      }
+      await refreshHistory();
+      if (body.action === 'cleanup') renderHistoryCleanupResult(payload.result, null);
+      if (body.action !== 'cleanup' && resultBox) resultBox.innerHTML = '';
+    } catch (error) {
+      if (body.action === 'cleanup') {
+        renderHistoryCleanupResult(error.payload ? error.payload.result : null, error.message);
+      } else if (resultBox) {
+        resultBox.innerHTML = `<div class="empty-state"><span class="empty-title">操作失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+      }
+    }
+  };
+  document.getElementById('scan-dirs-refresh-button')?.addEventListener('click', () => {
+    refreshScanDirs();
+    refreshHistory();
+  });
+  refreshScanDirs();
+  refreshHistory();
+</script>
+</body>
+</html>
+"""
+)
 
 
 @dataclass(frozen=True)
@@ -2419,6 +2904,41 @@ class _DashboardHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
+class _AccountSet:
+    """Dashboard 运行期间可热替换的注册表与账号元数据集合（线程安全）。"""
+
+    def __init__(
+        self,
+        registries: Mapping[str, MultiSessionRegistry],
+        account_metadata: Mapping[str, Mapping[str, str | None]],
+    ) -> None:
+        self._lock = Lock()
+        self._registries = dict(registries)
+        self._account_metadata = dict(account_metadata)
+
+    def snapshot(
+        self,
+    ) -> tuple[
+        dict[str, MultiSessionRegistry],
+        dict[str, Mapping[str, str | None]],
+    ]:
+        """返回当前生效的注册表与元数据副本，保证单次请求读到一致的组合。"""
+
+        with self._lock:
+            return dict(self._registries), dict(self._account_metadata)
+
+    def update(
+        self,
+        registries: Mapping[str, MultiSessionRegistry],
+        account_metadata: Mapping[str, Mapping[str, str | None]] | None,
+    ) -> None:
+        """原子替换注册表与账号元数据；之后的请求立即使用新账号集合。"""
+
+        with self._lock:
+            self._registries = dict(registries)
+            self._account_metadata = dict(account_metadata or {})
+
+
 class DashboardServer:
     """提供 Dashboard 状态、用量数据和告警历史的本地 HTTP 服务。"""
 
@@ -2439,6 +2959,10 @@ class DashboardServer:
         alert_store: TrafficAlertStore | None = None,
         housekeeping: HousekeepingMonitor | None = None,
         session_thresholds: SessionSwitchThresholds | None = None,
+        scan_dirs: ScanDirsController | None = None,
+        health: HealthTracker | None = None,
+        history: HistoryDataManager | None = None,
+        retention: RetentionController | None = None,
     ) -> None:
         if registries is not None and registry is not None:
             raise ValueError("registry 和 registries 只能传入一个")
@@ -2459,6 +2983,10 @@ class DashboardServer:
         self.traffic_monitor = traffic_monitor
         self.alert_store = alert_store
         self.housekeeping = housekeeping
+        self.scan_dirs = scan_dirs
+        self.health = health
+        self.history = history
+        self.retention = retention
         self.session_thresholds = session_thresholds or SessionSwitchThresholds()
         self.usage_aggregator = usage_aggregator or UsageAggregator(
             grok_homes=self.grok_homes,
@@ -2466,6 +2994,9 @@ class DashboardServer:
             dsh_homes=self.dsh_homes,
             claude_homes=self.claude_homes,
         )
+        # 中文注释：handler 闭包只持有这个容器；扫描目录变化导致账号增减时
+        # 由 update_accounts 热替换内容，无需重启 HTTP 服务。
+        self._accounts = _AccountSet(self.registries, self.account_metadata)
         self._server: _DashboardHTTPServer | None = None
         self._thread: Thread | None = None
 
@@ -2478,15 +3009,26 @@ class DashboardServer:
         raw_host, raw_port = self._server.server_address[:2]
         return str(raw_host), int(raw_port)
 
+    def update_accounts(
+        self,
+        registries: Mapping[str, MultiSessionRegistry],
+        account_metadata: Mapping[str, Mapping[str, str | None]] | None,
+    ) -> None:
+        """热替换注册表与账号元数据；扫描目录调整后账号集合会随之变化。"""
+
+        self.registries = dict(registries)
+        self.account_metadata = dict(account_metadata or {})
+        self.registry = next(iter(self.registries.values()), None)
+        self._accounts.update(self.registries, self.account_metadata)
+
     def start(self) -> None:
         """绑定地址并启动 Dashboard 请求线程。"""
 
         if self._server is not None:
             return
         handler = _make_handler(
-            self.registries,
+            self._accounts,
             self.logger,
-            self.account_metadata,
             self.usage_aggregator,
             self.grok_homes,
             self.kimi_homes,
@@ -2498,6 +3040,10 @@ class DashboardServer:
             alert_store=self.alert_store,
             housekeeping=self.housekeeping,
             session_thresholds=self.session_thresholds,
+            scan_dirs=self.scan_dirs,
+            health=self.health,
+            history=self.history,
+            retention=self.retention,
         )
         server = _DashboardHTTPServer(
             (self.config.host, self.config.port),
@@ -2598,14 +3144,32 @@ def build_dashboard_state(
     }
 
 
-def _guard_provider(label: str, home: Path) -> None:
+def _guard_provider(
+    label: str,
+    home: Path,
+    health: HealthTracker | None = None,
+    provider_key: str | None = None,
+    error: BaseException | None = None,
+) -> None:
     """记录单个 provider 目录的读取失败，继续构建其他 provider 的状态。"""
 
+    if health is not None and provider_key is not None and error is not None:
+        health.record_failure(f"provider:{provider_key}", error)
     logging.getLogger(__name__).exception(
         "%s 目录读取失败，已跳过该目录（其他 provider 不受影响）: %s",
         label,
         home,
     )
+
+
+def _record_provider_success(
+    health: HealthTracker | None,
+    provider_key: str,
+) -> None:
+    """provider 读取成功后登记健康状态；无 tracker 时跳过。"""
+
+    if health is not None:
+        health.record_success(f"provider:{provider_key}")
 
 
 def build_multi_dashboard_state(
@@ -2619,6 +3183,7 @@ def build_multi_dashboard_state(
     claude_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
     traffic: TrafficSnapshot | None = None,
+    health: HealthTracker | None = None,
 ) -> dict[str, Any]:
     """合并多个账号状态，同时保留每个账号独立的额度快照。"""
 
@@ -2754,9 +3319,15 @@ def build_multi_dashboard_state(
                         product="grok",
                     )
                 )
-
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Grok', grok_home)
+            _record_provider_success(health, 'grok')
+        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider(
+                'Grok',
+                grok_home,
+                health=health,
+                provider_key='grok',
+                error=error,
+            )
     # Kimi 配额经官方 /usages 接口读取（带缓存）；失败时账号卡片只展示身份。
     for kimi_home in kimi_homes or ():
         if not kimi_home.is_dir():
@@ -2805,9 +3376,15 @@ def build_multi_dashboard_state(
                         product="kimi",
                     )
                 )
-
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Kimi', kimi_home)
+            _record_provider_success(health, 'kimi')
+        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider(
+                'Kimi',
+                kimi_home,
+                health=health,
+                provider_key='kimi',
+                error=error,
+            )
     for dsh_home in dsh_homes or ():
         if not dsh_home.is_dir():
             continue
@@ -2855,9 +3432,15 @@ def build_multi_dashboard_state(
                         product="dsh",
                     )
                 )
-
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('DeepSeek Harness', dsh_home)
+            _record_provider_success(health, 'dsh')
+        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider(
+                'DeepSeek Harness',
+                dsh_home,
+                health=health,
+                provider_key='dsh',
+                error=error,
+            )
     # Claude Code 本地没有订阅额度接口，只展示身份和本地用量归属。
     for claude_home in claude_homes or ():
         if not claude_home.is_dir():
@@ -2893,9 +3476,15 @@ def build_multi_dashboard_state(
                         codex_home=str(claude_home),
                     )
                 )
-
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Claude Code', claude_home)
+            _record_provider_success(health, 'claude')
+        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider(
+                'Claude Code',
+                claude_home,
+                health=health,
+                provider_key='claude',
+                error=error,
+            )
     # Command Code 订阅额度经官方后台接口读取（带缓存）；失败时只展示账号身份。
     for commandcode_home in commandcode_homes or ():
         if not commandcode_home.is_dir():
@@ -2946,9 +3535,15 @@ def build_multi_dashboard_state(
                         product="command-code",
                     )
                 )
-
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Command Code', commandcode_home)
+            _record_provider_success(health, 'command-code')
+        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider(
+                'Command Code',
+                commandcode_home,
+                health=health,
+                provider_key='command-code',
+                error=error,
+            )
     counts: dict[str, int] = {}
     for account in accounts_by_key.values():
         account["counts"] = {}
@@ -3152,6 +3747,76 @@ def empty_housekeeping_payload() -> dict[str, Any]:
     return empty_housekeeping_report()
 
 
+def _healthz_payload(health: HealthTracker | None) -> tuple[int, dict[str, Any]]:
+    """组装 /healthz 响应；主循环停滞（含 degraded 过期）一律视为卡死。"""
+
+    if health is None:
+        return 200, {"status": "ok", "updated_at": time.time()}
+    main_loop = health.component_status("main-loop")
+    if main_loop == "ok":
+        return 200, {
+            "status": "ok",
+            "uptime_seconds": max(0.0, time.time() - health.started_at),
+            "updated_at": time.time(),
+        }
+    return 503, {
+        "status": "stuck",
+        "main_loop": main_loop,
+        "updated_at": time.time(),
+    }
+
+
+def _readyz_payload(health: HealthTracker | None) -> tuple[int, dict[str, Any]]:
+    """组装 /readyz 响应；就绪判定只看关键组件，组件明细原样来自快照。"""
+
+    if health is None:
+        return 200, {"status": "ok", "updated_at": time.time()}
+    snapshot = health.snapshot()
+    ready = health.ready()
+    return (200 if ready else 503), {
+        "status": "ready" if ready else "not_ready",
+        "overall": snapshot["overall"],
+        "components": snapshot["components"],
+        "updated_at": time.time(),
+    }
+
+
+def _history_get_payload(
+    history: HistoryDataManager | None,
+    retention: RetentionController | None,
+    raw_query: str,
+) -> tuple[int, dict[str, Any]]:
+    """组装 GET /api/history 响应；?preview=1 时附带清理预览。"""
+
+    if history is None:
+        return 200, {"updated_at": time.time(), "available": False}
+    try:
+        dbs = history.db_sizes()
+    except OSError:
+        # 中文注释：占用统计失败不阻断整个端点，降级为空列表。
+        dbs = []
+    payload: dict[str, Any] = {
+        "updated_at": time.time(),
+        "available": True,
+        "retention_days": history.retention_days,
+        "retention": (
+            retention.snapshot()["retention"] if retention is not None else None
+        ),
+        "dbs": dbs,
+        "last_cleanup": history.last_cleanup,
+    }
+    if parse_qs(raw_query).get("preview") == ["1"]:
+        try:
+            payload["preview"] = history.preview()
+        except OSError as error:
+            return 500, {
+                "error": "history_preview_failed",
+                "message": sanitize_error(error),
+                "updated_at": time.time(),
+            }
+    return 200, payload
+
+
 def _housekeeping_summary(
     monitor: HousekeepingMonitor | None,
 ) -> dict[str, Any]:
@@ -3162,7 +3827,18 @@ def _housekeeping_summary(
     report = monitor.latest()
     if report.get("observed_at") is None:
         # 中文注释：首次访问时补一次扫描；refresh 自带刷新间隔节流。
-        report = monitor.refresh()
+        try:
+            report = monitor.refresh()
+        except (OSError, ValueError):
+            # 中文注释：磁盘扫描失败不应击穿整个 /api/state，降级为不可用摘要。
+            logger = logging.getLogger(__name__)
+            logger.exception("Dashboard 磁盘摘要刷新失败，已降级")
+            return {
+                "available": False,
+                "totals": {},
+                "reminders": [],
+                "preview": None,
+            }
     return {
         "available": True,
         "observed_at": report.get("observed_at"),
@@ -3442,9 +4118,8 @@ def _split_values(value: str | None) -> list[str]:
 
 
 def _make_handler(
-    registries: Mapping[str, MultiSessionRegistry],
+    accounts: _AccountSet,
     logger: logging.Logger,
-    account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
     usage_aggregator: UsageAggregator | None = None,
     grok_homes: Sequence[Path] | None = None,
     kimi_homes: Sequence[Path] | None = None,
@@ -3456,8 +4131,16 @@ def _make_handler(
     alert_store: TrafficAlertStore | None = None,
     housekeeping: HousekeepingMonitor | None = None,
     session_thresholds: SessionSwitchThresholds | None = None,
+    scan_dirs: ScanDirsController | None = None,
+    health: HealthTracker | None = None,
+    history: HistoryDataManager | None = None,
+    retention: RetentionController | None = None,
 ) -> type[BaseHTTPRequestHandler]:
-    """为多个注册表创建隔离的 HTTP 请求处理器类型。"""
+    """为多个注册表创建隔离的 HTTP 请求处理器类型。
+
+    中文注释：注册表与账号元数据经由 accounts 容器读取，DashboardServer
+    可以在运行中热替换账号集合而无需重启 HTTP 服务。
+    """
 
     thresholds_in_use = session_thresholds or SessionSwitchThresholds()
 
@@ -3502,11 +4185,27 @@ def _make_handler(
                     body=_DASHBOARD_HTML.encode("utf-8"),
                 )
                 return
+            if path == "/settings":
+                self._send_bytes(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=_SETTINGS_HTML.encode("utf-8"),
+                )
+                return
+            if path == "/healthz":
+                status, payload = _healthz_payload(health)
+                self._send_json(status=status, payload=payload)
+                return
+            if path == "/readyz":
+                status, payload = _readyz_payload(health)
+                self._send_json(status=status, payload=payload)
+                return
             if path == "/api/state":
+                current_registries, current_metadata = accounts.snapshot()
                 try:
                     state = build_multi_dashboard_state(
-                        registries,
-                        account_metadata=account_metadata,
+                        current_registries,
+                        account_metadata=current_metadata,
                         grok_homes=grok_homes,
                         kimi_homes=kimi_homes,
                         dsh_homes=dsh_homes,
@@ -3518,6 +4217,7 @@ def _make_handler(
                             if traffic_monitor is not None
                             else None
                         ),
+                        health=health,
                     )
                 except RegistryError:
                     logger.exception("Dashboard 读取状态失败")
@@ -3535,6 +4235,7 @@ def _make_handler(
                 _attach_session_archive(state, housekeeping)
                 state["housekeeping"] = _housekeeping_summary(housekeeping)
                 state["usage_index"] = _usage_index_summary(usage_aggregator)
+                state["health"] = health.snapshot() if health is not None else None
                 self._send_json(status=200, payload=state)
                 return
             if path == "/api/alerts":
@@ -3575,12 +4276,41 @@ def _make_handler(
                     },
                 )
                 return
+            if path == "/api/scan-dirs":
+                if scan_dirs is None:
+                    self._send_json(
+                        status=200,
+                        payload={
+                            "updated_at": time.time(),
+                            "available": False,
+                            "providers": [],
+                        },
+                    )
+                    return
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": True,
+                        **scan_dirs.snapshot(),
+                    },
+                )
+                return
+            if path == "/api/history":
+                status, payload = _history_get_payload(
+                    history,
+                    retention,
+                    urlsplit(self.path).query,
+                )
+                self._send_json(status=status, payload=payload)
+                return
             if path == "/api/usage":
+                current_registries, current_metadata = accounts.snapshot()
                 try:
                     usage = (
                         usage_aggregator.snapshot(
-                            registries,
-                            account_metadata=account_metadata,
+                            current_registries,
+                            account_metadata=current_metadata,
                         )
                         if usage_aggregator is not None
                         else UsageAggregator.empty_snapshot()
@@ -3695,11 +4425,12 @@ def _make_handler(
                 return
             if path == "/api/insights":
                 window_days = _insights_window_days(urlsplit(self.path).query)
+                current_registries, current_metadata = accounts.snapshot()
                 try:
                     insights = (
                         usage_aggregator.insights(
-                            registries,
-                            account_metadata=account_metadata,
+                            current_registries,
+                            account_metadata=current_metadata,
                             since_days=window_days,
                         )
                         if usage_aggregator is not None
@@ -3731,11 +4462,28 @@ def _make_handler(
                     include_body=False,
                 )
                 return
+            if path == "/settings":
+                self._send_bytes(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=_SETTINGS_HTML.encode("utf-8"),
+                    include_body=False,
+                )
+                return
+            if path == "/healthz":
+                status, payload = _healthz_payload(health)
+                self._send_json(status=status, payload=payload, include_body=False)
+                return
+            if path == "/readyz":
+                status, payload = _readyz_payload(health)
+                self._send_json(status=status, payload=payload, include_body=False)
+                return
             if path == "/api/state":
+                current_registries, current_metadata = accounts.snapshot()
                 try:
                     state = build_multi_dashboard_state(
-                        registries,
-                        account_metadata=account_metadata,
+                        current_registries,
+                        account_metadata=current_metadata,
                         grok_homes=grok_homes,
                         kimi_homes=kimi_homes,
                         dsh_homes=dsh_homes,
@@ -3747,6 +4495,7 @@ def _make_handler(
                             if traffic_monitor is not None
                             else None
                         ),
+                        health=health,
                     )
                 except RegistryError:
                     logger.exception("Dashboard 读取状态失败")
@@ -3765,6 +4514,7 @@ def _make_handler(
                 _attach_session_archive(state, housekeeping)
                 state["housekeeping"] = _housekeeping_summary(housekeeping)
                 state["usage_index"] = _usage_index_summary(usage_aggregator)
+                state["health"] = health.snapshot() if health is not None else None
                 self._send_json(
                     status=200,
                     payload=state,
@@ -3779,6 +4529,28 @@ def _make_handler(
                         "updated_at": time.time(),
                         "available": alert_store is not None,
                         "stats": alert_stats(),
+                    },
+                    include_body=False,
+                )
+                return
+            if path == "/api/scan-dirs":
+                # 中文注释：HEAD 只用于健康检查，不做目录校验。
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": scan_dirs is not None,
+                    },
+                    include_body=False,
+                )
+                return
+            if path == "/api/history":
+                # 中文注释：HEAD 只用于健康检查，不触发预览统计。
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": history is not None,
                     },
                     include_body=False,
                 )
@@ -3850,11 +4622,17 @@ def _make_handler(
             )
 
         def do_POST(self) -> None:
-            """只接受告警历史的状态修改，其余路径仍为只读。"""
+            """处理告警历史、磁盘管理、扫描目录和历史数据的写请求，其余路径仍为只读。"""
 
             path = urlsplit(self.path).path
             if path == "/api/housekeeping":
                 self._handle_housekeeping_post(housekeeping)
+                return
+            if path == "/api/scan-dirs":
+                self._handle_scan_dirs_post(scan_dirs)
+                return
+            if path == "/api/history":
+                self._handle_history_post(history, retention)
                 return
             if path != "/api/alerts":
                 self._send_json(status=405, payload={"error": "read_only"})
@@ -3983,6 +4761,222 @@ def _make_handler(
                     "report": report,
                     "preview": monitor.preview(criteria),
                     "archives": list(monitor.restores()),
+                },
+            )
+
+        def _handle_scan_dirs_post(
+            self,
+            controller: ScanDirsController | None,
+        ) -> None:
+            """处理扫描目录的添加、移除和恢复默认；移除与恢复需显式确认。"""
+
+            if controller is None:
+                self._send_json(
+                    status=503,
+                    payload={"error": "scan_dirs_unavailable"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+            except AlertStoreError as error:
+                self._send_json(
+                    status=400,
+                    payload={
+                        "error": "invalid_scan_dir_action",
+                        "message": str(error),
+                    },
+                )
+                return
+            action = str(body.get("action") or "").strip()
+            if action not in {"add", "remove", "reset"}:
+                self._send_json(
+                    status=400,
+                    payload={
+                        "error": "invalid_scan_dir_action",
+                        "message": f"未知操作: {action or '(空)'}",
+                    },
+                )
+                return
+            provider = body.get("provider")
+            if not isinstance(provider, str) or provider not in PROVIDER_SPECS:
+                self._send_json(
+                    status=400,
+                    payload={
+                        "error": "invalid_scan_dir_action",
+                        "message": "未知或未提供的 provider",
+                    },
+                )
+                return
+            if action in {"remove", "reset"} and body.get("confirm") is not True:
+                self._send_json(
+                    status=400,
+                    payload={
+                        "error": "invalid_scan_dir_action",
+                        "message": "移除和恢复默认需要 confirm: true",
+                    },
+                )
+                return
+            path: Path | None = None
+            if action in {"add", "remove"}:
+                raw_path = body.get("path")
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    self._send_json(
+                        status=400,
+                        payload={
+                            "error": "invalid_scan_dir_action",
+                            "message": f"{action} 操作需要字符串形式的 path",
+                        },
+                    )
+                    return
+                path = Path(raw_path)
+            try:
+                snapshot = controller.apply(action, provider, path)
+            except ScanDirsError as error:
+                self._send_json(
+                    status=400,
+                    payload={"error": "invalid_scan_dir", "message": str(error)},
+                )
+                return
+            self._send_json(
+                status=200,
+                payload={"ok": True, "action": action, **snapshot},
+            )
+
+        def _handle_history_post(
+            self,
+            manager: HistoryDataManager | None,
+            controller: RetentionController | None,
+        ) -> None:
+            """处理历史数据清理和保留期配置；清理与恢复默认需显式确认。"""
+
+            if manager is None:
+                self._send_json(
+                    status=503,
+                    payload={"error": "history_unavailable"},
+                )
+                return
+            try:
+                body = self._read_json_body()
+            except AlertStoreError as error:
+                self._send_json(
+                    status=400,
+                    payload={
+                        "error": "invalid_history_action",
+                        "message": str(error),
+                    },
+                )
+                return
+            action = str(body.get("action") or "").strip()
+            if action == "cleanup":
+                if body.get("confirm") is not True:
+                    self._send_json(
+                        status=400,
+                        payload={
+                            "error": "invalid_history_action",
+                            "message": "清理需要 confirm: true",
+                        },
+                    )
+                    return
+                try:
+                    result = manager.cleanup()
+                except RetentionError as error:
+                    # 中文注释：部分库清理失败时仍回传已完成的部分结果。
+                    self._send_json(
+                        status=500,
+                        payload={
+                            "error": "history_cleanup_failed",
+                            "message": sanitize_error(error),
+                            "result": manager.last_cleanup,
+                        },
+                    )
+                    return
+                self._send_json(
+                    status=200,
+                    payload={"ok": True, "action": action, "result": result},
+                )
+                return
+            if action in {"set-retention", "reset-retention"}:
+                if controller is None:
+                    self._send_json(
+                        status=503,
+                        payload={"error": "retention_unavailable"},
+                    )
+                    return
+                if action == "reset-retention":
+                    if body.get("confirm") is not True:
+                        self._send_json(
+                            status=400,
+                            payload={
+                                "error": "invalid_history_action",
+                                "message": "恢复默认需要 confirm: true",
+                            },
+                        )
+                        return
+                    try:
+                        snapshot = controller.apply("reset")
+                    except RetentionError as error:
+                        self._send_json(
+                            status=400,
+                            payload={
+                                "error": "invalid_retention",
+                                "message": str(error),
+                            },
+                        )
+                        return
+                    self._send_json(
+                        status=200,
+                        payload={"ok": True, "action": action, **snapshot},
+                    )
+                    return
+                usage_days = body.get("usage_days")
+                session_days = body.get("session_days")
+                if usage_days is None and session_days is None:
+                    self._send_json(
+                        status=400,
+                        payload={
+                            "error": "invalid_retention",
+                            "message": "至少提供 usage_days 或 session_days 之一",
+                        },
+                    )
+                    return
+                for name, value in (
+                    ("usage_days", usage_days),
+                    ("session_days", session_days),
+                ):
+                    if value is not None and (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                    ):
+                        self._send_json(
+                            status=400,
+                            payload={
+                                "error": "invalid_retention",
+                                "message": f"{name} 必须是数值",
+                            },
+                        )
+                        return
+                try:
+                    snapshot = controller.apply(
+                        "set",
+                        usage_days=usage_days,
+                        session_days=session_days,
+                    )
+                except RetentionError as error:
+                    self._send_json(
+                        status=400,
+                        payload={"error": "invalid_retention", "message": str(error)},
+                    )
+                    return
+                self._send_json(
+                    status=200,
+                    payload={"ok": True, "action": action, **snapshot},
+                )
+                return
+            self._send_json(
+                status=400,
+                payload={
+                    "error": "invalid_history_action",
+                    "message": f"未知操作: {action or '(空)'}",
                 },
             )
 

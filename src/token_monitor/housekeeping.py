@@ -263,6 +263,14 @@ class HousekeepingMonitor:
 
         return tuple(target for target in self._targets if target.path.exists())
 
+    def update_targets(self, targets: Sequence[AuditTarget]) -> None:
+        """原子替换审计目标，并丢弃按旧目标统计出的报告和会话清单缓存。"""
+
+        with self._lock:
+            self._targets = tuple(targets)
+            self._sessions_cache = None
+            self._report = None
+
     def latest(self) -> dict[str, Any]:
         """返回最近一次统计结果；尚未统计时返回空报告。"""
 

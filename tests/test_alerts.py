@@ -327,6 +327,32 @@ class TrafficAlertStoreTests(unittest.TestCase):
 
         self.assertEqual(mode, 0o600)
 
+    def test_count_all_and_vacuum(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = TrafficAlertStore(Path(temporary_directory))
+
+            # 数据库文件尚未创建时 count_all/vacuum 都是安全的空操作。
+            self.assertEqual(store.count_all(), 0)
+            store.vacuum()
+            self.assertFalse(store.db_path.exists())
+
+            store.record([_alert(observed_at=1_000.0)], now=1_000.0)
+            store.record(
+                [_alert(pid=200, process_key="codex:200:1000", observed_at=1_100.0)],
+                now=1_100.0,
+            )
+            self.assertEqual(store.count_all(), 2)
+            self.assertTrue(store.db_path.exists())
+
+            # vacuum 后数据库必须继续可读写。
+            store.vacuum()
+            self.assertEqual(store.count_all(), 2)
+            store.record(
+                [_alert(pid=300, process_key="codex:300:1000", observed_at=1_200.0)],
+                now=1_200.0,
+            )
+            self.assertEqual(store.count_all(), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

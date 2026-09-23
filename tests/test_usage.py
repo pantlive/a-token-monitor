@@ -9,6 +9,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from token_monitor.registry import MultiSessionRegistry
 from token_monitor.usage import (
@@ -1892,6 +1893,164 @@ class UsageSearchAggregationTests(unittest.TestCase):
         self.assertFalse(pending)
         # 第一条 100k（短）、第二条增量 600k（长）、第三条未定价模型（按短路处理）
         self.assertEqual([row[0] for row in flags], [0, 1, 0])
+
+
+class UpdateHomesTests(unittest.TestCase):
+    """验证 UsageAggregator.update_homes 的热更新语义。"""
+
+    def test_swapped_grok_homes_are_indexed_next_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            grok_a = root / "grok-a"
+            grok_b = root / "grok-b"
+            for home in (grok_a, grok_b):
+                (home / "logs").mkdir(parents=True)
+                (home / "logs" / "unified.jsonl").write_text("", encoding="utf-8")
+            aggregator = UsageAggregator(grok_homes=(grok_a,))
+
+            aggregator.update_homes(grok_homes=(grok_b,))
+            sources = aggregator._build_sources({}, {})
+
+        self.assertNotIn(grok_a / "logs" / "unified.jsonl", sources)
+        self.assertIn(grok_b / "logs" / "unified.jsonl", sources)
+        self.assertEqual(aggregator._grok_homes, (grok_b,))
+
+    def test_empty_tuple_disables_and_none_keeps_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            grok_home = root / "grok"
+            aggregator = UsageAggregator(grok_homes=(grok_home,))
+
+            aggregator.update_homes()
+            unchanged = aggregator._grok_homes
+            aggregator.update_homes(grok_homes=())
+            disabled = aggregator._grok_homes
+            sources = aggregator._build_sources({}, {})
+
+        self.assertEqual(unchanged, (grok_home,))
+        self.assertEqual(disabled, ())
+        self.assertEqual(sources, {})
+
+    def test_removed_home_drops_session_index_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            grok_home = root / "grok"
+            aggregator = UsageAggregator(grok_homes=(grok_home,))
+            aggregator._grok_sessions[grok_home] = {}
+            aggregator._grok_sessions_at[grok_home] = 1.0
+
+            aggregator.update_homes(grok_homes=())
+
+        self.assertEqual(aggregator._grok_sessions, {})
+        self.assertEqual(aggregator._grok_sessions_at, {})
+
+
+class IndexHealthTests(unittest.TestCase):
+    """验证 UsageAggregator 的索引进度与错误健康摘要。"""
+
+    @staticmethod
+    def _aggregator() -> UsageAggregator:
+        """构造不触碰真实用户目录的聚合器。"""
+
+        return UsageAggregator(
+            grok_homes=(),
+            kimi_homes=(),
+            dsh_homes=(),
+            claude_homes=(),
+        )
+
+    def test_success_marks_last_indexed_at(self) -> None:
+        aggregator = self._aggregator()
+        before = aggregator.index_health()
+
+        aggregator.refresh_index({}, {})
+        after = aggregator.index_health()
+
+        self.assertIsNone(before["last_indexed_at"])
+        self.assertIsNotNone(after["last_indexed_at"])
+        self.assertIsNone(after["last_error"])
+        # 未启用后台索引时 worker_alive 为 None。
+        self.assertIsNone(after["worker_alive"])
+
+    def test_failure_records_sanitized_error(self) -> None:
+        aggregator = self._aggregator()
+        with patch.object(
+            aggregator,
+            "_index_once",
+            side_effect=OSError("磁盘炸了"),
+        ):
+            with self.assertRaises(OSError):
+                aggregator.refresh_index({}, {})
+            health = aggregator.index_health()
+
+        self.assertIn("磁盘炸了", health["last_error"])
+        self.assertIsNone(health["last_indexed_at"])
+
+        # 下一轮成功后错误被清除。
+        aggregator.refresh_index({}, {})
+        recovered = aggregator.index_health()
+        self.assertIsNone(recovered["last_error"])
+        self.assertIsNotNone(recovered["last_indexed_at"])
+
+
+class IndexRetentionTests(unittest.TestCase):
+    """验证 _UsageIndexStore 的历史清理接口只动 usage_delta 明细。"""
+
+    @staticmethod
+    def _seed_store(root: Path) -> "_UsageIndexStore":
+        """构造带一条文件检查点和三条增量的索引库。"""
+
+        store = _UsageIndexStore(root / "usage-index.sqlite3")
+        connection = sqlite3.connect(store.path)
+        connection.execute(
+            "INSERT INTO usage_file_state (path, inode, mtime_ns, file_size, "
+            "next_offset, complete, state_json) "
+            "VALUES ('/a.jsonl', 1, 1, 1, 1, 1, '{}')"
+        )
+        for timestamp in (10.0, 50.0, 100.0):
+            connection.execute(
+                "INSERT INTO usage_delta (path, kind, timestamp, model, usage_json) "
+                "VALUES ('/a.jsonl', 'codex', ?, 'gpt-5', '{}')",
+                (timestamp,),
+            )
+        connection.commit()
+        connection.close()
+        return store
+
+    def test_count_and_delete_deltas_before_respects_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self._seed_store(Path(temporary_directory))
+
+            total_before = store.count_deltas()
+            expired = store.count_deltas_before(50.0)
+            deleted = store.delete_deltas_before(50.0)
+            total_after = store.count_deltas()
+            state_rows = sqlite3.connect(store.path).execute(
+                "SELECT COUNT(*) FROM usage_file_state"
+            ).fetchone()[0]
+            store.close()
+
+        self.assertEqual(total_before, 3)
+        # 恰好等于 cutoff 的行不删,只删严格更早的 ts=10。
+        self.assertEqual(expired, 1)
+        self.assertEqual(deleted, 1)
+        self.assertEqual(total_after, 2)
+        # 增量读取检查点绝不能被动,否则文件会被全量重读。
+        self.assertEqual(state_rows, 1)
+
+    def test_vacuum_keeps_database_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = self._seed_store(Path(temporary_directory))
+
+            store.delete_deltas_before(1000.0)
+            store.vacuum()
+            remaining = store.count_deltas()
+            store.close()
+            reopened = _UsageIndexStore(Path(temporary_directory) / "usage-index.sqlite3")
+            remaining_after_reopen = reopened.count_deltas()
+
+        self.assertEqual(remaining, 0)
+        self.assertEqual(remaining_after_reopen, 0)
 
 
 if __name__ == "__main__":

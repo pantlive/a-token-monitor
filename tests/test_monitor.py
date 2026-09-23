@@ -880,5 +880,142 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(app_server.read_count, 1)
 
 
+class QuotaHealthTests(unittest.TestCase):
+    """验证 refresh_quota 的成功/失败埋点和 quota_health 的形状。"""
+
+    def test_success_marks_last_success_and_clears_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            monitor = MultiSessionMonitor(
+                registry=MultiSessionRegistry(root / "state"),
+                config=MonitorConfig(auto_resume=False),
+                session_root=session_root,
+                app_server=_FakeAppServer(MonitorTests._available_quota()),  # type: ignore[arg-type]
+                process_scanner=_FakeScanner(()),  # type: ignore[arg-type]
+            )
+
+            monitor.refresh_quota(force=True, now=110)
+            health = monitor.quota_health()
+
+        self.assertEqual(monitor._last_quota_success_at, 110)
+        self.assertIsNone(monitor._last_quota_error)
+        self.assertEqual(health["last_success_at"], 110)
+        self.assertIsNone(health["last_error"])
+        self.assertTrue(health["is_current"])
+        # 未 start 时 App Server 进程为空属于 starting,不算可用也不算故障。
+        self.assertFalse(health["app_server_available"])
+
+    def test_failure_without_fallback_records_sanitized_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            monitor = MultiSessionMonitor(
+                registry=MultiSessionRegistry(root / "state"),
+                config=MonitorConfig(auto_resume=False),
+                session_root=session_root,
+                app_server=_FailingAppServer(MonitorTests._available_quota()),  # type: ignore[arg-type]
+                process_scanner=_FakeScanner(()),  # type: ignore[arg-type]
+            )
+
+            monitor.refresh_quota(force=True, now=110)
+            health = monitor.quota_health()
+
+        self.assertIsNone(monitor._last_quota_success_at)
+        self.assertEqual(monitor._last_quota_error, "模拟网络不可达")
+        self.assertIsNone(health["last_success_at"])
+        self.assertEqual(health["last_error"], "模拟网络不可达")
+        self.assertFalse(health["is_current"])
+
+    def test_fallback_success_updates_success_time_but_keeps_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            path = session_root / "one.jsonl"
+            path.write_text(
+                '{"timestamp":100,"type":"token_count",'
+                '"rate_limits":{"primary":{"used_percent":55,'
+                '"window_minutes":300,"resets_at":200}}}\n',
+                encoding="utf-8",
+            )
+            scanner = _FakeScanner(
+                (ProcessObservation(11, "start-11", root, ("codex",), (path,)),)
+            )
+            monitor = MultiSessionMonitor(
+                registry=MultiSessionRegistry(root / "state"),
+                config=MonitorConfig(auto_resume=False),
+                session_root=session_root,
+                app_server=_FailingAppServer(MonitorTests._available_quota()),  # type: ignore[arg-type]
+                process_scanner=scanner,  # type: ignore[arg-type]
+            )
+
+            monitor.refresh_quota(force=True, now=110)
+            health = monitor.quota_health()
+
+        # fallback 成功算一次成功(数据仍新鲜),但保留 App Server 的降级原因。
+        self.assertEqual(monitor._last_quota_success_at, 110)
+        self.assertEqual(monitor._last_quota_error, "模拟网络不可达")
+        self.assertTrue(health["is_current"])
+
+    def test_quota_health_shape_and_started_app_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            monitor = MultiSessionMonitor(
+                registry=MultiSessionRegistry(root / "state"),
+                config=MonitorConfig(auto_resume=False),
+                session_root=session_root,
+                app_server=_FakeAppServer(MonitorTests._available_quota()),  # type: ignore[arg-type]
+                process_scanner=_FakeScanner(()),  # type: ignore[arg-type]
+            )
+
+            health = monitor.quota_health()
+            # 模拟已启动且进程存活的 App Server。
+            monitor._started = True
+            monitor.app_server.process = _LiveProcess()  # type: ignore[attr-defined]
+            available = monitor.quota_health()["app_server_available"]
+
+        self.assertEqual(
+            set(health),
+            {"last_success_at", "last_error", "is_current", "app_server_available"},
+        )
+        self.assertIsNone(health["last_success_at"])
+        self.assertIsNone(health["last_error"])
+        self.assertFalse(health["is_current"])
+        self.assertFalse(health["app_server_available"])
+        self.assertTrue(available)
+
+
+class _LiveProcess:
+    """模拟仍在运行的 App Server 子进程。"""
+
+    def poll(self) -> None:
+        """返回 None 表示进程仍存活。"""
+
+        return None
+
+
+class MonitorConfigRetentionTests(unittest.TestCase):
+    """验证用量/会话历史保留天数的默认值和范围校验。"""
+
+    def test_defaults_match_retention_module(self) -> None:
+        config = MonitorConfig()
+
+        self.assertEqual(config.usage_retention_days, 90.0)
+        self.assertEqual(config.session_retention_days, 30.0)
+
+    def test_retention_days_must_be_positive_and_bounded(self) -> None:
+        for field_name in ("usage_retention_days", "session_retention_days"):
+            for invalid in (0.0, -1.0, 3650.1):
+                with self.assertRaises(ValueError, msg=f"{field_name}={invalid}"):
+                    MonitorConfig(**{field_name: invalid})
+            # 边界值 3650 合法。
+            MonitorConfig(**{field_name: 3650.0})
+
+
 if __name__ == "__main__":
     unittest.main()

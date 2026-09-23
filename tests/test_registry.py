@@ -294,5 +294,132 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(recoveries[0].last_resume_finished_at, 3)
 
 
+class RetentionCleanupTests(unittest.TestCase):
+    """验证会话历史清理只删已结束且无恢复历史的旧会话。"""
+
+    @staticmethod
+    def _session(
+        thread_id: str,
+        status: SessionStatus,
+        last_seen_at: float,
+        **kwargs: object,
+    ) -> TrackedSession:
+        """构造一条最小会话记录。"""
+
+        return TrackedSession(
+            thread_id=thread_id,
+            session_id=f"session-{thread_id}",
+            jsonl_path=f"/tmp/{thread_id}.jsonl",
+            cwd="/tmp",
+            source="cli",
+            status=status,
+            confidence=DetectionConfidence.PERSISTED,
+            first_seen_at=last_seen_at,
+            last_seen_at=last_seen_at,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_delete_finished_sessions_before_only_removes_old_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.upsert_session(
+                self._session("thread-active", SessionStatus.RUNNING, 10)
+            )
+            registry.upsert_session(
+                self._session(
+                    "thread-blocked",
+                    SessionStatus.COMPLETED,
+                    10,
+                    quota_blocked_at=50,
+                )
+            )
+            registry.upsert_session(
+                self._session(
+                    "thread-resumed",
+                    SessionStatus.COMPLETED,
+                    10,
+                    resume_attempts=1,
+                )
+            )
+            registry.upsert_session(
+                self._session(
+                    "thread-old",
+                    SessionStatus.COMPLETED,
+                    10,
+                    last_event_at=20,
+                )
+            )
+            registry.upsert_session(
+                self._session(
+                    "thread-recent",
+                    SessionStatus.COMPLETED,
+                    200,
+                    last_event_at=150,
+                )
+            )
+            registry.upsert_session(
+                self._session(
+                    "thread-edge",
+                    SessionStatus.COMPLETED,
+                    100,
+                    last_event_at=100,
+                )
+            )
+            # thread-old 的恢复历史没有外键约束,必须随会话行一起级联删除。
+            registry.record_resume_attempt("thread-old", 5, 6, 0, None)
+
+            total = registry.count_sessions()
+            expired = registry.count_finished_sessions_before(100)
+            deleted = registry.delete_finished_sessions_before(100)
+            remaining = registry.count_sessions()
+            with sqlite3.connect(registry.db_path) as connection:
+                orphan_attempts = connection.execute(
+                    "SELECT COUNT(*) FROM resume_attempts WHERE thread_id = ?",
+                    ("thread-old",),
+                ).fetchone()[0]
+                kept_attempts = connection.execute(
+                    "SELECT COUNT(*) FROM resume_attempts"
+                ).fetchone()[0]
+            kept_ids = [
+                session.thread_id for session in registry.list_sessions()
+            ]
+
+        self.assertEqual(total, 6)
+        self.assertEqual(expired, 1)
+        self.assertEqual(deleted, 1)
+        self.assertEqual(remaining, 5)
+        # 活动会话、有额度阻塞/恢复历史的会话、边界和新会话都保留。
+        self.assertEqual(
+            sorted(kept_ids),
+            [
+                "thread-active",
+                "thread-blocked",
+                "thread-edge",
+                "thread-recent",
+                "thread-resumed",
+            ],
+        )
+        self.assertEqual(orphan_attempts, 0)
+        self.assertEqual(kept_attempts, 0)
+
+    def test_vacuum_keeps_database_readable_and_writable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.upsert_session(
+                self._session("thread-old", SessionStatus.COMPLETED, 10)
+            )
+
+            registry.delete_finished_sessions_before(100)
+            registry.vacuum()
+            registry.upsert_session(
+                self._session("thread-new", SessionStatus.RUNNING, 200)
+            )
+            restored = registry.get_session("thread-new")
+
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.thread_id, "thread-new")
+
+
 if __name__ == "__main__":
     unittest.main()

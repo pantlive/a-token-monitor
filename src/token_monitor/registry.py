@@ -27,6 +27,23 @@ class _AccountFilterUnset:
 
 _ACCOUNT_FILTER_UNSET = _AccountFilterUnset()
 
+# 中文注释:已结束的会话状态,历史清理只允许删除这些状态的行。
+_FINISHED_STATUS_VALUES = (
+    SessionStatus.COMPLETED.value,
+    SessionStatus.FAILED.value,
+    SessionStatus.ORPHANED.value,
+    SessionStatus.UNKNOWN.value,
+)
+
+# 中文注释:活动会话和带有额度恢复历史的会话始终保留;最后活动时间依次
+# 取 last_event_at、last_seen_at、updated_at,避免旧版本缺列时整批失效。
+_FINISHED_BEFORE_CLAUSE = (
+    f"status IN ({','.join('?' for _ in _FINISHED_STATUS_VALUES)})"
+    " AND COALESCE(last_event_at, last_seen_at, updated_at) < ?"
+    " AND quota_blocked_at IS NULL"
+    " AND resume_attempts = 0"
+)
+
 
 class MultiSessionRegistry:
     """保存所有发现会话和最近账户额度快照的 SQLite 注册表。"""
@@ -392,6 +409,73 @@ class MultiSessionRegistry:
         except sqlite3.Error as error:
             raise RegistryError(f"无法列出额度恢复记录: {error}") from error
         return [self._row_to_session(row) for row in rows]
+
+    @property
+    def db_path(self) -> Path:
+        """注册表 SQLite 文件路径，供历史数据管理器统计占用。"""
+
+        return self.database_file
+
+    def count_sessions(self) -> int:
+        """返回会话表的总行数。"""
+
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM sessions"
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise RegistryError(f"无法统计会话总数: {error}") from error
+        return int(row[0]) if row is not None else 0
+
+    def count_finished_sessions_before(self, cutoff: float) -> int:
+        """统计已结束、无恢复历史且最后活动时间早于 ``cutoff`` 的会话数。"""
+
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE "
+                    + _FINISHED_BEFORE_CLAUSE,
+                    (*_FINISHED_STATUS_VALUES, float(cutoff)),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise RegistryError(f"无法统计待清理会话: {error}") from error
+        return int(row[0]) if row is not None else 0
+
+    def delete_finished_sessions_before(self, cutoff: float) -> int:
+        """删除已结束且无恢复历史的旧会话，返回删除行数。
+
+        中文注释：resume_attempts 表没有外键约束，必须在同一事务里先按
+        thread_id 删掉对应的恢复历史，再删 sessions 行。
+        """
+
+        parameters = (*_FINISHED_STATUS_VALUES, float(cutoff))
+        try:
+            with self._connection() as connection:
+                connection.execute(
+                    "DELETE FROM resume_attempts WHERE thread_id IN ("
+                    "SELECT thread_id FROM sessions WHERE "
+                    + _FINISHED_BEFORE_CLAUSE
+                    + ")",
+                    parameters,
+                )
+                cursor = connection.execute(
+                    "DELETE FROM sessions WHERE " + _FINISHED_BEFORE_CLAUSE,
+                    parameters,
+                )
+                return int(cursor.rowcount or 0)
+        except sqlite3.Error as error:
+            raise RegistryError(f"无法清理过期会话: {error}") from error
+
+    def vacuum(self) -> None:
+        """先截断 WAL 再压缩数据库文件；数据库忙时抛错由上层跳过。"""
+
+        try:
+            with self._connection() as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("VACUUM")
+        except sqlite3.Error as error:
+            raise RegistryError(f"无法压缩会话状态库: {error}") from error
 
     def cancel_queued_resume(self, thread_id: str, now: float) -> str:
         """取消一个等待中的自动恢复，同时保留会话和额度中断历史。"""

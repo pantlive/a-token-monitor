@@ -163,6 +163,33 @@ class DiskScanTests(unittest.TestCase):
         self.assertEqual(report["reminders"], [])
         self.assertEqual(report["preview"]["count"], 0)
 
+    def test_update_targets_swaps_targets_and_invalidates_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home_a = root / ".codex"
+            home_b = root / ".kimi"
+            home_a.mkdir()
+            home_b.mkdir()
+            monitor = _monitor(root, home_a)
+            report_a = monitor.refresh(now=1_000.0)
+            monitor.sessions()
+
+            monitor.update_targets(
+                (AuditTarget("Kimi Code", "kimi", home_b),)
+            )
+            labels = [target.label for target in monitor.targets]
+            empty_after_swap = monitor.latest()
+            report_b = monitor.refresh(now=1_001.0)
+
+        self.assertEqual(report_a["directories"][0]["label"], "Codex (codex)")
+        self.assertEqual(labels, ["Kimi Code"])
+        # 中文注释：换目标后旧报告和会话缓存必须失效，latest 退回空报告。
+        self.assertEqual(empty_after_swap["directories"], [])
+        self.assertEqual(
+            [entry["label"] for entry in report_b["directories"]],
+            ["Kimi Code"],
+        )
+
 
 class CleanupPreviewTests(unittest.TestCase):
     """验证归档/清理预览的筛选和安全保护。"""

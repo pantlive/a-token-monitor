@@ -24,6 +24,11 @@ from .alerts import DEFAULT_RETENTION_DAYS as DEFAULT_ALERT_RETENTION_DAYS
 from .housekeeping import DEFAULT_SINGLE_WARN_GIB, DEFAULT_TOTAL_WARN_GIB
 from .monitor import MonitorConfig
 from .multi_account import MultiAccountMonitor
+from .retention import (
+    DEFAULT_SESSION_RETENTION_DAYS,
+    DEFAULT_USAGE_RETENTION_DAYS,
+)
+from .scan_dirs import ProviderDirsState, ScanDirsController
 from .usage import (
     DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
     DEFAULT_SESSION_TURN_WARN,
@@ -67,6 +72,8 @@ class ServiceConfig:
     upload_window_warn_mb: float = 64.0
     upload_window_danger_mb: float = 256.0
     alert_retention_days: float = DEFAULT_ALERT_RETENTION_DAYS
+    usage_retention_days: float = DEFAULT_USAGE_RETENTION_DAYS
+    session_retention_days: float = DEFAULT_SESSION_RETENTION_DAYS
     session_turn_warn: int = DEFAULT_SESSION_TURN_WARN
     session_context_warn_tokens: int = DEFAULT_SESSION_CONTEXT_WARN_TOKENS
     disk_warn_gb: float = DEFAULT_SINGLE_WARN_GIB
@@ -117,6 +124,11 @@ class ServiceConfig:
             raise ValueError("Codex 可执行文件不能为空")
         if self.session_root is not None and len(self.codex_homes) != 1:
             raise ValueError("--session-root 只能和一个 --codex-home 一起使用")
+        # 中文注释：保留天数先拒绝布尔等非数值类型，范围交给 MonitorConfig 校验。
+        for name in ("usage_retention_days", "session_retention_days"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} 必须是数值")
         MonitorConfig(
             codex_path=self.codex_path,
             scan_interval=self.scan_interval,
@@ -132,6 +144,8 @@ class ServiceConfig:
             upload_window_warn_mb=self.upload_window_warn_mb,
             upload_window_danger_mb=self.upload_window_danger_mb,
             alert_retention_days=self.alert_retention_days,
+            usage_retention_days=self.usage_retention_days,
+            session_retention_days=self.session_retention_days,
             session_turn_warn=self.session_turn_warn,
             session_context_warn_tokens=self.session_context_warn_tokens,
             disk_warn_gb=self.disk_warn_gb,
@@ -175,6 +189,8 @@ class ServiceConfig:
             "upload_window_warn_mb": self.upload_window_warn_mb,
             "upload_window_danger_mb": self.upload_window_danger_mb,
             "alert_retention_days": self.alert_retention_days,
+            "usage_retention_days": self.usage_retention_days,
+            "session_retention_days": self.session_retention_days,
             "session_turn_warn": self.session_turn_warn,
             "session_context_warn_tokens": self.session_context_warn_tokens,
             "disk_warn_gb": self.disk_warn_gb,
@@ -278,6 +294,14 @@ class ServiceConfig:
                 raw_payload, "alert_retention_days"
             )
             or DEFAULT_ALERT_RETENTION_DAYS,
+            usage_retention_days=_optional_float(
+                raw_payload, "usage_retention_days"
+            )
+            or DEFAULT_USAGE_RETENTION_DAYS,
+            session_retention_days=_optional_float(
+                raw_payload, "session_retention_days"
+            )
+            or DEFAULT_SESSION_RETENTION_DAYS,
             session_turn_warn=int(
                 _optional_float(raw_payload, "session_turn_warn")
                 or DEFAULT_SESSION_TURN_WARN
@@ -297,8 +321,23 @@ class ServiceConfig:
     def build_monitor(self) -> MultiAccountMonitor:
         """根据持久配置创建多账号监控器。"""
 
+        # 中文注释：持久化的空元组表示「未配置」，转成 None 才能让旧
+        # service.json 保持自动探测语义；显式禁用只由 Web 覆盖配置表达。
+        # 扫描目录损坏的 scan-dirs.json 会让这里的 ScanDirsError 直接抛出，
+        # daemon 启动不应静默忽略配置错误。
+        cli_homes: dict[str, tuple[Path, ...] | None] = {
+            "codex": self.codex_homes or None,
+            "claude": self.claude_homes or None,
+            "commandcode": self.commandcode_homes or None,
+            "dsh": self.dsh_homes or None,
+            "grok": self.grok_homes or None,
+            "kimi": self.kimi_homes or None,
+        }
+        controller = ScanDirsController(self.state_dir, cli_homes)
+        effective_dirs = controller.effective()
+        codex_state = effective_dirs.state("codex")
         accounts = build_account_specs(
-            homes=self.codex_homes,
+            homes=(None if codex_state.source == "auto" else codex_state.effective),
             state_dir=self.state_dir,
             session_root=self.session_root,
         )
@@ -316,6 +355,8 @@ class ServiceConfig:
             upload_window_warn_mb=self.upload_window_warn_mb,
             upload_window_danger_mb=self.upload_window_danger_mb,
             alert_retention_days=self.alert_retention_days,
+            usage_retention_days=self.usage_retention_days,
+            session_retention_days=self.session_retention_days,
             session_turn_warn=self.session_turn_warn,
             session_context_warn_tokens=self.session_context_warn_tokens,
             disk_warn_gb=self.disk_warn_gb,
@@ -325,12 +366,19 @@ class ServiceConfig:
             accounts=accounts,
             state_dir=self.state_dir,
             config=monitor_config,
-            grok_homes=self.grok_homes,
-            kimi_homes=self.kimi_homes,
-            dsh_homes=self.dsh_homes,
-            commandcode_homes=self.commandcode_homes,
-            claude_homes=self.claude_homes,
+            grok_homes=_daemon_homes(effective_dirs.state("grok")),
+            kimi_homes=_daemon_homes(effective_dirs.state("kimi")),
+            dsh_homes=_daemon_homes(effective_dirs.state("dsh")),
+            commandcode_homes=_daemon_homes(effective_dirs.state("commandcode")),
+            claude_homes=_daemon_homes(effective_dirs.state("claude")),
+            scan_dirs_controller=controller,
         )
+
+
+def _daemon_homes(state: ProviderDirsState) -> tuple[Path, ...] | None:
+    """自动探测来源传 None 交给监控器探测，其余来源按生效列表原样传入。"""
+
+    return None if state.source == "auto" else state.effective
 
 
 class UserServiceManager:
