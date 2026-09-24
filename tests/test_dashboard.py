@@ -1628,6 +1628,59 @@ class StylesheetIntegrityTests(unittest.TestCase):
                     )
                     self.assertGreater(len(body), 10)
 
+    def test_page_switches_language_by_request(self) -> None:
+        """页面语言：Accept-Language / 顶栏 cookie / ?lang= 都能切英文，默认中文。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            server = DashboardServer(
+                registries={
+                    "codex": MultiSessionRegistry(Path(temporary_directory) / "state")
+                },
+                config=DashboardConfig(port=0),
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+            server.start()
+            base = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                def fetch(path: str, headers: dict[str, str] | None = None) -> str:
+                    request = Request(f"{base}{path}", headers=headers or {})
+                    with urlopen(request, timeout=5) as response:
+                        return response.read().decode("utf-8")
+
+                chinese = fetch("/")
+                english_header = fetch("/", {"Accept-Language": "en-US,en;q=0.9"})
+                english_cookie = fetch(
+                    "/",
+                    {"Cookie": "a-token-monitor-language=en"},
+                )
+                english_query = fetch("/?lang=en")
+                english_settings = fetch(
+                    "/settings",
+                    {"Accept-Language": "en-US"},
+                )
+            finally:
+                server.close()
+
+        from a_token_monitor import i18n
+
+        self.assertIn('<html lang="zh-CN">', chinese)
+        self.assertIn("用量与费用", chinese)
+        for page in (english_header, english_cookie, english_query):
+            self.assertIn('<html lang="en">', page)
+            self.assertIn("Usage & cost", page)
+            # 注释里的中文说明不算界面文案，去掉注释再比。
+            self.assertNotIn("用量与费用", i18n._strip_comments(page))
+        self.assertIn('<html lang="en">', english_settings)
+        self.assertIn("Scan directories", english_settings)
+        # 顶栏语言开关与预置脚本（含 cookie 名）必须存在于两种语言下。
+        for page in (chinese, english_header):
+            self.assertIn('id="language-toggle"', page)
+            self.assertIn("a-token-monitor-language", page)
+
     def test_api_switches_language_by_request(self) -> None:
         """同一个接口：带 Accept-Language: en 时负载全英文，默认仍是中文。"""
 

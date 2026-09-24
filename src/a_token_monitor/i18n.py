@@ -36,9 +36,9 @@ _QUOTED_PATTERN = re.compile(
     r"[\"'`>]([^\"'`<>]*[\u4e00-\u9fff][^\"'`<>]*)[\"'`<]",
 )
 
-# 目录表补齐前，英文页面还没准备好对外；最后一轮把这里翻成 True，
-# 同时 test_english_pages_have_no_cjk 会从 skip 变成必须通过。
-EN_COMPLETE = False
+# 主页 / 设置页模板、API 负载与 CLI 输出都已英文化，这里打开后
+# test_english_pages_have_no_cjk 不再 skip，成为强制验收线。
+EN_COMPLETE = True
 
 # 目录表放在 i18n_catalog.py 里，便于分批维护与 review。
 _EN: dict[str, str] = dict(_CATALOG)

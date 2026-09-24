@@ -394,11 +394,18 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 
 ## 多语言
 
-界面、API 文案与 CLI 输出支持中文（源语言）与英文：浏览器按 `Accept-Language`
-自动选择，顶栏的「中/EN」开关可手动覆盖并在 localStorage 记忆；CLI 按 `LANG` /
-`LC_ALL` / `LC_MESSAGES` 判断，也可以用 `--lang en` 显式指定。英文文案由
-`src/a_token_monitor/i18n.py` 的目录表提供，测试用真实浏览器断言英文页面里不再出现
-中文字符，缺条目会直接失败。
+界面、API 文案与 CLI 输出支持中文（源语言）与英文，**默认自动判断**：
+
+- 浏览器按 `Accept-Language` 选择语言；顶栏「中 / EN」开关可手动覆盖，选择写进
+  localStorage 与 cookie（cookie 让后续接口请求保持同一语言）；
+- CLI 按 `LANG` / `LC_ALL` / `LC_MESSAGES` 判断，也可以用 `--lang en` / `--lang zh`
+  显式指定（放在子命令前后都行）；
+- 页面与接口都按请求语言渲染：`?lang=en` > cookie > `Accept-Language` > 中文。
+
+英文文案由 `src/a_token_monitor/i18n.py` + `i18n_catalog.py` 提供（目录表 + 正则模式，
+模式用于「会话 X 已进行 N 轮」这类带插值的句子）。三条测试守住质量：页面替换不得产生
+中英混杂（`不可用` 不会被 `可用` 咬到）、模板覆盖率棘轮钉在 0、英文页面与英文负载里
+不允许再出现中文（用户数据里的中文路径除外）。
 
 ## 部署与后台服务
 
