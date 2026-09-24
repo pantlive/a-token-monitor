@@ -20,6 +20,7 @@ from token_monitor.housekeeping import (
     HousekeepingMonitor,
 )
 from token_monitor.dashboard import (
+    _BASE_CSS,
     _DASHBOARD_HTML,
     _SETTINGS_HTML,
     DashboardConfig,
@@ -1441,6 +1442,70 @@ class ThemeTests(unittest.TestCase):
                 # 一处用于首屏预置，一处用于跟随系统时的运行时监听
                 self.assertEqual(page.count("prefers-color-scheme: light"), 2)
                 self.assertIn('id="theme-label"', page)
+
+
+class StylesheetIntegrityTests(unittest.TestCase):
+    """防止样式块在重构中被整段删除。
+
+    曾经因为合并 :root 块时吞掉了两个块之间的规则，导致 `box-sizing` 丢失、
+    页面横向溢出、按钮错位；这里用几个关键锚点把这类事故钉住。
+    """
+
+    CRITICAL_SELECTORS = (
+        "*",
+        "body",
+        ".app-shell",
+        "main",
+        "table",
+        "th, td",
+        ".table-wrap",
+        ".panel",
+        ".card",
+        ".btn",
+        ".topbar",
+        ".topbar-actions",
+        ".usage-tab",
+        ".usage-tabs",
+        ".usage-filter select",
+        ".account-block",
+        ".quota-card",
+        ".bar",
+        ".pill",
+        ".session-id",
+        ".section-meta",
+        ".section-count",
+    )
+
+    @staticmethod
+    def _selectors() -> set[str]:
+        return {
+            " ".join(match.group(1).split())
+            for match in re.finditer(r"(?m)^\s*([^\n{}]+?)\s*\{", _BASE_CSS)
+        }
+
+    def test_box_sizing_is_border_box(self) -> None:
+        """全局 border-box 缺失会让所有带内边距的元素撑破布局。"""
+
+        self.assertIn("* { box-sizing: border-box; }", _BASE_CSS)
+
+    def test_layout_critical_selectors_survive(self) -> None:
+        selectors = self._selectors()
+        missing = [
+            item for item in self.CRITICAL_SELECTORS if item not in selectors
+        ]
+        self.assertEqual(missing, [])
+
+    def test_shell_can_shrink_and_topbar_wraps(self) -> None:
+        """主区域必须可收缩、顶栏允许换行，否则新增按钮会挤出视口。"""
+
+        main_rules = re.findall(r"\n    main \{([^}]*)\}", _BASE_CSS)
+        self.assertTrue(any("min-width: 0" in rule for rule in main_rules), main_rules)
+        topbar = re.search(r"\n    \.topbar \{([^}]*)\}", _BASE_CSS)
+        self.assertIsNotNone(topbar)
+        self.assertIn("flex-wrap: wrap", topbar.group(1))
+        actions = re.search(r"\n    \.topbar-actions \{([^}]*)\}", _BASE_CSS)
+        self.assertIsNotNone(actions)
+        self.assertIn("flex-wrap: wrap", actions.group(1))
 
 
 class UsageSearchDashboardTests(unittest.TestCase):
