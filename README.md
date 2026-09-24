@@ -69,6 +69,8 @@ token-monitor --state-dir "$HOME/.token-monitor" alerts --prune
 token-monitor --state-dir "$HOME/.token-monitor" usage --days 30 --limit 20
 token-monitor --state-dir "$HOME/.token-monitor" usage --days 0 --session 01a0c7ed --json
 token-monitor --state-dir "$HOME/.token-monitor" usage --days 90 --group model --sort tokens
+token-monitor --state-dir "$HOME/.token-monitor" usage --days 30 --group account --sort cost
+token-monitor --state-dir "$HOME/.token-monitor" usage --account account-work --group model
 
 # 查看 agent 数据目录占用、磁盘提醒和可归档会话
 token-monitor --state-dir "$HOME/.token-monitor" disk --days 30
@@ -194,6 +196,13 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 - 用量索引保存于状态目录，后台重启后从检查点继续。
 - 用量区展示近 30 天按天成本趋势图（悬停查看当天金额与 token，当天高亮）、
   缓存节省金额（缓存命中相对全价输入节省的等价美元）和项目成本排行 Top 5。
+- 「用量与成本估算」区支持三种统计维度：按账号（默认）、按模型、按项目。
+  三种维度由同一份模型级叶子数据聚合，切换维度不改变合计口径：表尾给出合计行，
+  每行给出在筛选结果内的金额占比，并且始终显示账号成本排行 Top 5（金额 + 占比）
+  与项目成本排行 Top 5。筛选条件为账号、模型、项目三者可叠加；
+  账号口径沿用真实账号 ID 归并（`account_id` 优先，没有时退回 `profile:<名字>`），
+  同一账号在多个产品下产生用量也只算一行，行内用 Codex / Grok / Kimi Code /
+  Claude Code / DeepSeek Harness 等产品标签标注来源。
 - `--budget-usd <美元>`（daemon 和 service install 均支持）设置每月 API
   等价金额预算：用量区显示本月预算进度条；本月金额达到预算 80% 时页面顶部
   出现黄色告警、达到 100% 时变为红色告警。配额窗口耗尽或用量超过 90% 也
@@ -255,9 +264,10 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   `--ack`、`--ack-all` 标记已读，`--clear`、`--clear-before`、`--clear-all`
   删除历史（`--clear-all` 必须同时加 `--yes`），`--dry-run` 预览清理条数。
 - 「用量检索」区直接检索用量索引里的 token 历史记录：时间范围（近 7 / 30 / 90 天、
-  全部历史或自定义起止日期）、模型、关键词（会话 ID、JSONL 文件名、项目路径、模型）
-  三个维度筛选，可切换「会话明细 / 按日期汇总 / 按模型汇总」三种视图，并按
-  最近活动、token 用量或估算金额排序，支持翻页和点击会话 ID 下钻。
+  全部历史或自定义起止日期）、模型、账号、关键词（会话 ID、JSONL 文件名、项目路径、
+  模型）四个条件筛选，可切换「会话明细 / 按日期汇总 / 按模型汇总 / 按账号汇总」
+  四种视图，并按最近活动、token 用量或估算金额排序，支持翻页和点击会话 ID 下钻；
+  账号下拉来自索引里的文件级账号表，会话明细也会标注该会话属于哪个账号。
   `GET /api/usage/search` 提供同样的能力，`days=0` 表示不限时间；
   单次检索最多扫描 20 万条原始记录，命中上限时返回 `truncated`。
 - 活动会话的轮数和最新上下文会与用量索引对照：轮数达到 `--session-turn-warn`
@@ -282,9 +292,12 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   恢复到原路径；网页上的归档和清理在后台执行并按文件上报进度（压缩 → 校验 →
   删除），提交后立即返回，不会让页面等待整包压缩。归档默认放在状态目录的
   `archives/` 下。
-- 用量检索在 SQL 里按「日期 + 会话 + 模型 + 长上下文」聚合后再算金额，相同筛选
+- 用量检索在 SQL 里按「日期 + 会话 + 模型 + 长上下文」聚合后再算金额，账号身份来自
+  `usage_file_account` 文件级账号表（索引轮次里按 profile / auth.json 覆盖写入，
+  不影响 token 明细），账号分组和筛选同样是 SQL 层的 JOIN / 子查询；相同筛选
   条件带 30 秒缓存：8 万条记录的索引上，近 30 天查询约 0.13 秒、全部历史约 0.21 秒，
-  相同条件重复查询约 1 毫秒。
+  相同条件重复查询约 1 毫秒。旧索引第一次打开会自动建表，下一轮索引补齐账号标签，
+  在补齐之前这些记录按「未知账号」归组而不是被丢弃。
   索引为每条记录保存长上下文标记，旧索引第一次打开时就地回填一次（不重读 JSONL），
   回填中断后再次打开会继续补齐。
 - Claude Code 用量来自本地会话 JSONL（`~/.claude/projects/<项目>/<会话>.jsonl`）：
@@ -297,9 +310,10 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价估算。
 - `token-monitor usage` 在命令行检索同一份索引：`--days`（0 表示全部历史）或
   `--from` / `--to` 指定日期，`--model`（可重复）、`--session`、`--project`、
-  `--query` 筛选，`--group` 选择分组，`--sort` 选择排序，`--limit` / `--offset`
-  翻页，`--json` 输出机器可读结果。检索只读状态目录里的用量索引，
-  不会触发重新扫描 JSONL，也不会读取对话内容。
+  `--account`（匹配账号 ID、profile 名或产品，例如 `codex` / `grok`）、
+  `--query` 筛选，`--group` 选择分组（`session` / `date` / `model` / `account`），
+  `--sort` 选择排序，`--limit` / `--offset` 翻页，`--json` 输出机器可读结果。
+  检索只读状态目录里的用量索引，不会触发重新扫描 JSONL，也不会读取对话内容。
 
 金额是 OpenAI / Anthropic 等官方 API 等价估算，不代表 Plus、Claude 订阅或其他
 订阅的实际账单。模型没有已知 API 单价时仍展示 token，但不会计入金额合计。

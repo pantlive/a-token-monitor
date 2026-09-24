@@ -450,7 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     usage_parser = subparsers.add_parser(
         "usage",
-        help="按日期、模型和会话检索已索引的 token 用量历史",
+        help="按日期、模型、账号和会话检索已索引的 token 用量历史",
     )
     usage_parser.add_argument(
         "--days",
@@ -490,15 +490,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="按项目 / 工作目录筛选",
     )
     usage_parser.add_argument(
+        "--account",
+        default=None,
+        help="按账号筛选（匹配账号 ID、profile 名或产品，如 codex / grok）",
+    )
+    usage_parser.add_argument(
         "--query",
         default=None,
         help="按关键词搜索会话路径、项目和模型",
     )
     usage_parser.add_argument(
         "--group",
-        choices=("session", "date", "model"),
+        choices=("session", "date", "model", "account"),
         default="session",
-        help="分组方式：会话明细 / 按日期汇总 / 按模型汇总（默认: session）",
+        help="分组方式：会话明细 / 按日期汇总 / 按模型汇总 / 按账号汇总（默认: session）",
     )
     usage_parser.add_argument(
         "--sort",
@@ -1759,7 +1764,7 @@ def _format_count(value: object) -> str:
 
 
 def _show_usage_search(args: argparse.Namespace) -> int:
-    """按日期、模型和会话检索用量索引中的 token 历史记录。"""
+    """按日期、模型、账号和会话检索用量索引中的 token 历史记录。"""
 
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
@@ -1772,6 +1777,7 @@ def _show_usage_search(args: argparse.Namespace) -> int:
         models=tuple(args.models or ()),
         session=args.session,
         project=args.project,
+        account=args.account,
         keyword=args.query,
         group=args.group,
         sort=args.sort,
@@ -1821,11 +1827,18 @@ def _show_usage_search(args: argparse.Namespace) -> int:
             label = f"{row['date']} | {row['records']} 条 / {len(row['models'])} 个模型"
         elif args.group == "model":
             label = f"{(row['models'] or ['未知模型'])[0]} | {row['records']} 条"
+        elif args.group == "account":
+            products = "、".join(row.get("products") or ()) or "未知产品"
+            label = (
+                f"{row.get('account') or '未知账号'} | {row['records']} 条 / "
+                f"{len(row['models'])} 个模型 | {products}"
+            )
         else:
+            account_note = f" | {row['account']}" if row.get("account") else ""
             label = (
                 f"{_format_alert_time(row['last_at'])} | "
                 f"{(row['session_id'] or '未知会话')[:12]} | {row['model']} | "
-                f"{row['project'] or '目录未知'}"
+                f"{row['project'] or '目录未知'}{account_note}"
             )
         sys.stdout.write(
             f"{label} | 输入 {_format_count(usage.get('input_tokens', 0))}"

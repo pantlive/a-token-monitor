@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .agents import product_label
 from .grok import (
     GrokSessionInfo,
     grok_unified_log,
@@ -96,8 +97,17 @@ _CODEX_SESSION_ID_PATTERN = re.compile(
 )
 # 中文注释：用量检索分组和分页边界。单次检索最多扫描的原始记录数用于防止
 # 「全部时间」条件下把整份索引读进内存，命中上限时明确返回 truncated。
-_USAGE_SEARCH_GROUPS = ("session", "date", "model")
+_USAGE_SEARCH_GROUPS = ("session", "date", "model", "account")
 _USAGE_SEARCH_SORTS = ("recent", "tokens", "cost")
+# 中文注释：账号身份按文件落盘在 usage_file_account；子查询里把 path 改名，
+# 这样 JOIN 到 usage_delta 时不会出现同名列歧义。
+_FILE_ACCOUNT_VIEW = (
+    "SELECT path AS account_path, account_key, account_name, account_id, product "
+    "FROM usage_file_account"
+)
+# 中文注释：聚合行里最多展示几个账号 / 产品标签，避免分组结果被标签撑爆。
+_MAX_SEARCH_ACCOUNT_TAGS = 8
+_UNKNOWN_ACCOUNT = "未知账号"
 _DEFAULT_SEARCH_LIMIT = 50
 _MAX_SEARCH_LIMIT = 500
 _MAX_SEARCH_ROWS = 200_000
@@ -457,12 +467,13 @@ class UsageDelta:
 
 @dataclass(frozen=True)
 class _UsageSource:
-    """一个 JSONL 文件所属的 profile 和账号身份。"""
+    """一个 JSONL 文件所属的 profile、账号身份和产品。"""
 
     profile_name: str
     account_id: str | None
     codex_home: str | None
     project: str | None = None
+    product: str | None = None
 
     @property
     def account_key(self) -> str:
@@ -636,6 +647,10 @@ class _IndexRow:
     usage_json: str
     billing_usage_json: str | None
     project: str | None
+    account_key: str | None = None
+    account_name: str | None = None
+    account_id: str | None = None
+    product: str | None = None
 
     def delta(self) -> UsageDelta | None:
         """把索引行还原成 token 增量；损坏记录返回 None。"""
@@ -732,6 +747,27 @@ class _UsageIndexStore:
                     """
                     CREATE INDEX IF NOT EXISTS usage_delta_model_index
                     ON usage_delta(model, timestamp)
+                    """
+                )
+                # 中文注释：检索要按账号聚合和筛选，但账号身份来自
+                # profile / auth.json，不属于 token 明细本身，因此单独按文件
+                # 落一张表；只要索引轮次跑过就能 JOIN，不必重读 JSONL。
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS usage_file_account (
+                        path TEXT PRIMARY KEY,
+                        account_key TEXT NOT NULL,
+                        account_name TEXT NOT NULL,
+                        account_id TEXT,
+                        profile_name TEXT,
+                        product TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS usage_file_account_key_index
+                    ON usage_file_account(account_key)
                     """
                 )
                 connection.execute(
@@ -895,10 +931,11 @@ class _UsageIndexStore:
         models: Sequence[str] = (),
         session: str | None = None,
         project: str | None = None,
+        account: str | None = None,
         keyword: str | None = None,
         limit: int | None = None,
     ) -> tuple[_IndexRow, ...]:
-        """按时间、模型和会话关键词检索索引里的 token 记录。"""
+        """按时间、模型、会话和账号关键词检索索引里的 token 记录。"""
 
         clauses: list[str] = []
         parameters: list[Any] = []
@@ -936,11 +973,19 @@ class _UsageIndexStore:
                     )
                     clauses.append(keyword_clause)
                     parameters.extend(keyword_parameters)
+                account_pattern = _search_pattern(account)
+                if account_pattern is not None:
+                    clauses.append(_account_clause(account_pattern))
+                    parameters.extend([account_pattern] * 4)
                 where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
                 statement = (
                     "SELECT path, kind, timestamp, model, usage_json, "
-                    f"billing_usage_json, project FROM usage_delta{where} "
-                    "ORDER BY timestamp DESC, rowid DESC"
+                    "billing_usage_json, project, accounts.account_key, "
+                    "accounts.account_name, accounts.account_id, accounts.product "
+                    "FROM usage_delta LEFT JOIN "
+                    f"({_FILE_ACCOUNT_VIEW}) AS accounts "
+                    "ON accounts.account_path = usage_delta.path"
+                    f"{where} ORDER BY timestamp DESC, rowid DESC"
                 )
                 if limit is not None:
                     statement += " LIMIT ?"
@@ -972,6 +1017,10 @@ class _UsageIndexStore:
                     usage_json=usage_json,
                     billing_usage_json=billing,
                     project=project,
+                    account_key=row[7] if isinstance(row[7], str) else None,
+                    account_name=row[8] if isinstance(row[8], str) else None,
+                    account_id=row[9] if isinstance(row[9], str) else None,
+                    product=row[10] if isinstance(row[10], str) else None,
                 )
             )
         return tuple(result)
@@ -1051,12 +1100,14 @@ class _UsageIndexStore:
         models: Sequence[str] = (),
         session: str | None = None,
         project: str | None = None,
+        account: str | None = None,
         keyword: str | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """在 SQL 里按「日期 + 会话 + 模型 + 长上下文」聚合出 token 分桶。
 
         只返回聚合结果，不把逐条用量读进 Python；成本由调用方用每个分桶的
-        显式长上下文标记计算，保证与逐条估算一致。
+        显式长上下文标记计算，保证与逐条估算一致。账号身份用文件级账号表
+        JOIN 出来，缺少账号信息的旧索引行按未知账号处理。
         """
 
         clauses: list[str] = [
@@ -1098,11 +1149,19 @@ class _UsageIndexStore:
                     )
                     clauses.append(keyword_clause)
                     parameters.extend(keyword_parameters)
+                account_pattern = _search_pattern(account)
+                if account_pattern is not None:
+                    clauses.append(_account_clause(account_pattern))
+                    parameters.extend([account_pattern] * 4)
                 where = " WHERE " + " AND ".join(clauses)
                 connection.row_factory = sqlite3.Row
                 statement = (
                     "SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch', 'localtime') "
                     "AS day, path, model, COALESCE(long_context, 0) AS long_context, "
+                    "accounts.account_key AS account_key, "
+                    "accounts.account_name AS account_name, "
+                    "accounts.account_id AS account_id, "
+                    "accounts.product AS product, "
                     "COUNT(*) AS records, MIN(timestamp) AS first_at, "
                     "MAX(timestamp) AS last_at, "
                     "SUM(json_extract(usage_json, '$.input_tokens')) AS input_tokens, "
@@ -1127,8 +1186,11 @@ class _UsageIndexStore:
                     "SUM(COALESCE(json_extract(billing_usage_json, '$.output_tokens'), "
                     "json_extract(usage_json, '$.output_tokens'))) "
                     "AS billing_output_tokens "
-                    f"FROM usage_delta{where} "
-                    "GROUP BY day, path, model, long_context "
+                    f"FROM usage_delta LEFT JOIN ({_FILE_ACCOUNT_VIEW}) AS accounts "
+                    "ON accounts.account_path = usage_delta.path"
+                    f"{where} "
+                    "GROUP BY day, path, model, long_context, account_key, "
+                    "account_name, account_id, product "
                     "ORDER BY last_at DESC"
                 )
                 rows = connection.execute(statement, parameters).fetchall()
@@ -1146,7 +1208,7 @@ class _UsageIndexStore:
         return tuple(results)
 
     def facets(self) -> dict[str, Any]:
-        """返回索引整体的模型列表、会话数量和覆盖时间范围。"""
+        """返回索引整体的模型、账号列表和覆盖时间范围。"""
 
         try:
             with closing(self._connect()) as connection:
@@ -1158,11 +1220,16 @@ class _UsageIndexStore:
                     "SELECT DISTINCT model FROM usage_delta "
                     "WHERE model <> '' ORDER BY model"
                 ).fetchall()
+                account_rows = connection.execute(
+                    "SELECT DISTINCT account_name FROM usage_file_account "
+                    "WHERE account_name <> '' ORDER BY account_name"
+                ).fetchall()
         except sqlite3.DatabaseError:
             return {
                 "records": 0,
                 "sessions": 0,
                 "models": [],
+                "accounts": [],
                 "first_at": None,
                 "last_at": None,
             }
@@ -1170,6 +1237,7 @@ class _UsageIndexStore:
             "records": int(summary[0] or 0),
             "sessions": int(summary[3] or 0),
             "models": [str(row[0]) for row in model_rows],
+            "accounts": [str(row[0]) for row in account_rows][:200],
             "first_at": float(summary[1]) if summary[1] is not None else None,
             "last_at": float(summary[2]) if summary[2] is not None else None,
         }
@@ -1256,7 +1324,60 @@ class _UsageIndexStore:
                         "DELETE FROM usage_file_state WHERE path = ?",
                         stale,
                     )
+                account_rows = connection.execute(
+                    "SELECT path FROM usage_file_account"
+                ).fetchall()
+                stale_accounts = [
+                    (row[0],) for row in account_rows if row[0] not in allowed
+                ]
+                if stale_accounts:
+                    connection.executemany(
+                        "DELETE FROM usage_file_account WHERE path = ?",
+                        stale_accounts,
+                    )
         except (OSError, sqlite3.DatabaseError):
+            return
+
+    def save_file_accounts(self, sources: Mapping[Path, _UsageSource]) -> None:
+        """把每个 JSONL 文件所属的账号身份写入索引，供按账号聚合使用。
+
+        中文注释：账号身份来自 profile / auth.json，不在 token 明细里；这里按
+        文件覆盖写入，既让检索能按账号分组和筛选，也保证 profile 换号后旧会话
+        仍然归到写入当时的账号。
+        """
+
+        rows = [
+            (
+                str(path),
+                source.account_key,
+                source.account_name,
+                source.account_id,
+                source.profile_name,
+                source.product,
+            )
+            for path, source in sources.items()
+        ]
+        if not rows:
+            return
+        try:
+            with closing(self._connect()) as connection, connection:
+                connection.executemany(
+                    """
+                    INSERT INTO usage_file_account(
+                        path, account_key, account_name, account_id,
+                        profile_name, product
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                        account_key = excluded.account_key,
+                        account_name = excluded.account_name,
+                        account_id = excluded.account_id,
+                        profile_name = excluded.profile_name,
+                        product = excluded.product
+                    """,
+                    rows,
+                )
+        except (OSError, OverflowError, TypeError, ValueError, sqlite3.DatabaseError):
+            # 中文注释：账号表写入失败只影响分组展示，不影响 token 索引。
             return
 
 
@@ -1538,6 +1659,18 @@ def _keyword_clause(
     return f"{clause})", parameters
 
 
+def _account_clause(pattern: str) -> str:
+    """生成账号筛选子句：账号键、账号名、账号 ID 或产品命中都算匹配。"""
+
+    return (
+        "path IN (SELECT account_path FROM "
+        f"({_FILE_ACCOUNT_VIEW}) WHERE account_key LIKE ? ESCAPE '\\' "
+        "OR account_name LIKE ? ESCAPE '\\' "
+        "OR COALESCE(account_id, '') LIKE ? ESCAPE '\\' "
+        "OR COALESCE(product, '') LIKE ? ESCAPE '\\')"
+    )
+
+
 def _local_day(timestamp: float) -> str:
     """把时间戳格式化为本地自然日，与用量趋势的日期口径一致。"""
 
@@ -1553,13 +1686,16 @@ def _search_bucket_key(
     date_key: str,
     path: str,
     model: str,
+    account_key: str | None = None,
 ) -> tuple[Any, ...]:
-    """返回一个检索分组的键：按会话、按日期或按模型。"""
+    """返回一个检索分组的键：按会话、按日期、按模型或按账号。"""
 
     if group == "date":
         return (date_key,)
     if group == "model":
         return (model,)
+    if group == "account":
+        return (account_key or "",)
     return (date_key, path, model)
 
 
@@ -1571,8 +1707,11 @@ def _new_search_bucket(
     model: str,
     project: str | None,
     timestamp: float,
+    account_key: str | None = None,
+    account_name: str | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
-    """创建一个检索分组（会话明细 / 按日期 / 按模型共用）。"""
+    """创建一个检索分组（会话明细 / 按日期 / 按模型 / 按账号共用）。"""
 
     return {
         "key": "|".join(str(part) for part in key),
@@ -1582,6 +1721,15 @@ def _new_search_bucket(
         "model": model if group == "session" else None,
         "models": {},
         "project": project,
+        "account": (
+            (account_name or account_key or _UNKNOWN_ACCOUNT)
+            if group in ("session", "account")
+            else None
+        ),
+        "account_id": account_id if group == "account" else None,
+        "account_key": account_key if group == "account" else None,
+        "accounts": {},
+        "products": {},
         "usage": TokenUsage(),
         "cost": _ModelCost(),
         "records": 0,
@@ -1600,6 +1748,8 @@ def _accumulate_search_bucket(
     last_at: float,
     records: int,
     project: str | None,
+    account_name: str | None = None,
+    product: str | None = None,
 ) -> None:
     """把一批 token 与成本累加进检索分组。"""
 
@@ -1611,6 +1761,14 @@ def _accumulate_search_bucket(
     bucket["last_at"] = max(bucket["last_at"], last_at)
     if bucket["project"] is None:
         bucket["project"] = project
+    # 中文注释：按日期 / 按模型分组会合并多个账号，这里记录贡献最多的账号，
+    # 供面板显示账号标签；单个账号的分组标签在创建时就已经确定。
+    if account_name:
+        bucket["accounts"][account_name] = (
+            bucket["accounts"].get(account_name, 0) + usage.total_tokens
+        )
+    if product:
+        bucket["products"][product] = bucket["products"].get(product, 0) + 1
 
 
 def _token_usage_from_row(row: Mapping[str, Any], prefix: str = "") -> TokenUsage:
@@ -1646,6 +1804,13 @@ def _search_row_to_dict(bucket: Mapping[str, Any]) -> dict[str, Any]:
         "model": bucket["model"],
         "models": models[:8],
         "project": bucket["project"],
+        "account": bucket.get("account"),
+        "account_id": bucket.get("account_id"),
+        "account_key": bucket.get("account_key"),
+        "accounts": _top_tags(bucket.get("accounts")),
+        "products": [
+            product_label(item) for item in _top_tags(bucket.get("products"))
+        ],
         "usage": usage.to_dict(),
         "total_tokens": usage.total_tokens,
         "records": bucket["records"],
@@ -1654,6 +1819,28 @@ def _search_row_to_dict(bucket: Mapping[str, Any]) -> dict[str, Any]:
     }
     payload.update(cost.to_dict())
     return payload
+
+
+def _top_tags(values: Mapping[str, int] | None) -> list[str]:
+    """把「标签 → 权重」映射整理成按权重倒序、最多 N 个的标签列表。"""
+
+    if not values:
+        return []
+    ordered = sorted(values.items(), key=lambda item: (-item[1], item[0]))
+    return [name for name, _ in ordered[:_MAX_SEARCH_ACCOUNT_TAGS]]
+
+
+def _account_fields(
+    account_key: object,
+    account_name: object,
+    account_id: object,
+    product: object,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """把索引里的账号列整理成（键、显示名、账号 ID、产品）四元组。"""
+
+    key = _text_value(account_key)
+    name = _text_value(account_name) or key
+    return key, name, _text_value(account_id), _text_value(product)
 
 
 def _search_sort_key(sort: str) -> Any:
@@ -1848,6 +2035,7 @@ class _UsageAggregate:
 
     usage: TokenUsage = field(default_factory=TokenUsage)
     profiles: set[str] = field(default_factory=set)
+    products: set[str] = field(default_factory=set)
     models: dict[str, TokenUsage] = field(default_factory=dict)
     model_costs: dict[str, _ModelCost] = field(default_factory=dict)
     projects: dict[str, "_UsageAggregate"] = field(default_factory=dict)
@@ -1868,6 +2056,8 @@ class _UsageAggregate:
 
         self.usage = self.usage.add(delta.usage)
         self.profiles.add(source.profile_name)
+        if source.product:
+            self.products.add(source.product)
         previous = self.models.get(delta.model, TokenUsage())
         self.models[delta.model] = previous.add(delta.usage)
         cost = self.model_costs.setdefault(delta.model, _ModelCost())
@@ -2211,9 +2401,14 @@ class UsageAggregator:
                     account_id=source.account_id,
                     codex_home=source.codex_home,
                     project=cached_file.project,
+                    product=source.product,
                 )
         if ordered_paths:
             self._index_cursor = next_cursor % len(ordered_paths)
+        # 中文注释：账号身份按文件写进索引，检索才能按账号聚合和筛选；
+        # 这里覆盖本次扫描到的全部来源，不要求这轮真的读过文件。
+        if self._persistent is not None:
+            self._persistent.save_file_accounts(effective_sources)
         indexing = self._index_progress(
             tuple(sources),
             read_bytes_this_refresh=read_bytes_this_refresh,
@@ -2371,6 +2566,7 @@ class UsageAggregator:
                 "records": 0,
                 "sessions": 0,
                 "models": [],
+                "accounts": [],
                 "first_at": None,
                 "last_at": None,
             }
@@ -2389,13 +2585,14 @@ class UsageAggregator:
         models: Sequence[str] = (),
         session: str | None = None,
         project: str | None = None,
+        account: str | None = None,
         keyword: str | None = None,
         group: str = "session",
         sort: str = "recent",
         limit: int = _DEFAULT_SEARCH_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """按日期、模型和会话检索已落盘的 token 用量历史。
+        """按日期、模型、账号和会话检索已落盘的 token 用量历史。
 
         优先走 SQL 聚合（把逐条用量留在 SQLite 里），只有 JSON1 不可用或旧索引
         还没补齐长上下文标记时才退回逐条扫描；相同筛选条件命中 30 秒缓存。
@@ -2418,6 +2615,7 @@ class UsageAggregator:
             tuple(models),
             session,
             project,
+            account,
             keyword,
             group,
             sort,
@@ -2435,6 +2633,7 @@ class UsageAggregator:
                 models=models,
                 session=session,
                 project=project,
+                account=account,
                 keyword=keyword,
                 group=group,
                 sort=sort,
@@ -2449,6 +2648,7 @@ class UsageAggregator:
                 models=models,
                 session=session,
                 project=project,
+                account=account,
                 keyword=keyword,
                 group=group,
                 sort=sort,
@@ -2467,6 +2667,7 @@ class UsageAggregator:
         models: Sequence[str] = (),
         session: str | None = None,
         project: str | None = None,
+        account: str | None = None,
         keyword: str | None = None,
         group: str = "session",
         sort: str = "recent",
@@ -2481,6 +2682,7 @@ class UsageAggregator:
             models=models,
             session=session,
             project=project,
+            account=account,
             keyword=keyword,
         )
         truncated = len(rows) > _MAX_SEARCH_ROWS
@@ -2501,6 +2703,12 @@ class UsageAggregator:
             records = int(row["records"] or 0)
             row_first = float(row["first_at"] or 0.0)
             row_last = float(row["last_at"] or 0.0)
+            account_key, account_name, account_id, product = _account_fields(
+                row.get("account_key"),
+                row.get("account_name"),
+                row.get("account_id"),
+                row.get("product"),
+            )
             usage = _token_usage_from_row(row)
             billing = _token_usage_from_row(row, prefix="billing_")
             pricing = _lookup_pricing(model)
@@ -2511,7 +2719,7 @@ class UsageAggregator:
                 if pricing is not None
                 else _unknown_pricing_estimate()
             )
-            key = _search_bucket_key(group, day, path, model)
+            key = _search_bucket_key(group, day, path, model, account_key)
             bucket = buckets.get(key)
             if bucket is None:
                 bucket = _new_search_bucket(
@@ -2522,6 +2730,9 @@ class UsageAggregator:
                     model,
                     row.get("project"),
                     row_first,
+                    account_key=account_key,
+                    account_name=account_name,
+                    account_id=account_id,
                 )
                 buckets[key] = bucket
             _accumulate_search_bucket(
@@ -2533,6 +2744,8 @@ class UsageAggregator:
                 last_at=row_last,
                 records=records,
                 project=row.get("project"),
+                account_name=account_name,
+                product=product,
             )
             scanned_records += records
             totals_usage = totals_usage.add(usage)
@@ -2652,6 +2865,7 @@ class UsageAggregator:
         models: Sequence[str] = (),
         session: str | None = None,
         project: str | None = None,
+        account: str | None = None,
         keyword: str | None = None,
         group: str = "session",
         sort: str = "recent",
@@ -2666,6 +2880,7 @@ class UsageAggregator:
             models=models,
             session=session,
             project=project,
+            account=account,
             keyword=keyword,
             limit=_MAX_SEARCH_ROWS + 1,
         )
@@ -2692,7 +2907,13 @@ class UsageAggregator:
             scanned_records += 1
             estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model)
             date_key = _local_day(delta.timestamp)
-            key = _search_bucket_key(group, date_key, row.path, delta.model)
+            account_key, account_name, account_id, product = _account_fields(
+                row.account_key,
+                row.account_name,
+                row.account_id,
+                row.product,
+            )
+            key = _search_bucket_key(group, date_key, row.path, delta.model, account_key)
             bucket = buckets.get(key)
             if bucket is None:
                 bucket = _new_search_bucket(
@@ -2703,6 +2924,9 @@ class UsageAggregator:
                     delta.model,
                     row.project,
                     delta.timestamp,
+                    account_key=account_key,
+                    account_name=account_name,
+                    account_id=account_id,
                 )
                 buckets[key] = bucket
             _accumulate_search_bucket(
@@ -2714,6 +2938,8 @@ class UsageAggregator:
                 last_at=delta.timestamp,
                 records=1,
                 project=row.project,
+                account_name=account_name,
+                product=product,
             )
             totals_usage = totals_usage.add(delta.usage)
             totals_cost.add(estimate)
@@ -2828,6 +3054,7 @@ class UsageAggregator:
                 profile_name=_text_value(metadata.get("profile_name")) or profile_name,
                 account_id=account_id,
                 codex_home=codex_home,
+                product="codex",
             )
             if codex_home is not None:
                 root = Path(codex_home).expanduser() / "sessions"
@@ -2845,6 +3072,7 @@ class UsageAggregator:
                     account_id=session.account_id or account_id,
                     codex_home=codex_home,
                     project=_text_value(session.cwd),
+                    product="codex",
                 )
                 current_source = sources.get(path)
                 if (
@@ -2868,6 +3096,7 @@ class UsageAggregator:
                 profile_name=account.profile_name,
                 account_id=account.account_id,
                 codex_home=str(grok_home),
+                product="grok",
             )
         for kimi_home in self._kimi_homes:
             account = read_kimi_account(kimi_home)
@@ -2876,6 +3105,7 @@ class UsageAggregator:
                     profile_name=account.profile_name,
                     account_id=account.account_id,
                     codex_home=str(kimi_home),
+                    product="kimi",
                 )
         for dsh_home in self._dsh_homes:
             account = read_dsh_account(dsh_home)
@@ -2884,6 +3114,7 @@ class UsageAggregator:
                     profile_name=account.profile_name,
                     account_id=account.account_id,
                     codex_home=str(dsh_home),
+                    product="dsh",
                 )
         for claude_home in self._claude_homes:
             account = read_claude_account(claude_home)
@@ -2896,6 +3127,7 @@ class UsageAggregator:
                     profile_name=account.profile_name,
                     account_id=account.account_id,
                     codex_home=str(claude_home),
+                    product="claude",
                 )
         return sources
 
@@ -4397,6 +4629,9 @@ def _aggregate_to_dict(
         "account": account_name,
         "account_id": account_id,
         "profiles": sorted(profiles),
+        # 中文注释：账号口径沿用「真实账号 ID 优先」，这里只标注产品来源，
+        # 供面板显示 Codex / Grok / Kimi 等标签，不参与归组。
+        "products": sorted({product_label(item) for item in aggregate.products}),
         **totals,
         "projects": projects,
     }
