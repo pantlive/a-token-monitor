@@ -2642,7 +2642,7 @@ __THEME_TOGGLE__
       return `<div class="${classes}" style="height:${height}%" title="${escapeHtml(`${item.hour}:00 · ${formatNumber(tokens)} tokens`)}"></div>`;
     }).join('');
     const hoursPanel = `<div class="usage-trend"><div class="usage-trend-head"><span>活跃时段</span><span class="muted">按 token 加权 · 24 小时</span></div><div class="trend-chart">${hourBars}</div></div>`;
-    const statRow = (label, valueText, width, hint) => `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${escapeHtml(label)}${hint ? `<span class="muted"> · ${escapeHtml(hint)}</span>` : ''}</span><span class="top-project-value">${escapeHtml(valueText)}</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
+    const statRow = (label, valueText, width, hint, title) => `<div class="top-project"><div class="top-project-row"><span class="top-project-label"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}${hint ? `<span class="muted"> · ${escapeHtml(hint)}</span>` : ''}</span><span class="top-project-value">${escapeHtml(valueText)}</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
     const models = Array.isArray(insights.models) ? insights.models : [];
     const maxModelCost = models.reduce((max, item) => Math.max(max, Number(item.estimated_cost_usd || 0)), 0);
     const modelRows = models.map((item) => statRow(item.model, `${formatUsdCompact(item.estimated_cost_usd)} · ${formatNumber(item.total_tokens)} tokens`, maxModelCost > 0 ? Math.max(3, Math.round(Number(item.estimated_cost_usd || 0) / maxModelCost * 100)) : 3)).join('');
@@ -2662,11 +2662,29 @@ __THEME_TOGGLE__
       : '';
     const topConversations = Array.isArray(insights.top_conversations) ? insights.top_conversations : [];
     const maxTopCost = Number((topConversations[0] || {}).estimated_cost_usd || 0);
+    // 中文注释：最贵对话按「订阅（产品 · 套餐）· 账号 · 会话 · 项目路径」展示。
+    // 订阅与账号卡片同源（/api/state + 同一套 planLabel 归一化），会话 ID 只显示
+    // 前 12 位、完整 ID 放在悬停提示里，未定价提示仍然缀在最后。
+    const topSubscriptions = usageAccountSubscriptions();
+    const conversationTitle = (item) => {
+      const meta = topSubscriptions.get(item.account) || {};
+      const subscription = meta.plan ? `${meta.product} · ${meta.plan}` : (meta.product || '');
+      return subscription || `${item.account || '未知账号'}`;
+    };
+    const conversationDetail = (item, fullSessionId = false) => {
+      const sessionId = String(item.label || '').trim();
+      return [
+        item.account || '未知账号',
+        sessionId ? `会话 ${fullSessionId ? sessionId : sessionId.slice(0, 12)}` : '',
+        item.project || '',
+      ].filter(Boolean).join(' · ');
+    };
     const topRows = topConversations.map((item) => statRow(
-      item.label,
+      conversationTitle(item),
       `${formatUsdCompact(item.estimated_cost_usd)} · ${formatNumber(item.total_tokens)} tokens · ${formatNumber(item.turns)} 轮`,
       maxTopCost > 0 ? Math.max(3, Math.round(Number(item.estimated_cost_usd || 0) / maxTopCost * 100)) : 3,
-      `${item.account || '未知账号'}${item.project ? ` · ${item.project}` : ''}${item.has_unpriced ? ' · 含未定价模型' : ''}`
+      `${conversationDetail(item)}${item.has_unpriced ? ' · 含未定价模型' : ''}`,
+      `${conversationTitle(item)} · ${conversationDetail(item, true)}`
     )).join('');
     container.innerHTML = `${summary}${observationsPanel}<div class="insights-grid">${hoursPanel}${modelsPanel}${bucketsPanel}</div><div class="usage-trend"><div class="usage-trend-head"><span>省 token 建议</span><span class="muted">${escapeHtml(windowLabel)} · 按用量规模估算</span></div><div class="alert-list">${suggestionCards}</div></div><div class="usage-trend"><div class="usage-trend-head"><span>最贵对话 Top ${topConversations.length}</span><span class="muted">按 API 等价金额</span></div>${topRows || '<div class="muted">暂无可计价对话</div>'}</div>`;
   };
