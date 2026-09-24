@@ -766,7 +766,9 @@ _SETTINGS_CSS = r"""
 # 也不发起站外请求。候选方案来自 Stitch MCP 的设计稿，换方案只改 _FAVICON_STYLE。
 _FAVICON_SIZE = 64.0
 _FAVICON_RADIUS = 14.0
-_FAVICON_BACKGROUND = ((0x3B, 0x82, 0xF6), (0x06, 0xB6, 0xD4))
+# 中文注释：徽章渐变取页面自己的调色板——左上 violet（页面主色 #8b5cf6），
+# 右下 cyan（状态色 #06b6d4），这样标签页图标、侧栏 logo 和页面是同一套颜色。
+_FAVICON_BACKGROUND = ((0x8B, 0x5C, 0xF6), (0x06, 0xB6, 0xD4))
 _FAVICON_FOREGROUND = (0xFF, 0xFF, 0xFF)
 _FAVICON_ICO_SIZES = (16, 32)
 _FAVICON_SVG_ROUTE = "/favicon.svg"
