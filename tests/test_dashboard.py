@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from token_monitor.housekeeping import (
     HousekeepingMonitor,
 )
 from token_monitor import dashboard as dashboard_module
+from token_monitor.accounts import CodexAccount, read_codex_plan_type
 from token_monitor.dashboard import (
     _BASE_CSS,
     _DASHBOARD_HTML,
@@ -1557,6 +1559,197 @@ def _decode_favicon_png(
     return width, height, rows
 
 
+class SubscriptionPlanTests(unittest.TestCase):
+    """验证订阅类型（Codex plus / prolite、Grok SuperGrok 等）的读取与合并。"""
+
+    @staticmethod
+    def _jwt(claims: dict) -> str:
+        """构造一个只有 payload 有意义的假 JWT（不校验签名）。"""
+
+        def encode(value: dict) -> str:
+            raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+            return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+        return f"{encode({'alg': 'none'})}.{encode(claims)}.signature"
+
+    def test_reads_plan_from_id_token_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".codex"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps(
+                    {
+                        "tokens": {
+                            "account_id": "account-1",
+                            "access_token": "SECRET-ACCESS",
+                            "refresh_token": "SECRET-REFRESH",
+                            "id_token": self._jwt(
+                                {
+                                    "sub": "user-1",
+                                    "https://api.openai.com/auth": {
+                                        "chatgpt_plan_type": "plus",
+                                        "chatgpt_account_id": "account-1",
+                                    },
+                                }
+                            ),
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = read_codex_plan_type(home)
+            account = CodexAccount(
+                name="codex",
+                home=home,
+                session_root=home / "sessions",
+                state_dir=Path(temporary_directory) / "state",
+                account_id="account-1",
+                plan_type=plan,
+            )
+
+        self.assertEqual(plan, "plus")
+        self.assertEqual(account.plan_type, "plus")
+
+    def test_reads_plan_from_plain_field_and_handles_broken_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            plain = root / "plain"
+            plain.mkdir(parents=True)
+            (plain / "auth.json").write_text(
+                json.dumps({"tokens": {"chatgpt_plan_type": "prolite"}}),
+                encoding="utf-8",
+            )
+            broken = root / "broken"
+            broken.mkdir(parents=True)
+            (broken / "auth.json").write_text("{not json", encoding="utf-8")
+            weird = root / "weird"
+            weird.mkdir(parents=True)
+            (weird / "auth.json").write_text(
+                json.dumps({"tokens": {"id_token": "not-a-jwt"}}),
+                encoding="utf-8",
+            )
+
+            plain_plan = read_codex_plan_type(plain)
+            broken_plan = read_codex_plan_type(broken)
+            weird_plan = read_codex_plan_type(weird)
+            missing_plan = read_codex_plan_type(root / "missing")
+
+        self.assertEqual(plain_plan, "prolite")
+        self.assertIsNone(broken_plan)
+        self.assertIsNone(weird_plan)
+        self.assertIsNone(missing_plan)
+
+    def test_plan_type_is_cached_until_auth_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".codex"
+            home.mkdir(parents=True)
+            auth = home / "auth.json"
+            auth.write_text(
+                json.dumps({"tokens": {"chatgpt_plan_type": "plus"}}),
+                encoding="utf-8",
+            )
+            original = auth.stat().st_mtime_ns
+            first = read_codex_plan_type(home)
+            # 内容变了但 mtime 被还原成原值时仍然命中缓存（避免每 5 秒重解析）。
+            auth.write_text(
+                json.dumps({"tokens": {"chatgpt_plan_type": "pro"}}),
+                encoding="utf-8",
+            )
+            os.utime(auth, ns=(original, original))
+            cached = read_codex_plan_type(home)
+            # mtime 变化后必须重新解析。
+            os.utime(auth, ns=(original + 1_000_000_000, original + 1_000_000_000))
+            refreshed = read_codex_plan_type(home)
+
+        self.assertEqual(first, "plus")
+        self.assertEqual(cached, "plus")
+        self.assertEqual(refreshed, "pro")
+
+    def test_state_fills_missing_quota_plan_from_auth_file(self) -> None:
+        """Codex 额度快照常常没有 planType，要从 profile 的 auth.json 补齐。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps({"tokens": {"chatgpt_plan_type": "plus"}}),
+                encoding="utf-8",
+            )
+            registry = MultiSessionRegistry(root / "state")
+            registry.save_quota(
+                QuotaSnapshot(
+                    observed_at=100,
+                    plan_type=None,
+                    source="app-server",
+                    windows=(
+                        QuotaWindow(
+                            limit_id="codex",
+                            name="primary",
+                            used_percent=20,
+                            window_minutes=300,
+                            resets_at=200,
+                        ),
+                    ),
+                )
+            )
+
+            state = build_multi_dashboard_state(
+                {"codex": registry},
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-1",
+                        "profile_name": "codex",
+                        "codex_home": str(home),
+                    }
+                },
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+
+        self.assertEqual(state["quotas"][0]["plan_type"], "plus")
+        self.assertEqual(state["accounts"][0]["plan_type"], "plus")
+
+    def test_declared_metadata_plan_wins_over_auth_file(self) -> None:
+        """扫描目录元数据里已经写明的订阅类型优先于 auth.json。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            registry = MultiSessionRegistry(root / "state")
+            registry.save_quota(
+                QuotaSnapshot(
+                    observed_at=100,
+                    plan_type=None,
+                    source="app-server",
+                    windows=(),
+                )
+            )
+
+            state = build_multi_dashboard_state(
+                {"codex": registry},
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-1",
+                        "profile_name": "codex",
+                        "codex_home": str(root / "missing-home"),
+                        "plan_type": "prolite",
+                    }
+                },
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+
+        self.assertEqual(state["accounts"][0]["plan_type"], "prolite")
+        self.assertEqual(state["quotas"][0]["plan_type"], "prolite")
+
+
 class FaviconTests(unittest.TestCase):
     """验证浏览器标签图标：两个页面都注入，页面内 logo 与它同图，路由都能取到。"""
     def test_both_pages_link_the_favicon_once(self) -> None:
@@ -1796,6 +1989,26 @@ class FaviconTests(unittest.TestCase):
         self.assertIn('aria-label="Token Monitor"', favicon)
         self.assertIn('aria-hidden="true"', mark)
         self.assertNotIn("receipt", mark)
+
+    def test_account_card_leads_with_the_subscription(self) -> None:
+        """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn('<div class="account-label">订阅</div>', page)
+        self.assertIn('<h3 class="account-title">${escapeHtml(subscription)}</h3>', page)
+        self.assertIn('Account ID：<span class="mono">', page)
+        self.assertNotIn('<div class="account-label">Account ID</div>', page)
+        # 订阅类型来自额度快照或账号元数据，并做展示名归一化。
+        self.assertIn("const PLAN_NAMES = {", page)
+        self.assertIn("const planLabel = (value) => {", page)
+        self.assertIn("planLabel(account.plan_type)", page)
+        for raw, label in (
+            ("plus", "Plus"),
+            ("prolite", "Pro Lite"),
+            ("supergrok", "SuperGrok"),
+            ("goat", "GOAT"),
+        ):
+            self.assertIn(f"{raw}: '{label}'", page)
 
     def test_both_pages_use_the_shared_logo(self) -> None:
         for html in (_DASHBOARD_HTML, _SETTINGS_HTML):

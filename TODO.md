@@ -151,6 +151,15 @@
     `--session` / `--project` / `--account` / `--query` / `--group` / `--sort` / `--json`。
   - 只读取 token 元数据，不读取提示词或工具输出等对话内容。
 
+- [x] 账号卡片以订阅类型为主标题
+  - 「账号与额度」卡片标题改为 `产品 · 套餐`（Codex · Plus / Codex · Pro Lite /
+    Grok · SuperGrok / Command Code · GOAT），账号 ID 与 profile 降为次要信息行。
+  - Codex 的套餐从 `auth.json` 的 `id_token` → `chatgpt_plan_type` claim 读取，
+    按 mtime 缓存，不解析或记录令牌内容；扫描目录元数据里的值优先，额度快照
+    缺失 plan_type 时由账号元数据补齐（Dashboard 与 CLI 共用同一份字段）。
+  - DSH 不再把模型名塞进 `plan_type`（模型仍在 metadata.model），避免出现
+    「DeepSeek Harness · deepseek/deepseek-v4.1-flash」这种伪套餐。
+
 - [x] Dashboard 浏览器标签图标
   - `/favicon.svg` + `/favicon.ico`（16/32 PNG 回退）两个路由，Dashboard 与设置页
     共享同一段 `<link rel="icon">` 注入。
