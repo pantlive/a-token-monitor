@@ -25,6 +25,8 @@ from a_token_monitor.housekeeping import (
 )
 from a_token_monitor import dashboard as dashboard_module
 from a_token_monitor.accounts import CodexAccount, read_codex_plan_type
+from a_token_monitor.usage import calendar_day_start
+
 from a_token_monitor.dashboard import (
     _BASE_CSS,
     _DASHBOARD_CSS,
@@ -552,6 +554,11 @@ class DashboardTests(unittest.TestCase):
                 ) as response:
                     window_payload = json.load(response)
                     self.assertEqual(response.status, 200)
+                with urlopen(
+                    f"http://{host}:{port}/api/insights?days=today", timeout=2
+                ) as response:
+                    today_payload = json.load(response)
+                    self.assertEqual(response.status, 200)
                 head_request = Request(
                     f"http://{host}:{port}/api/insights",
                     method="HEAD",
@@ -572,12 +579,27 @@ class DashboardTests(unittest.TestCase):
         window_insights = window_payload["insights"]
         self.assertTrue(window_insights["ready"])
         self.assertEqual(window_insights["window_days"], 1)
+        self.assertEqual(window_insights["window_kind"], "days")
+        # days=today 用本地日历日起点，与「近 1 天」的滚动 24 小时不是一回事。
+        today_insights = today_payload["insights"]
+        self.assertTrue(today_insights["ready"])
+        self.assertEqual(today_insights["window_kind"], "today")
+        self.assertIsNone(today_insights["window_days"])
+        self.assertEqual(
+            today_insights["window_since"],
+            calendar_day_start(today_insights["observed_at"]),
+        )
+        self.assertLessEqual(
+            today_insights["window_since"],
+            today_insights["observed_at"],
+        )
         self.assertEqual(window_insights["conversation_count"], 0)
         for marker in (
             'id="insights"',
             'id="insights-load-button"',
             'id="insights-period-tabs"',
             'data-insights-days="7"',
+            'data-insights-days="today">今天<',
             "renderInsights",
             "/api/insights",
             "习惯分析",
