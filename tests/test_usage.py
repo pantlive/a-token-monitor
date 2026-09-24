@@ -17,6 +17,7 @@ from a_token_monitor.usage import (
     TokenUsage,
     UsageAggregator,
     _estimate_usage,
+    _lookup_pricing,
     _UsageIndexStore,
     search_since_days,
 )
@@ -381,6 +382,53 @@ class UsageAggregatorTests(unittest.TestCase):
             long_context["api_equivalent_cost_usd"],
             5.51502,
         )
+
+    def test_applies_gpt_6_and_mimo_api_pricing(self) -> None:
+        """新发布的 GPT-6 与小米 MiMo 也要能算出 API 等价金额。"""
+
+        small = TokenUsage(
+            input_tokens=100_000,
+            cached_input_tokens=20_000,
+            output_tokens=5_000,
+            total_tokens=105_000,
+        )
+        # 官方单价：sol $2/$0.2/$10，luna $0.1/$0.01/$0.5（每百万 token）。
+        # uncached 80k×2 + cached 20k×0.2 + output 5k×10 = 0.16+0.004+0.05
+        self.assertAlmostEqual(
+            _estimate_usage(small, "gpt-6-sol")["estimated_cost_usd"],
+            0.214,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(small, "gpt-6-luna")["estimated_cost_usd"],
+            0.0107,
+        )
+        # MiMo 国际站 $0.14/$0.0028/$0.28：0.0112+0.000056+0.0014
+        self.assertAlmostEqual(
+            _estimate_usage(small, "xiaomi/mimo-v2.6-flash")["estimated_cost_usd"],
+            0.012656,
+        )
+        # 官方文档：GPT-6 超过 272K 输入按 2x 输入计费。
+        long_usage = TokenUsage(input_tokens=300_000, total_tokens=300_000)
+        self.assertAlmostEqual(
+            _estimate_usage(long_usage, "gpt-6-sol")["estimated_cost_usd"],
+            1.2,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(long_usage, "gpt-6-luna")["estimated_cost_usd"],
+            0.06,
+        )
+        # MiMo 没有长上下文加价，300K 输入仍是单价原值。
+        self.assertAlmostEqual(
+            _estimate_usage(long_usage, "xiaomi/mimo-v2.6-flash")[
+                "estimated_cost_usd"
+            ],
+            0.042,
+        )
+        # 聚合商前缀、官方快照后缀与开源权重命名都要能命中同一份价格。
+        self.assertIsNotNone(_lookup_pricing("xiaomi/mimo-v2.6-flash"))
+        self.assertIsNotNone(_lookup_pricing("MiMo-V2.6-Flash-RL"))
+        self.assertIsNotNone(_lookup_pricing("gpt-6-sol-2026-09-22"))
+        self.assertIsNotNone(_lookup_pricing("GPT-6-Luna"))
 
     def test_indexes_history_with_a_bounded_read_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
