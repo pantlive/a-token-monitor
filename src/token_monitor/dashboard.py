@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import struct
 import time
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -765,6 +767,194 @@ _SETTINGS_CSS = r"""
 """
 
 
+# 中文注释：浏览器标签页图标（favicon）。几何只定义一次——圆角徽章 + 三根递增柱，
+# 与侧栏品牌同色（蓝 → 青渐变的用量柱状图）。同一份几何既生成矢量 SVG（现代浏览器
+# 走 /favicon.svg），也光栅化成 PNG / ICO（老浏览器走 /favicon.ico），因此图标不需要
+# 任何图像库、不写外部文件、也不发起站外请求。
+_FAVICON_SIZE = 64.0
+_FAVICON_RADIUS = 14.0
+_FAVICON_BACKGROUND = ((0x3B, 0x82, 0xF6), (0x06, 0xB6, 0xD4))
+_FAVICON_FOREGROUND = (0xFF, 0xFF, 0xFF)
+# 中文注释：(x, y, 宽度, 高度)，坐标基于 64×64 画布。
+_FAVICON_BARS = (
+    (14.0, 34.0, 8.0, 18.0),
+    (28.0, 24.0, 8.0, 28.0),
+    (42.0, 14.0, 8.0, 38.0),
+)
+_FAVICON_BAR_RADIUS = 4.0
+_FAVICON_ICO_SIZES = (16, 32)
+_FAVICON_SVG_ROUTE = "/favicon.svg"
+_FAVICON_ICO_ROUTE = "/favicon.ico"
+_FAVICON_SVG_MIME = "image/svg+xml"
+_FAVICON_ICO_MIME = "image/x-icon"
+# 中文注释：先给 ICO 回退、再给 SVG，浏览器按自己支持的类型挑选。
+_FAVICON_LINK = (
+    f'  <link rel="icon" href="{_FAVICON_ICO_ROUTE}" sizes="16x16 32x32">\n'
+    f'  <link rel="icon" href="{_FAVICON_SVG_ROUTE}" type="{_FAVICON_SVG_MIME}">\n'
+)
+_FAVICON_ICO_CACHE: bytes | None = None
+
+
+def _hex_color(color: tuple[int, int, int]) -> str:
+    """把 RGB 三元组转成 SVG 用的 #rrggbb。"""
+
+    return "#{:02x}{:02x}{:02x}".format(*color)
+
+
+def _favicon_svg() -> str:
+    """按共享几何生成矢量图标。"""
+
+    stops = "".join(
+        f'<stop offset="{index}" stop-color="{_hex_color(color)}"/>'
+        for index, color in enumerate(_FAVICON_BACKGROUND)
+    )
+    bars = "".join(
+        f'<rect x="{x:g}" y="{y:g}" width="{width:g}" height="{height:g}" '
+        f'rx="{_FAVICON_BAR_RADIUS:g}"/>'
+        for x, y, width, height in _FAVICON_BARS
+    )
+    size = int(_FAVICON_SIZE)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+        f'viewBox="0 0 {size} {size}" role="img" aria-label="Token Monitor">'
+        '<defs><linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">'
+        f"{stops}</linearGradient></defs>"
+        f'<rect width="{size}" height="{size}" rx="{_FAVICON_RADIUS:g}" '
+        'fill="url(#badge)"/>'
+        f'<g fill="{_hex_color(_FAVICON_FOREGROUND)}">{bars}</g>'
+        "</svg>"
+    )
+
+
+def _inside_rounded_square(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+) -> bool:
+    """判断点是否落在圆角矩形内（用于光栅化时的覆盖率采样）。"""
+
+    inner_x = min(max(x, radius), width - radius)
+    inner_y = min(max(y, radius), height - radius)
+    delta_x = x - inner_x
+    delta_y = y - inner_y
+    return delta_x * delta_x + delta_y * delta_y <= radius * radius
+
+
+def _favicon_sample(x: float, y: float) -> tuple[int, int, int, int]:
+    """返回 64×64 画布上某个采样点的 RGBA：柱体纯白，其余按对角渐变。"""
+
+    size = _FAVICON_SIZE
+    if not _inside_rounded_square(x, y, size, size, _FAVICON_RADIUS):
+        return (0, 0, 0, 0)
+    for bar_x, bar_y, bar_width, bar_height in _FAVICON_BARS:
+        if _inside_rounded_square(
+            x - bar_x,
+            y - bar_y,
+            bar_width,
+            bar_height,
+            _FAVICON_BAR_RADIUS,
+        ):
+            return (*_FAVICON_FOREGROUND, 255)
+    ratio = min(1.0, max(0.0, (x + y) / (2.0 * size)))
+    start, end = _FAVICON_BACKGROUND
+    return (
+        round(start[0] + (end[0] - start[0]) * ratio),
+        round(start[1] + (end[1] - start[1]) * ratio),
+        round(start[2] + (end[2] - start[2]) * ratio),
+        255,
+    )
+
+
+def _favicon_pixels(size: int) -> bytes:
+    """把图标光栅化成 RGBA 扫描行；每个像素做 4×4 超采样抗锯齿。"""
+
+    samples = 4
+    total_samples = samples * samples
+    rows = bytearray()
+    for row in range(size):
+        rows.append(0)  # PNG 每行前缀：过滤器类型 0（None）
+        for column in range(size):
+            red = green = blue = alpha_sum = 0.0
+            for sub_row in range(samples):
+                for sub_column in range(samples):
+                    # 采样点从目标像素换算回 64×64 画布坐标。
+                    x = (column + (sub_column + 0.5) / samples) * _FAVICON_SIZE / size
+                    y = (row + (sub_row + 0.5) / samples) * _FAVICON_SIZE / size
+                    sample = _favicon_sample(x, y)
+                    weight = sample[3] / 255.0
+                    red += sample[0] * weight
+                    green += sample[1] * weight
+                    blue += sample[2] * weight
+                    alpha_sum += weight
+            if alpha_sum <= 0:
+                rows.extend((0, 0, 0, 0))
+                continue
+            # 先按预乘 alpha 平均，再还原颜色，避免边缘出现黑边。
+            rows.extend(
+                (
+                    round(red / alpha_sum),
+                    round(green / alpha_sum),
+                    round(blue / alpha_sum),
+                    round(alpha_sum / total_samples * 255),
+                )
+            )
+    return bytes(rows)
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    """组装一个 PNG 数据块（长度 + 类型 + 内容 + CRC32）。"""
+
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _favicon_png(size: int) -> bytes:
+    """生成 8 位 RGBA 的 PNG 图标，只依赖 zlib。"""
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(_favicon_pixels(size), 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _favicon_ico() -> bytes:
+    """把多个尺寸的 PNG 打包成 ICO（Vista 起支持 PNG 负载，结果做进程内缓存）。"""
+
+    global _FAVICON_ICO_CACHE
+    if _FAVICON_ICO_CACHE is not None:
+        return _FAVICON_ICO_CACHE
+    images = [(size, _favicon_png(size)) for size in _FAVICON_ICO_SIZES]
+    header = struct.pack("<HHH", 0, 1, len(images))
+    offset = len(header) + 16 * len(images)
+    entries = bytearray()
+    for size, image in images:
+        entries.extend(
+            struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(image), offset)
+        )
+        offset += len(image)
+    _FAVICON_ICO_CACHE = b"".join([header, bytes(entries)] + [i for _, i in images])
+    return _FAVICON_ICO_CACHE
+
+
+def favicon_response(path: str) -> tuple[str, bytes] | None:
+    """返回 favicon 路由对应的 MIME 与内容；不是 favicon 路由时返回 None。"""
+
+    if path == _FAVICON_SVG_ROUTE:
+        return _FAVICON_SVG_MIME, _favicon_svg().encode("utf-8")
+    if path == _FAVICON_ICO_ROUTE:
+        return _FAVICON_ICO_MIME, _favicon_ico()
+    return None
+
+
 # 中文注释：主题实现由 Dashboard 与设置页共享，避免两个页面各写一份。
 _THEME_BOOT_SCRIPT = r"""  <script>
     // 主题预置：在样式解析前写入 data-theme / data-theme-mode，避免切换主题时闪白或闪黑。
@@ -848,11 +1038,12 @@ _PAGE_THEME_REPLACEMENTS = (
     ("__THEME_BOOT__", _THEME_BOOT_SCRIPT),
     ("__THEME_TOGGLE__", _THEME_TOGGLE_HTML),
     ("__THEME_SCRIPT__", _THEME_SCRIPT),
+    ("__FAVICON__", _FAVICON_LINK),
 )
 
 
 def _apply_theme_parts(html: str) -> str:
-    """把共享的主题实现注入页面模板，并确认占位符都已替换。"""
+    """把共享的主题实现和页面标签注入模板，并确认占位符都已替换。"""
 
     for marker, snippet in _PAGE_THEME_REPLACEMENTS:
         html = html.replace(marker, snippet)
@@ -866,6 +1057,7 @@ _DASHBOARD_HTML = _apply_theme_parts((
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
+__FAVICON__
 __THEME_BOOT__
   <title>Token Monitor</title>
   <style>
@@ -2875,6 +3067,7 @@ _SETTINGS_HTML = _apply_theme_parts((
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
+__FAVICON__
 __THEME_BOOT__
   <title>设置 - Token Monitor</title>
   <style>
@@ -4562,6 +4755,14 @@ def _make_handler(
                     body=_SETTINGS_HTML.encode("utf-8"),
                 )
                 return
+            favicon = favicon_response(path)
+            if favicon is not None:
+                self._send_bytes(
+                    status=200,
+                    content_type=favicon[0],
+                    body=favicon[1],
+                )
+                return
             if path == "/healthz":
                 status, payload = _healthz_payload(health)
                 self._send_json(status=status, payload=payload)
@@ -4838,6 +5039,15 @@ def _make_handler(
                     status=200,
                     content_type="text/html; charset=utf-8",
                     body=_SETTINGS_HTML.encode("utf-8"),
+                    include_body=False,
+                )
+                return
+            favicon = favicon_response(path)
+            if favicon is not None:
+                self._send_bytes(
+                    status=200,
+                    content_type=favicon[0],
+                    body=favicon[1],
                     include_body=False,
                 )
                 return
