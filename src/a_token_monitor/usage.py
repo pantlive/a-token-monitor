@@ -2557,8 +2557,15 @@ class UsageAggregator:
         account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
         now: float | None = None,
         since_days: int | None = None,
+        since: float | None = None,
+        window_kind: str | None = None,
     ) -> dict[str, Any]:
-        """对已索引的对话做习惯分析；可按最近天数限定统计窗口。"""
+        """对已索引的对话做习惯分析。
+
+        统计窗口可以给「最近 N 天」（``since_days``），也可以直接给起始时间戳
+        （``since``，用于「今天」这种按本地日历日对齐的窗口）；``window_kind``
+        会原样出现在结果里，供界面显示窗口名称。
+        """
 
         metadata_by_profile = account_metadata or {}
         with self._lock:
@@ -2571,11 +2578,13 @@ class UsageAggregator:
                     "observed_at": observed_at,
                     "indexing": dict(indexing) if isinstance(indexing, Mapping) else None,
                 }
-            since = (
-                observed_at - since_days * 86_400
-                if since_days is not None and since_days > 0
-                else None
-            )
+            if since is None:
+                since = (
+                    observed_at - since_days * 86_400
+                    if since_days is not None and since_days > 0
+                    else None
+                )
+            kind = window_kind or ("days" if since is not None else "all")
             sources = self._build_sources(registries, metadata_by_profile)
             conversations: list[_ConversationMetrics] = []
             for path, cached_file in self._cache.items():
@@ -2591,6 +2600,8 @@ class UsageAggregator:
                 conversations,
                 observed_at,
                 window_days=since_days if since is not None else None,
+                window_kind=kind,
+                window_since=since,
             )
 
     @staticmethod
@@ -4148,6 +4159,8 @@ def _build_insights(
     conversations: Sequence[_ConversationMetrics],
     observed_at: float,
     window_days: int | None = None,
+    window_kind: str = "all",
+    window_since: float | None = None,
 ) -> dict[str, Any]:
     """汇总对话级指标，生成使用画像和可执行的省 token 建议。"""
 
@@ -4289,6 +4302,8 @@ def _build_insights(
         "ready": True,
         "observed_at": observed_at,
         "window_days": window_days,
+        "window_kind": window_kind,
+        "window_since": window_since,
         "insufficient": len(conversations) < 3,
         "conversation_count": len(conversations),
         "total_tokens": total_tokens,
@@ -5394,6 +5409,12 @@ def _timestamp(value: Any) -> float | None:
             return parsed.timestamp()
         return number / 1000 if number > 10_000_000_000 else number
     return None
+
+
+def calendar_day_start(now: float | None = None) -> float:
+    """本地时区「今天 0 点」的时间戳，供各处的「今天」筛选共用。"""
+
+    return _period_start("calendar_day", time.time() if now is None else float(now))
 
 
 def _period_start(period_kind: str, now: float) -> float:

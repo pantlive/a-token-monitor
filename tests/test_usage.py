@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.usage import (
+    calendar_day_start,
     SessionSwitchThresholds,
     TokenUsage,
     UsageAggregator,
@@ -1417,6 +1418,13 @@ class UsageInsightsTests(unittest.TestCase):
                 now=now,
                 since_days=7,
             )
+            today = aggregator.insights(
+                {"codex": registry},
+                account_metadata=metadata,
+                now=now,
+                since=calendar_day_start(now),
+                window_kind="today",
+            )
 
         self.assertIsNone(full["window_days"])
         self.assertEqual(full["conversation_count"], 2)
@@ -1427,6 +1435,12 @@ class UsageInsightsTests(unittest.TestCase):
         self.assertEqual(week["total_tokens"], 2_200)
         self.assertEqual(week["top_conversations"][0]["label"], "recent")
         self.assertEqual(week["top_conversations"][0]["turns"], 1)
+        # 「今天」按本地日历日起点过滤，是全部历史的子集。
+        self.assertEqual(today["window_kind"], "today")
+        self.assertIsNone(today["window_days"])
+        self.assertEqual(today["window_since"], calendar_day_start(now))
+        self.assertLessEqual(today["conversation_count"], full["conversation_count"])
+        self.assertLessEqual(today["total_tokens"], full["total_tokens"])
 
 
 def _write_session(

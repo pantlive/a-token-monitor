@@ -76,6 +76,7 @@ from .usage import (
     SessionSwitchThresholds,
     UsageAggregator,
     enrich_session_views,
+    calendar_day_start,
     search_since_days,
 )
 
@@ -1549,6 +1550,7 @@ __THEME_TOGGLE__
       </div>
       <div class="usage-tabs" id="insights-period-tabs">
         <button class="usage-tab selected" type="button" data-insights-days="">全部</button>
+        <button class="usage-tab" type="button" data-insights-days="today">今天</button>
         <button class="usage-tab" type="button" data-insights-days="7">近 7 天</button>
         <button class="usage-tab" type="button" data-insights-days="30">近 30 天</button>
       </div>
@@ -2626,7 +2628,10 @@ __THEME_TOGGLE__
     }
     const hitRate = insights.cache_hit_rate;
     const windowDays = Number(insights.window_days || 0);
-    const windowLabel = windowDays > 0 ? `近 ${windowDays} 天` : '全部历史';
+    // 中文注释：今天按本地日历日（后端 days=today 用同一个起点），与用量区一致。
+    const windowLabel = insights.window_kind === 'today'
+      ? '今天'
+      : windowDays > 0 ? `近 ${windowDays} 天` : '全部历史';
     const summary = `<div class="usage-summary">
       <div class="usage-summary-item"><div class="usage-summary-label">分析对话数 · ${escapeHtml(windowLabel)}</div><div class="usage-summary-value">${formatNumber(insights.conversation_count)}</div></div>
       <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value">${formatNumber(insights.total_tokens)}</div></div>
@@ -4851,17 +4856,25 @@ def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
     }
 
 
-def _insights_window_days(query: str) -> int | None:
-    """解析习惯分析的天数窗口参数；缺失或非法值按全部历史处理。"""
+def _insights_window(query: str) -> tuple[str, int | None, float | None]:
+    """解析习惯分析的统计窗口，返回 ``(类型, 天数, 起始时间戳)``。
+
+    ``days=today`` 表示按本地日历日的「今天」（与用量区的今天同口径）；
+    ``days=N`` 表示最近 N 天；缺失、``0`` 或非法值都按全部历史处理。
+    """
 
     raw = parse_qs(query).get("days", [None])[0]
     if raw is None:
-        return None
+        return ("all", None, None)
+    if raw.strip().lower() == "today":
+        return ("today", None, calendar_day_start())
     try:
         days = int(raw)
     except ValueError:
-        return None
-    return days if 0 < days <= 3660 else None
+        return ("all", None, None)
+    if 0 < days <= 3660:
+        return ("days", days, None)
+    return ("all", None, None)
 
 
 def _usage_search_arguments(raw_query: str) -> dict[str, Any]:
@@ -5633,7 +5646,9 @@ def _make_handler(
                 )
                 return
             if path == "/api/insights":
-                window_days = _insights_window_days(urlsplit(self.path).query)
+                window_kind, window_days, window_since = _insights_window(
+                    urlsplit(self.path).query
+                )
                 current_registries, current_metadata = accounts.snapshot()
                 try:
                     insights = (
@@ -5641,6 +5656,8 @@ def _make_handler(
                             current_registries,
                             account_metadata=current_metadata,
                             since_days=window_days,
+                            since=window_since,
+                            window_kind=window_kind,
                         )
                         if usage_aggregator is not None
                         else UsageAggregator.empty_insights()
