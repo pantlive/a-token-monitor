@@ -1506,7 +1506,7 @@ __THEME_TOGGLE__
 
     <section id="accounts" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片以「产品 · 订阅类型」为标题（如 Codex · Plus、Grok · SuperGrok），账号 ID 与 profile 退到次要信息行；账号仍按真实账号 ID 分组，profile 混合登录也不会串额。活动会话默认折叠，可点击再展开，会话表里可直接归档单个已结束的 Codex 会话。</p></div>
+        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片以「产品 · 订阅类型」为标题（如 Codex · Plus、Grok · SuperGrok），账号 ID 与 profile 退到次要信息行；账号仍按真实账号 ID 分组，profile 混合登录也不会串额。每张卡片固定展示 5 小时 / 周 / 月三行额度，缺的周期标「不适用」；没有任何额度窗口的订阅（如 DeepSeek Harness、Claude Code）本区不显示。活动会话默认折叠，可点击再展开，会话表里可直接归档单个已结束的 Codex 会话。</p></div>
         <div class="section-meta"><span class="section-count" id="account-section-count">— 个账号</span></div>
       </div>
       <div id="account-list" class="account-list"><div class="empty-state">正在读取账号状态…</div></div>
@@ -3235,15 +3235,23 @@ __THEME_TOGGLE__
     const quotas = Array.isArray(state.quotas) ? state.quotas : [];
     const sessions = Array.isArray(state.sessions) ? state.sessions : [];
     const configuredAccounts = Array.isArray(state.accounts) ? state.accounts : [];
+    // 中文注释：本区展示的是额度窗口，所以没有任何额度窗口的订阅（DeepSeek Harness、
+    // Claude Code 这类没有额度概念的 provider）整张卡片都不出现，计数也只算显示出来的
+    // 订阅——否则会看到一排「0 个窗口」的空卡片。
+    const accountsWithQuota = new Set(
+      quotas
+        .filter((quota) => (quota.windows || []).length > 0)
+        .map((quota) => quota.account || 'codex')
+    );
     const names = [...new Set([
       ...configuredAccounts.map((account) => account.name),
       ...quotas.map((quota) => quota.account || 'codex'),
       ...sessions.map((session) => session.account || 'codex')
-    ])];
-    document.getElementById('quota-source').textContent = names.length ? `${names.length} 个账号` : '暂无账号';
-    document.getElementById('account-section-count').textContent = `${names.length} 个账号`;
+    ])].filter((name) => accountsWithQuota.has(name));
+    document.getElementById('quota-source').textContent = names.length ? `${names.length} 个账号` : '暂无额度订阅';
+    document.getElementById('account-section-count').textContent = names.length ? `${names.length} 个账号` : '暂无额度订阅';
     if (names.length === 0) {
-      container.innerHTML = '<div class="empty-state">暂无配置账号</div>';
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">没有带额度窗口的订阅</span><span class="empty-hint">没有额度概念的 provider（例如 DeepSeek Harness、Claude Code）不在本区显示，它们的使用量仍计入「用量与成本估算」。</span></div>';
       return;
     }
     container.innerHTML = names.map((name) => {
