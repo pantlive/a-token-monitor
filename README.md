@@ -3,7 +3,7 @@
 [![CI](https://github.com/pantlive/a-token-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/pantlive/a-token-monitor/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
 [![Python](https://img.shields.io/pypi/pyversions/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL v3+](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 本地 code agent 监控器：读取 Codex / Grok / Kimi / Command Code 等账号的额度窗口，
 发现正在运行的 agent 会话，统计 token 用量与 API 等价成本，并监控 Codex CLI、
@@ -311,38 +311,6 @@ Dashboard 除页面和只读接口外，只额外接受少数写接口（`POST /
 页面默认没有鉴权，使用 `--dashboard-host 0.0.0.0` 暴露到局域网时请确认
 网络内的其他设备可信。
 
-## 从旧版本升级（改名历史）
-
-项目经历过两次改名：`codex-reset-monitor` → `token-monitor` → `a-token-monitor`
-（PyPI 上 `token-monitor` 名字已被占用）。升级时：
-
-- 后台服务需要重新安装一次才会换成 `a-token-monitor.service`；重新安装之前，
-  `service status` / `service logs` / `service uninstall` 仍会自动识别并操作
-  旧的 `token-monitor.service` 和 `codex-reset-monitor.service`。
-- 状态目录默认使用 `~/.a-token-monitor`；如果它还不存在，会依次回退到旧的
-  `~/.token-monitor` 和 `~/.codex-reset-monitor`，额度快照、会话记录和用量
-  索引都不会丢失。想迁移时把旧目录改名或复制为 `~/.a-token-monitor` 即可。
-- 旧的命令 `token-monitor` / `codex-reset-monitor` 由 `a-token-monitor` 取代。
-
-## DevDeck
-
-DevDeck 可以将本项目配置为一个后端服务。工作目录填写项目根目录，启动命令：
-
-```bash
-PYTHONPATH=/path/to/a-token-monitor/src \
-python -u -m a_token_monitor \
-  --state-dir "$HOME/.a-token-monitor" \
-  --codex-home "$HOME/.codex" \
-  daemon \
-  --codex /home/yourname/.local/bin/codex \
-  --dashboard \
-  --dashboard-host 0.0.0.0 \
-  --dashboard-port {port}
-```
-
-DevDeck 会把 `{port}` 替换成项目配置的端口，可直接在 DevDeck 的「配置端口」
-中修改 Dashboard 端口。
-
 ## 开发验证
 
 ```bash
@@ -355,4 +323,10 @@ CI 在 Linux / macOS / Windows × Python 3.10 / 3.13 全矩阵跑同一套测试
 
 ## 许可证
 
-[MIT](LICENSE) © 2026 pantlive
+GNU General Public License v3.0 或更新版本（`GPL-3.0-or-later`），完整条款见
+[LICENSE](LICENSE)。
+
+Copyright (C) 2026 pantlive
+
+可以自由使用、修改和分发本程序；但分发本程序或其修改版时，必须同样以 GPL
+授权，并一并向接收者提供完整源码，不得附加额外限制。
