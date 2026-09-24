@@ -192,7 +192,15 @@
     默认（中文环境）仍是中文。新增 4 条 CLI 测试。
   - [ ] CLI 的 `--json` 输出仍是原样数据（脚本友好），如需英文可复用
     `localize_payload`；页面按语言下发 + 顶栏「中/EN」开关待做。
-  - [ ] 页面按语言下发（`Accept-Language` / `?lang=`）+ 顶栏「中/EN」开关待做。
+  - [x] 页面按语言下发：`?lang=` > 顶栏 cookie > `Accept-Language` > 中文；
+    `<html lang>` 同步切换，主页与设置页都走同一套替换。
+  - [x] 顶栏「中 / EN」开关：点击写 cookie + localStorage 后整页重载，后续接口请求
+    自动同语言；localStorage 的选择优先于浏览器语言（预置脚本发现不一致会补 cookie
+    并重载一次，用 sessionStorage 防止禁用 cookie 时来回跳）。
+  - [x] 打开 `EN_COMPLETE`：`test_english_pages_have_no_cjk` 不再跳过，成为强制验收线。
+  - [x] 实测（真实浏览器）：zh-CN 浏览器出中文页、开关显示 EN；en-US 浏览器出英文页、
+    可见文本 **0 处中文**（语言开关上的「中」除外）、`/api/state` 也全英文；
+    点开关切回中文并记住（cookie + 新开页面仍中文）；`?lang=en` 覆盖浏览器语言。
   - [ ] 路由按 `Accept-Language` / `?lang=` 出英文页面与英文负载；顶栏加「中/EN」手动
     切换（localStorage 记忆，与主题开关一致）；CLI 支持 `--lang` 并按 `LANG` 自动判断。
   - [ ] 收尾：打开 `EN_COMPLETE`，浏览器断言英文页面渲染文本里没有中日韩字符。

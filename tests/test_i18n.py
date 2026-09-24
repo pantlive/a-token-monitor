@@ -377,7 +377,15 @@ class PageSubstitutionTests(unittest.TestCase):
 
         pages = _DASHBOARD_HTML + _SETTINGS_HTML
         english = i18n._strip_comments(i18n.substitute(pages, "en"))
-        remaining = len(list(i18n.iter_text_runs(english)))
+        # 语言开关在英文页上显示的目标语言名（「中」）本来就该是中文，不算残留。
+        allowed = {"中"}
+        remaining = len(
+            [
+                run
+                for run in i18n.iter_text_runs(english)
+                if run not in allowed
+            ]
+        )
         self.assertLessEqual(
             remaining,
             self.UNCOVERED_LIMIT,
@@ -392,12 +400,16 @@ class EnglishCompletenessTests(unittest.TestCase):
     def test_english_pages_have_no_cjk(self) -> None:
         from a_token_monitor.dashboard import _DASHBOARD_HTML, _SETTINGS_HTML
 
+        # 语言开关在英文页上显示的目标语言名（「中」）本来就该是中文。
+        allowed = {"中"}
         for name, page in (("dashboard", _DASHBOARD_HTML), ("settings", _SETTINGS_HTML)):
             with self.subTest(page=name):
                 english = i18n.substitute(page, "en")
-                missing = i18n.missing_entries(english)
-                self.assertEqual(missing, (), f"{name} 还有未翻译文案: {missing[:10]}")
-                self.assertFalse(i18n.contains_cjk(english.split("<style>")[0]))
+                missing = [item for item in i18n.missing_entries(english) if item not in allowed]
+                self.assertEqual(missing, [], f"{name} 还有未翻译文案: {missing[:10]}")
+                # 注释（CSS / JS 里的中文说明）不算界面文案。
+                head = i18n._strip_comments(english.split("<style>")[0])
+                self.assertFalse(i18n.contains_cjk(head))
 
 
 _MISSING = object()

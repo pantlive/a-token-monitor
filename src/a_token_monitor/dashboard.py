@@ -24,7 +24,7 @@ from .alerts import (
     AlertStoreError,
     TrafficAlertStore,
 )
-from .i18n import localize_payload, resolve_language
+from .i18n import localize_payload, resolve_language, substitute
 from .housekeeping import (
     CleanupCriteria,
     HousekeepingError,
@@ -959,6 +959,17 @@ def _favicon_token() -> str:
 
 
 # 中文注释：先给 ICO（老浏览器与 Safari 稳），再给 SVG（大小屏幕都清晰）。
+_LANGUAGE_COOKIE_NAME = "a-token-monitor-language"
+
+
+def _localize_page(html: str, language: str) -> str:
+    """按语言出页面：英文走目录表替换，并改 <html lang>。"""
+
+    if language != "en":
+        return html
+    return substitute(html, "en").replace('<html lang="zh-CN">', '<html lang="en">', 1)
+
+
 _FAVICON_LINK = (
     f'  <link rel="icon" type="{_FAVICON_ICO_MIME}" '
     f'href="{_FAVICON_ICO_ROUTE}?v={_favicon_token()}" sizes="16x16 32x32">\n'
@@ -1348,6 +1359,27 @@ def favicon_response(path: str) -> tuple[str, bytes] | None:
 
 
 # 中文注释：主题实现由 Dashboard 与设置页共享，避免两个页面各写一份。
+_LANGUAGE_BOOT_SCRIPT = r"""  <script>
+    // 语言预置：localStorage 里记住的选择优先于浏览器语言。服务端按 cookie 决定语言，
+    // 所以这里发现不一致就补写 cookie 并重载一次；用 sessionStorage 打标记，避免在
+    // 禁用 cookie 的浏览器里来回重载。
+    (() => {
+      try {
+        const stored = window.localStorage.getItem('a-token-monitor-language');
+        if (stored !== 'zh' && stored !== 'en') return;
+        const current = document.documentElement.lang === 'en' ? 'en' : 'zh';
+        if (stored === current) return;
+        if (window.sessionStorage.getItem('a-token-monitor-language-applied') === stored) return;
+        window.sessionStorage.setItem('a-token-monitor-language-applied', stored);
+        document.cookie = `a-token-monitor-language=${stored}; path=/; max-age=31536000; SameSite=Lax`;
+        window.location.reload();
+      } catch (error) {
+        // 拿不到存储就按服务端语言渲染，不折腾。
+      }
+    })();
+  </script>
+"""
+
 _THEME_BOOT_SCRIPT = r"""  <script>
     // 主题预置：在样式解析前写入 data-theme / data-theme-mode，避免切换主题时闪白或闪黑。
     (() => {
@@ -1369,12 +1401,48 @@ _THEME_BOOT_SCRIPT = r"""  <script>
   </script>
 """
 
+_LANGUAGE_TOGGLE_HTML = r"""        <button id="language-toggle" class="theme-toggle" type="button" title="切换到英文（English）" aria-label="切换到英文界面">
+          <span id="language-label">EN</span>
+        </button>
+"""
+
 _THEME_TOGGLE_HTML = r"""        <button id="theme-toggle" class="theme-toggle" type="button" title="主题：跟随系统（点击切换）" aria-label="切换主题，当前跟随系统">
           <svg class="theme-icon theme-icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8 20h8M12 16.5v3.5"/></svg>
           <svg class="theme-icon theme-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
           <svg class="theme-icon theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
           <span id="theme-label">跟随系统</span>
         </button>
+"""
+
+_LANGUAGE_SCRIPT = r"""  // 语言：点一下切到另一种语言。界面文案由服务端按语言渲染，所以这里写 cookie +
+  // localStorage 后整页重载；cookie 让后续的接口请求也带上同一种语言。
+  const LANGUAGE_STORAGE_KEY = 'a-token-monitor-language';
+  const LANGUAGE_COOKIE = 'a-token-monitor-language';
+  const currentLanguage = document.documentElement.lang === 'en' ? 'en' : 'zh';
+  const writeLanguageCookie = (language) => {
+    const maxAge = 60 * 60 * 24 * 365;
+    document.cookie = `${LANGUAGE_COOKIE}=${language}; path=/; max-age=${maxAge}; SameSite=Lax`;
+  };
+  const switchLanguage = () => {
+    const next = currentLanguage === 'en' ? 'zh' : 'en';
+    writeLanguageCookie(next);
+    try {
+      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, next);
+    } catch (error) {
+      // 隐私模式下写不了 localStorage：cookie 仍然生效。
+    }
+    window.location.reload();
+  };
+  const languageToggle = document.getElementById('language-toggle');
+  if (languageToggle) {
+    const label = document.getElementById('language-label');
+    if (label) label.textContent = currentLanguage === 'en' ? '中' : 'EN';
+    languageToggle.title = currentLanguage === 'en'
+      ? '切换到中文（Chinese）'
+      : '切换到英文（English）';
+    languageToggle.setAttribute('aria-label', languageToggle.title);
+    languageToggle.addEventListener('click', switchLanguage);
+  }
 """
 
 _THEME_SCRIPT = r"""  // 主题：跟随系统 / 白天 / 夜间，选择存 localStorage，切换不需要刷新页面。
@@ -1427,9 +1495,9 @@ _THEME_SCRIPT = r"""  // 主题：跟随系统 / 白天 / 夜间，选择存 loc
 
 
 _PAGE_THEME_REPLACEMENTS = (
-    ("__THEME_BOOT__", _THEME_BOOT_SCRIPT),
-    ("__THEME_TOGGLE__", _THEME_TOGGLE_HTML),
-    ("__THEME_SCRIPT__", _THEME_SCRIPT),
+    ("__THEME_BOOT__", _THEME_BOOT_SCRIPT + _LANGUAGE_BOOT_SCRIPT),
+    ("__THEME_TOGGLE__", _LANGUAGE_TOGGLE_HTML + _THEME_TOGGLE_HTML),
+    ("__THEME_SCRIPT__", _THEME_SCRIPT + _LANGUAGE_SCRIPT),
     ("__FAVICON__", _FAVICON_LINK),
     ("__BRAND_MARK__", _brand_mark_svg()),
 )
@@ -5392,17 +5460,21 @@ def _make_handler(
 
             path = urlsplit(self.path).path
             if path == "/":
+                page = _localize_page(_DASHBOARD_HTML, self._request_language())
                 self._send_bytes(
                     status=200,
                     content_type="text/html; charset=utf-8",
-                    body=_DASHBOARD_HTML.encode("utf-8"),
+                    body=page.encode("utf-8"),
                 )
                 return
             if path == "/settings":
                 self._send_bytes(
                     status=200,
                     content_type="text/html; charset=utf-8",
-                    body=_SETTINGS_HTML.encode("utf-8"),
+                    body=_localize_page(
+                        _SETTINGS_HTML,
+                        self._request_language(),
+                    ).encode("utf-8"),
                 )
                 return
             favicon = favicon_response(path)
@@ -5685,7 +5757,10 @@ def _make_handler(
                 self._send_bytes(
                     status=200,
                     content_type="text/html; charset=utf-8",
-                    body=_DASHBOARD_HTML.encode("utf-8"),
+                    body=_localize_page(
+                        _DASHBOARD_HTML,
+                        self._request_language(),
+                    ).encode("utf-8"),
                     include_body=False,
                 )
                 return
@@ -5693,7 +5768,10 @@ def _make_handler(
                 self._send_bytes(
                     status=200,
                     content_type="text/html; charset=utf-8",
-                    body=_SETTINGS_HTML.encode("utf-8"),
+                    body=_localize_page(
+                        _SETTINGS_HTML,
+                        self._request_language(),
+                    ).encode("utf-8"),
                     include_body=False,
                 )
                 return
@@ -6250,7 +6328,11 @@ def _make_handler(
             logger.debug("Dashboard HTTP " + format, *args)
 
         def _request_language(self) -> str:
-            """当前请求的语言：显式 ?lang= 优先，其次 Accept-Language，最后中文。"""
+            """当前请求的语言。
+
+            优先级：显式 ``?lang=`` > 顶栏开关写入的 cookie > ``Accept-Language`` > 中文。
+            cookie 让「手动切换」对后续接口请求同样生效，不必给每个 fetch 加参数。
+            """
 
             try:
                 query = parse_qs(urlsplit(self.path).query)
@@ -6262,7 +6344,23 @@ def _make_handler(
                 if hasattr(self, "headers")
                 else None
             )
-            return resolve_language(accept_language=header, override=override)
+            cookie = self._language_cookie() if override is None else None
+            return resolve_language(
+                accept_language=header,
+                override=override or cookie,
+            )
+
+        def _language_cookie(self) -> str | None:
+            """读取顶栏语言开关写入的 cookie。"""
+
+            header = self.headers.get("Cookie") if hasattr(self, "headers") else None
+            if not header:
+                return None
+            for item in header.split(";"):
+                name, _, value = item.strip().partition("=")
+                if name == _LANGUAGE_COOKIE_NAME:
+                    return value.strip() or None
+            return None
 
         def _localized(self, payload: object) -> object:
             """按请求语言本地化负载里的字符串值（字典键与结构不动）。"""
