@@ -5,6 +5,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
 
+[English](README.en.md) | 中文
+
 本地 code agent 监控器：读取 Codex / Grok / Kimi / Command Code 等账号的额度窗口，
 发现正在运行的 agent 会话，统计 token 用量与 API 等价成本，并监控 Codex CLI、
 Grok CLI、Kimi Code、DeepSeek Harness、Command Code、Claude Code、OpenCode 等
@@ -128,7 +130,8 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
   （缺的周期占位「不适用」，卡片之间严格对齐）；卡片标题是订阅类型
   （`产品 · 套餐`），账号 ID、profile 退到次要信息行。Codex 的套餐名读本地
   `auth.json` 里 `id_token` 的 `chatgpt_plan_type` claim（不解析令牌内容），
-  Grok / Command Code 用各自额度接口返回的套餐名。
+  Grok / Command Code 用各自额度接口返回的套餐名，Claude Code 用本地凭据里的
+  订阅类型（Pro / Max 等）。
 - **用量与成本估算**：按账号 / 模型 / 项目三种维度切换，同一口径聚合；筛选
   条件可叠加，表尾给出合计行与占比，并始终显示账号、项目成本 Top 5。
 - **用量检索**：直接检索用量索引：时间范围、模型、账号、关键词四条件筛选，
@@ -176,7 +179,7 @@ Dashboard 顶栏据此显示「正常 / 部分降级 / 启动中 / 异常」徽�
 | Kimi Code | `GET {base}/usages`（含 booster 钱包对账） | 打开的 `state.json` / `wire.jsonl` | wire 日志 |
 | DeepSeek Harness | 无本地额度窗口 | 打开的 `session.lock` | projcache |
 | Command Code | `/alpha/whoami`、`/alpha/billing/*`、`/alpha/usage/summary` | 打开的会话 JSONL，退回按工作目录反查 | 会话 JSONL |
-| Claude Code | 无 | 打开的会话 JSONL（只读文件头部） | 会话 JSONL 的 `message.usage` |
+| Claude Code | OAuth usage 接口（5 小时 / 周 / Design 窗口） | 打开的会话 JSONL（只读文件头部） | 会话 JSONL 的 `message.usage` |
 
 共同口径：
 
@@ -186,6 +189,11 @@ Dashboard 顶栏据此显示「正常 / 部分降级 / 启动中 / 异常」徽�
   日志、返回值或 Dashboard。
 - Kimi 的 access token 过期时按官方相同的目录锁协议刷新并原子写回；
   各配额接口都有缓存（成功 60 秒、失败 15 秒），避免轮询反复请求。
+- Claude Code 额度读 `/api/oauth/usage`（Claude Code `/usage` 命令同款、未公开
+  接口，上游可能变动）：Linux / Windows 读 `~/.claude/.credentials.json`，
+  macOS 读 Keychain 的「Claude Code-credentials」；access token 过期不主动刷新
+  （交给 Claude Code 自己刷新），接口限速激进，所以成功缓存 5 分钟、失败缓存
+  1 分钟，被限速或读取失败时只展示账号身份，本地用量统计不受影响。
 
 内置单价覆盖 GPT-6 系列（`gpt-6-astra/sol/luna`）、小米 MiMo、智谱 GLM
 （`glm-5.3` 系列）与阶跃星辰（`step-5-preview`）；聚合商前缀、大小写和
