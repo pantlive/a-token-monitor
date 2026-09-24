@@ -19,6 +19,9 @@ import re
 from collections.abc import Iterator, Mapping
 from typing import Any
 
+from .i18n_catalog import PAGE as _CATALOG_PAGE
+from .i18n_catalog import VALUE as _CATALOG_VALUE
+
 # 支持的语言；zh 是源语言，不需要目录表。
 SUPPORTED_LANGUAGES: tuple[str, ...] = ("zh", "en")
 DEFAULT_LANGUAGE = "zh"
@@ -36,11 +39,14 @@ _QUOTED_PATTERN = re.compile(
 # 同时 test_english_pages_have_no_cjk 会从 skip 变成必须通过。
 EN_COMPLETE = False
 
-_EN: dict[str, str] = {
-    # 语言与界面框架
-    "中文": "中文",
-    "English": "English",
-}
+# 目录表放在 i18n_catalog.py 里，便于分批维护与 review。
+# 页面替换只认「整片段」条目（_EN_PAGE），精确翻译两者都用（_EN_VALUE）。
+_EN_PAGE: dict[str, str] = dict(_CATALOG_PAGE)
+_EN_VALUE: dict[str, str] = {**_CATALOG_VALUE, **_CATALOG_PAGE}
+_EN_VALUE.setdefault("中文", "中文")
+_EN_VALUE.setdefault("English", "English")
+# 兼容旧名字：很多测试与工具按 _EN 取目录。
+_EN = _EN_VALUE
 
 
 def contains_cjk(text: str) -> bool:
@@ -103,21 +109,30 @@ def translate(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
 
     if lang != "en" or not text:
         return text
-    return _EN.get(text, text)
+    return _EN_VALUE.get(text, text)
 
 
 def substitute(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
-    """把文本里出现的所有目录条目替换成目标语言（用于整份 HTML 模板）。
+    """把文本里出现的目录条目替换成目标语言（用于整份 HTML/JS 模板）。
 
-    按长度倒序替换，避免短条目先命中把长条目切碎（例如「额度」与「额度窗口」）。
+    两条规则保证不会翻坏：
+
+    1. **按长度倒序**替换，长条目先命中（「额度窗口」优先于「额度」）；
+    2. **中文边界断言**——只有当条目两侧不是其它中文字符时才替换。中文没有词边界，
+       否则 ``可用`` 会命中 ``不可用`` 里，替换完就是 ``不Available`` 这种中英混杂。
+       有了这条断言，覆盖不全的结果只会是「这句还没翻译」，不会是「翻译坏了」。
     """
 
     if lang != "en" or not text:
         return text
-    for source in sorted(_EN, key=len, reverse=True):
-        target = _EN[source]
-        if source in text:
-            text = text.replace(source, target)
+    for source in sorted(_EN_VALUE, key=len, reverse=True):
+        target = _EN_VALUE[source]
+        if source not in text:
+            continue
+        pattern = re.compile(
+            r"(?<![\u4e00-\u9fff])" + re.escape(source) + r"(?![\u4e00-\u9fff])"
+        )
+        text = pattern.sub(lambda _match, value=target: value, text)
     return text
 
 
@@ -146,6 +161,178 @@ def localize_payload(value: Any, lang: str = DEFAULT_LANGUAGE) -> Any:
     return value
 
 
+def iter_string_literals(source: str) -> Iterator[str]:
+    """切出完整的字符串字面量（含模板字符串与 ``${}`` 嵌套），只保留含中文的。
+
+    页面模板是 HTML + CSS + JS 混排，而且模板字符串里还会嵌引号（``'未知'``），
+    用正则切会被误判成超长片段。这里做一次简单但正确的扫描：跳过注释，遇到引号
+    就读到配对的收尾引号，模板字符串里的 ``${...}`` 按括号配对整体跳过（表达式里
+    还能再嵌字符串与模板）。
+    """
+
+    index = 0
+    length = len(source)
+    seen: set[str] = set()
+    while index < length:
+        char = source[index]
+        if char == "/" and index + 1 < length and source[index + 1] == "*":
+            end = source.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        if char == "/" and index + 1 < length and source[index + 1] == "/":
+            end = source.find("\n", index)
+            index = length if end < 0 else end + 1
+            continue
+        if char in "\"'`":
+            literal, index = _read_literal(source, index)
+            if literal and _CJK_PATTERN.search(literal) and literal not in seen:
+                seen.add(literal)
+                yield literal
+            continue
+        index += 1
+
+
+def _read_literal(source: str, start: int) -> tuple[str | None, int]:
+    """从 ``start`` 处的引号读到配对收尾，返回 (字面量, 下一个位置)。"""
+
+    quote = source[start]
+    index = start + 1
+    length = len(source)
+    buffer: list[str] = []
+    while index < length:
+        char = source[index]
+        if char == "\\":
+            buffer.append(source[index : index + 2])
+            index += 2
+            continue
+        if quote == "`":
+            if char == "`":
+                return "".join(buffer), index + 1
+            if char == "$" and index + 1 < length and source[index + 1] == "{":
+                expression, index = _read_expression(source, index + 2)
+                buffer.append("${" + expression + "}")
+                continue
+        elif char == quote:
+            return "".join(buffer), index + 1
+        elif char == "\n":
+            # 普通引号不跨行：说明这里的引号本来就是误判，放弃这一段。
+            return None, index + 1
+        buffer.append(char)
+        index += 1
+    return None, index
+
+
+def _read_expression(source: str, start: int) -> tuple[str, int]:
+    """读到与 ``${`` 配对的 ``}``，内部的字符串与模板整体保留。"""
+
+    index = start
+    length = len(source)
+    depth = 1
+    buffer: list[str] = []
+    while index < length:
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return "".join(buffer), index + 1
+        elif char in "\"'`":
+            literal, index = _read_literal(source, index)
+            if literal is not None:
+                buffer.append(quote_of(char) + literal + quote_of(char))
+            continue
+        buffer.append(char)
+        index += 1
+    return "".join(buffer), index
+
+
+def quote_of(char: str) -> str:
+    """给表达式里遇到的引号补回收尾字符，保持字面量原样。"""
+
+    return char
+
+
+def unsafe_keys(
+    source: str,
+    keys: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """列出会「部分命中」的目录条目。
+
+    中文没有词边界，短条目（例如 ``可用``）会命中更长文本（``不可用``）里，
+    替换完就是 ``不Available`` 这种中英混杂。判定规则：条目 K 安全，当且仅当
+    源码里每次出现 K 都落在「K 自己」或「另一个也收录了的更长片段」里——
+    后者由 :func:`substitute` 的最长优先保证。
+    """
+
+    catalog = _EN_PAGE if keys is None else keys
+    candidates = set(iter_text_runs(source)) | set(iter_string_literals(source))
+    unsafe: set[str] = set()
+    for key in catalog:
+        if not _CJK_PATTERN.search(key) or key not in source:
+            continue
+        for host in candidates:
+            if host == key or key not in host:
+                continue
+            if host in catalog:
+                continue
+            unsafe.add(key)
+            break
+    return tuple(sorted(unsafe))
+
+
+def uncovered_runs(source: str, lang: str = "en") -> tuple[str, ...]:
+    """列出还没收录进目录表的「最大中文片段」。"""
+
+    if lang != "en":
+        return ()
+    english = substitute(source, lang)
+    return tuple(
+        run
+        for run in iter_text_runs(source)
+        if run in english and run not in _EN_PAGE
+    )
+
+
+def uncovered_literals(source: str, lang: str = "en") -> tuple[str, ...]:
+    """列出替换后仍然原样保留的中文字面量，也就是还没处理的 JS/HTML 文案。"""
+
+    english = substitute(source, lang)
+    return tuple(item for item in iter_string_literals(source) if item in english)
+
+
+# 中文片段的分隔符：标签、引号、模板插值、换行等语法边界。
+_RUN_DELIMITER = re.compile(r'(?:\$\{|[<>"\'`\n\r])')
+
+
+def iter_text_runs(source: str) -> Iterator[str]:
+    """列出源码里的「最大中文片段」。
+
+    片段以语法边界（标签、引号、``${`` 插值、换行）切分，所以像
+    ``接近额度上限，注意剩余用量`` 这样整句是一条，而 ``不可用`` 不会被
+    ``可用`` 这类短词条咬到——目录表只收这种最大片段，替换才不会产生中英混杂。
+    """
+
+    segments: list[str] = []
+    for chunk in _RUN_DELIMITER.split(_strip_comments(source)):
+        for piece in str(chunk).split("\n"):
+            pieces = re.split(r"(?:\}[^\s]*|[A-Za-z_$][\w$.]*\()", piece)
+            segments.extend(pieces)
+    seen: set[str] = set()
+    for segment in segments:
+        candidate = segment.strip(" \t,;:.")
+        if not candidate or not _CJK_PATTERN.search(candidate) or candidate in seen:
+            continue
+        seen.add(candidate)
+        yield candidate
+
+
+def _strip_comments(source: str) -> str:
+    """去掉 CSS/JS 注释，避免注释里的中文进清单。"""
+
+    return _LINE_COMMENT_PATTERN.sub("", _BLOCK_COMMENT_PATTERN.sub("", source))
+
+
 def iter_source_strings(text: str) -> Iterator[str]:
     """列出模板里可能需要翻译的中文串（跳过注释），用于生成待翻译清单。"""
 
@@ -159,16 +346,31 @@ def iter_source_strings(text: str) -> Iterator[str]:
         yield candidate
 
 
+def uncovered_strings(text: str, lang: str = "en") -> tuple[str, ...]:
+    """列出替换后仍然「原样保留」的中文串，也就是真正还没处理的文案。
+
+    比 :func:`missing_entries` 更贴近目标：碎片词条可能把句子替换成中英混杂，
+    那种情况整句已经不再原样出现，得靠「替换结果里还有没有中文」来兜底。
+    """
+
+    if lang == "en":
+        already = substitute(text, lang)
+        return tuple(
+            item for item in iter_source_strings(text) if item in already
+        )
+    return ()
+
+
 def missing_entries(text: str) -> tuple[str, ...]:
     """列出模板里还没有英文条目的中文串。"""
 
-    return tuple(item for item in iter_source_strings(text) if item not in _EN)
+    return tuple(item for item in iter_source_strings(text) if item not in _EN_PAGE)
 
 
 def catalog_size() -> int:
     """当前英文条目数量（文档与测试用）。"""
 
-    return len(_EN)
+    return len(_EN_PAGE) + len(_CATALOG_VALUE)
 
 
 def _process_env() -> Mapping[str, str]:

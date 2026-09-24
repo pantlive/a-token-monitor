@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from a_token_monitor import i18n
@@ -63,11 +64,24 @@ class TranslationTests(unittest.TestCase):
     def test_substitute_replaces_longest_first(self) -> None:
         with patch_catalog({"额度": "Quota", "额度窗口": "Quota windows"}):
             self.assertEqual(
-                i18n.substitute("额度窗口与额度", "en"),
-                "Quota windows与Quota",
+                i18n.substitute("额度窗口 · 额度", "en"),
+                "Quota windows · Quota",
             )
         # 中文与英文以外的语言不做替换。
         self.assertEqual(i18n.substitute("额度窗口", "zh"), "额度窗口")
+
+    def test_substitute_never_bites_into_longer_words(self) -> None:
+        """中文没有词边界：短条目不能命中更长的词，否则会翻成中英混杂。"""
+
+        # 用「甲/乙」当邻居，保证不会命中真实目录里的整句条目。
+        with patch_catalog({"可用": "Available", "刷新": "Refresh"}):
+            self.assertEqual(i18n.substitute("甲不可用乙", "en"), "甲不可用乙")
+            self.assertEqual(i18n.substitute("甲刷新乙", "en"), "甲刷新乙")
+            self.assertEqual(i18n.substitute("甲：可用", "en"), "甲：Available")
+            self.assertEqual(i18n.substitute("刷新 乙", "en"), "Refresh 乙")
+        with patch_catalog({"可用": "Available", "不可用": "Unavailable"}):
+            # 长条目先命中，短条目就不会再咬进它里面。
+            self.assertEqual(i18n.substitute("不可用", "en"), "Unavailable")
 
     def test_localize_payload_translates_values_only(self) -> None:
         with patch_catalog({"今天": "Today", "近 7 天": "Last 7 days"}):
@@ -105,6 +119,36 @@ class SourceStringScanTests(unittest.TestCase):
         for comment in ("这段不该进清单", "中文行注释也不该进清单"):
             self.assertNotIn(comment, found)
 
+    def test_literal_scanner_handles_templates_and_comments(self) -> None:
+        """模板字符串里的嵌套引号、嵌套模板与注释都不能把字面量切错。"""
+
+        sample = (
+            "const a = '未知';\n"
+            'const b = "共 {n} 条";\n'
+            "const c = `另有 ${items.filter((item) => item.name === '模型')"
+            ".length} 个模型`;\n"
+            "const d = `外层 ${`内层 ${x} 文本`} 结束`;\n"
+            "/* 注释里的 '引号' 不算 */\n"
+            '// 行注释里的 "引号" 也不算\n'
+            'const e = "no chinese here";\n'
+        )
+        found = list(i18n.iter_string_literals(sample))
+        self.assertEqual(
+            found,
+            [
+                "未知",
+                "共 {n} 条",
+                "另有 ${items.filter((item) => item.name === '模型').length} 个模型",
+                "外层 ${`内层 ${x} 文本`} 结束",
+            ],
+        )
+
+    def test_uncovered_literals_reports_remaining(self) -> None:
+        # 用虚构文案，避免目录表补齐后命中真实条目。
+        source = "const a = '甲甲甲';\nconst b = '乙乙乙';\n"
+        with patch_catalog({"甲甲甲": "AAA"}):
+            self.assertEqual(i18n.uncovered_literals(source), ("乙乙乙",))
+
     def test_contains_cjk_matches_chinese_only(self) -> None:
         self.assertTrue(i18n.contains_cjk("总览"))
         self.assertTrue(i18n.contains_cjk("额 度"))
@@ -112,9 +156,45 @@ class SourceStringScanTests(unittest.TestCase):
         self.assertFalse(i18n.contains_cjk("Usage & cost estimation"))
 
     def test_missing_entries_reports_untranslated(self) -> None:
-        missing = i18n.missing_entries("<h2>用量与成本估算</h2>")
-        self.assertEqual(missing, ("用量与成本估算",))
+        # 用一个不会进目录表的占位文案，避免目录补齐后这条用例失效。
+        missing = i18n.missing_entries("<h2>这是一条没有条目的文案</h2>")
+        self.assertEqual(missing, ("这是一条没有条目的文案",))
         self.assertEqual(i18n.missing_entries("<h2>Dashboard</h2>"), ())
+
+
+class PageSubstitutionTests(unittest.TestCase):
+    """替换结果的质量守卫：不能出现中英混杂，覆盖率只能前进。"""
+
+    # 覆盖率棘轮：每补一批目录就把它调小，最后一轮要求 0。
+    UNCOVERED_LIMIT = 230
+
+    def test_substitution_never_produces_mixed_script_runs(self) -> None:
+        """中文旁边紧邻英文字母就是翻坏了（例如「不Available」）。"""
+
+        from a_token_monitor.dashboard import _DASHBOARD_HTML, _SETTINGS_HTML
+
+        mixed = re.compile(r"[\u4e00-\u9fff][A-Za-z]|[A-Za-z][\u4e00-\u9fff]")
+        for name, page in (("dashboard", _DASHBOARD_HTML), ("settings", _SETTINGS_HTML)):
+            english = i18n._strip_comments(i18n.substitute(page, "en"))
+            broken = [
+                run for run in i18n.iter_text_runs(english) if mixed.search(run)
+            ]
+            with self.subTest(page=name):
+                self.assertEqual(broken[:5], [])
+
+    def test_english_coverage_only_improves(self) -> None:
+        """英文覆盖率棘轮：未翻译片段数不能超过上一轮记录。"""
+
+        from a_token_monitor.dashboard import _DASHBOARD_HTML, _SETTINGS_HTML
+
+        pages = _DASHBOARD_HTML + _SETTINGS_HTML
+        english = i18n._strip_comments(i18n.substitute(pages, "en"))
+        remaining = len(list(i18n.iter_text_runs(english)))
+        self.assertLessEqual(
+            remaining,
+            self.UNCOVERED_LIMIT,
+            f"未翻译片段涨到 {remaining} 条，请补目录表或调小 UNCOVERED_LIMIT",
+        )
 
 
 class EnglishCompletenessTests(unittest.TestCase):
@@ -132,18 +212,26 @@ class EnglishCompletenessTests(unittest.TestCase):
                 self.assertFalse(i18n.contains_cjk(english.split("<style>")[0]))
 
 
+_MISSING = object()
+
+
 def patch_catalog(entries: dict[str, str]):
-    """临时把条目塞进目录表，测完还原。"""
+    """临时把条目塞进目录表，测完精确还原（含被覆盖的原有条目）。"""
 
     class _Patcher:
         def __enter__(self):
-            self.added = entries
+            # 覆盖式打补丁必须记住原值：直接 pop 会把真实条目也删掉，
+            # 后面的覆盖率断言就会莫名其妙地失败。
+            self.previous = {key: i18n._EN.get(key, _MISSING) for key in entries}
             i18n._EN.update(entries)
             return i18n
 
         def __exit__(self, *exc_info):
-            for key in self.added:
-                i18n._EN.pop(key, None)
+            for key, value in self.previous.items():
+                if value is _MISSING:
+                    i18n._EN.pop(key, None)
+                else:
+                    i18n._EN[key] = value
             return False
 
     return _Patcher()
