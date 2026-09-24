@@ -163,6 +163,59 @@ class SourceStringScanTests(unittest.TestCase):
         self.assertEqual(i18n.missing_entries("<h2>Dashboard</h2>"), ())
 
 
+class CliLocalizationTests(unittest.TestCase):
+    """CLI 输出本地化：--lang / LANG 都要生效，中文默认不变。"""
+
+    def _run(self, arguments: list[str]) -> str:
+        import contextlib
+        import io
+
+        from a_token_monitor import cli as cli_module
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            try:
+                cli_module.main(arguments)
+            except SystemExit:
+                pass
+        return buffer.getvalue()
+
+    def test_help_is_english_with_lang_flag(self) -> None:
+        output = self._run(["--help", "--lang", "en"])
+        self.assertNotIn("未知", output)
+        leftover = [
+            run for run in i18n.iter_text_runs(output) if i18n.contains_cjk(run)
+        ]
+        self.assertEqual(leftover, [])
+        self.assertIn("Monitor quotas", output)
+
+    def test_help_is_english_with_lang_env(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8"}, clear=False):
+            output = self._run(["--help"])
+        leftover = [
+            run for run in i18n.iter_text_runs(output) if i18n.contains_cjk(run)
+        ]
+        self.assertEqual(leftover, [])
+
+    def test_chinese_stays_default(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"LANG": "zh_CN.UTF-8"}, clear=False):
+            output = self._run(["--help"])
+        self.assertTrue(i18n.contains_cjk(output))
+
+    def test_lang_works_after_subcommand(self) -> None:
+        output = self._run(["status", "--help", "--lang", "en"])
+        leftover = [
+            run for run in i18n.iter_text_runs(output) if i18n.contains_cjk(run)
+        ]
+        self.assertEqual(leftover, [])
+
+
 class PayloadLocalizationTests(unittest.TestCase):
     """API 负载本地化：拼出来的句子要翻到，用户数据不能被动。"""
 

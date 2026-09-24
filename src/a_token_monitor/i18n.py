@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Iterator, Mapping
 from typing import Any
 
@@ -155,6 +156,81 @@ def substitute(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
         )
         text = pattern.sub(lambda _match, value=target: value, text)
     return text
+
+
+def localize_line(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
+    """CLI 输出用：精确匹配与模式规则之后，再补一遍带边界的子串替换。
+
+    和 API 负载不同，CLI 的输出是一行行拼出来的（表头、状态行、帮助文本），允许子串
+    替换；中文边界断言保证 ``可用`` 不会咬进 ``不可用`` 里。API 负载不能用这个函数，
+    否则用户数据里的中文可能被误伤。
+    """
+
+    if lang != "en" or not text:
+        return text
+    return substitute(translate(text, lang), lang)
+
+
+class TranslatedStream:
+    """把写到某个流上的文本先翻译一遍（CLI 的 stdout/stderr 用）。
+
+    放在流这一层是为了「一处接入」：CLI 与各模块都用 ``print`` / ``sys.stdout.write``
+    输出，包一层就不用改上百处调用点。
+    """
+
+    def __init__(self, stream: Any, lang: str) -> None:
+        self._stream = stream
+        self._lang = lang
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        # CLI 会把一句话分几次 write（print 的多个参数、f-string 拼接），逐段翻译会
+        # 把句子切断、模式规则匹配不上，所以先按行攒起来再整体翻译。
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._stream.write(localize_line(line, self._lang) + "\n")
+        if "\r" in self._buffer:
+            head, _, tail = self._buffer.rpartition("\r")
+            self._stream.write(localize_line(head, self._lang) + "\r")
+            self._buffer = tail
+        if len(self._buffer) > 8192:
+            self._stream.write(localize_line(self._buffer, self._lang))
+            self._buffer = ""
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._stream.write(localize_line(self._buffer, self._lang))
+            self._buffer = ""
+        self._stream.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+_ACTIVE_LANGUAGE = DEFAULT_LANGUAGE
+
+
+def active_language() -> str:
+    """当前进程选定的语言（CLI 用；页面/接口按请求判定，不看这个）。"""
+
+    return _ACTIVE_LANGUAGE
+
+
+def use_language(lang: str) -> None:
+    """按语言包装 stdout/stderr；英文以外的语言不做任何包装。"""
+
+    global _ACTIVE_LANGUAGE
+    _ACTIVE_LANGUAGE = lang
+    if lang != "en":
+        return
+    stdout = sys.stdout
+    stderr = sys.stderr
+    if not isinstance(stdout, TranslatedStream):
+        sys.stdout = TranslatedStream(stdout, lang)
+    if not isinstance(stderr, TranslatedStream):
+        sys.stderr = TranslatedStream(stderr, lang)
 
 
 def localize_payload(value: Any, lang: str = DEFAULT_LANGUAGE) -> Any:

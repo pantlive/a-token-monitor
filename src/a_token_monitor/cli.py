@@ -13,6 +13,7 @@ from typing import Callable, Mapping, Sequence
 
 from .accounts import CodexAccount, build_account_specs
 from .claude import list_claude_active_sessions, read_claude_account
+from .i18n import active_language, resolve_language, translate, use_language
 from .agents import product_label
 from .housekeeping import (
     DEFAULT_SINGLE_WARN_GIB,
@@ -167,9 +168,20 @@ def _port(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
 
+    language = argparse.ArgumentParser(add_help=False)
+    language.add_argument(
+        "--lang",
+        choices=("auto", "zh", "en"),
+        default="auto",
+        help=(
+            "输出语言：auto 按 LANG / LC_ALL / LC_MESSAGES 判断，zh 中文，en 英文"
+            "（默认: auto）"
+        ),
+    )
     parser = argparse.ArgumentParser(
         prog="a-token-monitor",
         description="监控 Codex / Grok / Kimi / Command Code / DeepSeek Harness 等 code agent 的额度、会话、用量和异常流量。",
+        parents=[language],
     )
     parser.add_argument(
         "--state-dir",
@@ -255,6 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser(
         "status",
+        parents=[language],
         help="查看历史状态，不会调用 Codex",
     )
     status_parser.add_argument(
@@ -265,6 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     quota_parser = subparsers.add_parser(
         "quota",
+        parents=[language],
         help="主动读取当前账户额度，不启动模型任务",
     )
     quota_parser.add_argument(
@@ -280,6 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sessions_parser = subparsers.add_parser(
         "sessions",
+        parents=[language],
         help="发现并列出所有当前活动的 Codex JSONL 会话",
     )
     sessions_parser.add_argument(
@@ -302,12 +317,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_parser = subparsers.add_parser(
         "daemon",
+        parents=[language],
         help="持续监控活动会话、额度、本地用量和异常流量",
     )
     _add_daemon_options(daemon_parser)
 
     traffic_parser = subparsers.add_parser(
         "traffic",
+        parents=[language],
         help="扫描本机 code agent 进程的异常流量",
     )
     traffic_parser.add_argument(
@@ -325,6 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     alerts_parser = subparsers.add_parser(
         "alerts",
+        parents=[language],
         help="查询已落盘的历史异常流量告警，并管理已读状态；存在未读告警时退出码为 1",
     )
     alerts_parser.add_argument(
@@ -459,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     usage_parser = subparsers.add_parser(
         "usage",
+        parents=[language],
         help="按日期、模型、账号和会话检索已索引的 token 用量历史",
     )
     usage_parser.add_argument(
@@ -540,6 +559,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     disk_parser = subparsers.add_parser(
         "disk",
+        parents=[language],
         help="统计 .codex 等 agent 数据目录的磁盘占用，并预览可归档或清理的会话",
     )
     disk_parser.add_argument(
@@ -563,6 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     service_parser = subparsers.add_parser(
         "service",
+        parents=[language],
         help="安装和管理无需保持终端打开的后台服务（Linux systemd / macOS launchd）",
     )
     service_actions = service_parser.add_subparsers(
@@ -2333,12 +2354,63 @@ def _configure_output_encoding() -> None:
             continue
 
 
+def _localize_parser(parser: argparse.ArgumentParser) -> None:
+    """把 argparse 里的文案换成当前语言，交给 argparse 自己按目标语言换行。
+
+    必须在 ``parse_args`` 之前做：argparse 会按终端宽度自己折行，如果在输出阶段做
+    子串替换，折行会把句子切断、匹配不上。
+    """
+
+    language = active_language()
+    if language != "en":
+        return
+    if parser.description:
+        parser.description = translate(parser.description, language)
+    for action in parser._actions:  # noqa: SLF001 - argparse 没提供公开遍历接口
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            for subparser in action.choices.values():
+                _localize_parser(subparser)
+        if action.help:
+            action.help = translate(action.help, language)
+
+
+def _requested_language(
+    arguments: Sequence[str],
+    explicit: str | None = None,
+) -> str:
+    """判断本次调用要用的语言：``--lang`` 显式值优先，否则按环境变量。
+
+    单独抽出来是因为 ``--help`` 由 argparse 在解析阶段就打印，必须在解析前就知道语言。
+    """
+
+    if explicit is not None and explicit != "auto":
+        return explicit
+    for index, item in enumerate(arguments):
+        if item == "--lang" and index + 1 < len(arguments):
+            candidate = arguments[index + 1]
+            if candidate in {"zh", "en"}:
+                return candidate
+            break
+        if item.startswith("--lang="):
+            candidate = item.split("=", 1)[1]
+            if candidate in {"zh", "en"}:
+                return candidate
+            break
+    return resolve_language()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行主函数。"""
 
     _configure_output_encoding()
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # 必须在 parse_args 之前：argparse 处理 --help 时就直接打印并退出了，
+    # 那时再包 stdout 已经来不及。
+    use_language(_requested_language(arguments))
     parser = build_parser()
-    args = parser.parse_args(argv)
+    _localize_parser(parser)
+    args = parser.parse_args(arguments)
+    use_language(_requested_language(arguments, explicit=args.lang))
     _configure_logging(args.verbose)
 
     try:
