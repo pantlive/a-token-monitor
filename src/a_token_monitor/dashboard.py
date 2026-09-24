@@ -362,6 +362,7 @@ _BASE_CSS = r"""
     .usage-note { margin-bottom: 12px; color: var(--muted); font-size: 12px; }
     .usage-table table { min-width: 1180px; }
     .usage-models { display: grid; gap: 3px; min-width: 180px; }
+    .usage-models-toggle { justify-self: start; padding: 1px 7px; font-size: 11px; }
     .usage-model { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
     .usage-number { white-space: nowrap; }
 
@@ -1876,6 +1877,10 @@ __THEME_TOGGLE__
   const usageDimensionLabels = { account: '按账号', model: '按模型', project: '按项目' };
   let selectedUsageDimension = 'account';
   let selectedUsageAccount = '';
+  // 中文注释：一个账号可能用了几十个模型，全部铺开会把行撑得非常高；
+  // 默认只列用量最大的前几个，展开状态记录在 Set 里（重新渲染后保持）。
+  const USAGE_MODEL_PREVIEW = 3;
+  const expandedUsageModelLists = new Set();
   let latestState = null;
   let latestUsageState = null;
   let latestHealthState = null;
@@ -2354,7 +2359,15 @@ __THEME_TOGGLE__
     const rows = groups.map((group) => {
       const stats = group.stats;
       const accountGroup = accountGroupByKey.get(group.key) || group;
-      const models = (stats.models || []).map((model) => `<div><span class="usage-model">${escapeHtml(model.model)}</span> · ${formatNumber(model.total_tokens)} tokens</div>`).join('');
+      // 模型按 token 用量倒序，折叠时优先露出来的就是大头。
+      const modelItems = (stats.models || []).slice().sort((left, right) => Number(right.total_tokens || 0) - Number(left.total_tokens || 0));
+      const modelsExpanded = expandedUsageModelLists.has(group.key);
+      const visibleModels = modelsExpanded ? modelItems : modelItems.slice(0, USAGE_MODEL_PREVIEW);
+      const hiddenModels = modelItems.length - visibleModels.length;
+      const models = visibleModels.map((model) => `<div><span class="usage-model">${escapeHtml(model.model)}</span> · ${formatNumber(model.total_tokens)} tokens</div>`).join('');
+      const modelsToggle = modelItems.length > USAGE_MODEL_PREVIEW
+        ? `<button class="chip-button usage-models-toggle" type="button" data-usage-models="${escapeHtml(group.key)}" aria-expanded="${modelsExpanded ? 'true' : 'false'}">${modelsExpanded ? '收起模型' : `另有 ${hiddenModels} 个模型`}</button>`
+        : '';
       const profiles = usageTagLine(accountGroup.profiles, '未知 profile');
       const products = accountGroup.products.size ? usageTagLine(accountGroup.products, '') : '';
       const pricingWarning = stats.unpriced_models && stats.unpriced_models.length
@@ -2369,7 +2382,7 @@ __THEME_TOGGLE__
         labelCell = `<td><div>${escapeHtml(group.key)}</div><div class="muted">${escapeHtml(products ? `${products} · ${profiles}` : profiles)}</div></td>`;
       }
       const detailCell = selectedUsageDimension === 'account'
-        ? `<td class="usage-models">${models || '<span class="muted">暂无模型</span>'}${pricingWarning}</td>`
+        ? `<td class="usage-models">${models || '<span class="muted">暂无模型</span>'}${modelsToggle}${pricingWarning}</td>`
         : `<td class="usage-models">${group.accountList.slice(0, 3).map((name) => `<div>${escapeHtml(name)}</div>`).join('')}${group.accountList.length > 3 ? `<div class="muted">等 ${group.accountList.length} 个账号</div>` : ''}${pricingWarning}</td>`;
       return `<tr>
         ${labelCell}
@@ -2423,6 +2436,17 @@ __THEME_TOGGLE__
     container.querySelectorAll('[data-usage-period]').forEach((button) => {
       button.addEventListener('click', () => {
         selectedUsagePeriod = button.dataset.usagePeriod || 'today';
+        renderUsage(state);
+      });
+    });
+    container.querySelectorAll('[data-usage-models]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const key = button.dataset.usageModels || '';
+        if (expandedUsageModelLists.has(key)) {
+          expandedUsageModelLists.delete(key);
+        } else {
+          expandedUsageModelLists.add(key);
+        }
         renderUsage(state);
       });
     });

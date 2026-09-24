@@ -2247,6 +2247,24 @@ class FaviconTests(unittest.TestCase):
         # 旧的「账号 ID 前两位」实现不该留下残骸。
         self.assertNotIn("accountInitials", page)
 
+    def test_long_model_lists_collapse(self) -> None:
+        """「调用模型」列表过长时默认折叠，只列用量最大的前几个。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const USAGE_MODEL_PREVIEW = 3;", page)
+        self.assertIn("const expandedUsageModelLists = new Set();", page)
+        self.assertIn("const modelsToggle = modelItems.length > USAGE_MODEL_PREVIEW", page)
+        self.assertIn("data-usage-models=", page)
+        self.assertIn("另有 ${hiddenModels} 个模型", page)
+        self.assertIn("收起模型", page)
+        self.assertIn(
+            "container.querySelectorAll('[data-usage-models]').forEach((button) => {",
+            page,
+        )
+        # 折叠只影响账号维度的模型列：模型/项目维度仍然列前 3 个账号。
+        self.assertIn("group.accountList.slice(0, 3)", page)
+        self.assertIn(".usage-models-toggle { justify-self: start;", page)
+
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
 
