@@ -169,6 +169,16 @@
   - 产品展示名抽成公用函数 `accountProductLabel()`，卡片与排行不再各写一套映射；
     排行渲染改为接收「标签 HTML」函数，项目排行仍显示「项目 · 账号」。
 
+- [ ] 英文版（进行中）
+  - [x] 核心机制：`i18n.py` 提供语言归一（`zh-CN` / `en_US` / `Accept-Language` 带 q 值
+    / `LANG`）、翻译与子串替换、API 负载递归本地化、待翻译清单扫描与「是否含中文」判断；
+    `EN_COMPLETE` 作为总开关，最后一轮打开并让 `test_english_pages_have_no_cjk` 生效。
+  - [ ] 主页模板约 458 条、设置页约 90 条、CLI 约 347 条、API 文案（画像/建议/额度
+    周期名/产品名等）约 300 条待补目录表。
+  - [ ] 路由按 `Accept-Language` / `?lang=` 出英文页面与英文负载；顶栏加「中/EN」手动
+    切换（localStorage 记忆，与主题开关一致）；CLI 支持 `--lang` 并按 `LANG` 自动判断。
+  - [ ] 收尾：打开 `EN_COMPLETE`，浏览器断言英文页面渲染文本里没有中日韩字符。
+
 - [x] 习惯分析支持「今天」窗口
   - 新增 `calendar_day_start()`（本地时区 0 点），`/api/insights?days=today` 走这个起点；
     `?days=N` 仍是滚动 N 天，两者语义区分开并在返回体里用 `window_kind`
