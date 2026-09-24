@@ -32,7 +32,6 @@ from token_monitor.dashboard import (
     DashboardConfig,
     DashboardServer,
     _favicon_ico,
-    _favicon_png,
     _favicon_svg,
     _favicon_token,
     build_multi_dashboard_state,
@@ -1583,9 +1582,11 @@ class FaviconTests(unittest.TestCase):
         self.assertNotIn("<image", svg)
         self.assertNotIn("data-theme", svg)
         self.assertNotIn("prefers-color-scheme", svg)
-        bars = [
+        style = dashboard_module._FAVICON_STYLE
+        glyph = _FAVICON_GLYPHS[style]
+        rects = [
             item
-            for item in _FAVICON_GLYPHS["bars"]
+            for item in glyph
             if not isinstance(item, dict) and item[0] == "rect"
         ]
         groups = [item for item in root.iter() if item.tag.endswith("}g")]
@@ -1593,17 +1594,19 @@ class FaviconTests(unittest.TestCase):
         glyph_rects = [
             item for item in groups[0].iter() if item.tag.endswith("}rect")
         ]
-        self.assertEqual(len(glyph_rects), len(bars))
+        self.assertEqual(len(glyph_rects), len(rects))
         self.assertEqual(
             [
                 (float(item.get("x")), float(item.get("y")))
                 for item in glyph_rects
             ],
-            [(item[1], item[2]) for item in bars],
+            [(item[1], item[2]) for item in rects],
         )
-        # 高水位刻度是挖洞：必须有 mask，且洞用黑色画。
-        self.assertIn("<mask", svg)
-        self.assertIn('fill="black"', svg)
+        # 有 cut 原语就必须有 mask，且洞用黑色画；没有就不能多画 mask。
+        cuts = [item for item in glyph if isinstance(item, dict)]
+        self.assertEqual("<mask" in svg, bool(cuts))
+        if cuts:
+            self.assertIn("black", svg)
 
     def test_all_candidate_styles_render(self) -> None:
         """Stitch 方案的每个候选都要能出 SVG 和位图，方便换方案。"""
@@ -1678,6 +1681,15 @@ class FaviconTests(unittest.TestCase):
         self.assertGreater(hole[2], hole[0])  # 露出的是蓝→青渐变，不是白色
         self.assertLess(min(hole[:3]), 240)
 
+        # 盾牌里的脉搏线是描边洞：画布 (26, 33) 在脉搏线上 → 渐变而非白色。
+        with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "guard"):
+            _, _, shield = _decode_favicon_png(dashboard_module._favicon_png(32))
+        pulse = shield[16][13]
+        self.assertEqual(pulse[3], 255)
+        self.assertLess(min(pulse[:3]), 240)
+        # 紧邻脉搏线上方的盾牌内部仍是白色，说明洞只挖在描边范围内。
+        self.assertGreaterEqual(min(shield[21][13][:3]), 250)
+
     def test_ico_contains_16_and_32_pixel_pngs(self) -> None:
         ico = _favicon_ico()
 
@@ -1706,22 +1718,44 @@ class FaviconTests(unittest.TestCase):
             sizes.append(width)
         self.assertEqual(sizes, [16, 32])
 
-    def test_rasterized_pixels_match_the_svg_shape(self) -> None:
-        """光栅图必须真的画出柱子：中心白、圆角外透明、底色是蓝到青。"""
+    # 每个方案在 32×32 光栅图上的锚点（像素坐标）：图形内部应为纯白、
+    # 徽章内部无图形处应为渐变、圆角外应完全透明。
+    PIXEL_ANCHORS = {
+        "bars": {"white": (16, 16), "gradient": (6, 6)},
+        "token": {"white": (16, 7), "gradient": (5, 5)},
+        "gauge": {"white": (16, 8), "gradient": (5, 5)},
+        "guard": {"white": (16, 24), "gradient": (5, 5)},
+        "whale": {"white": (15, 16), "gradient": (5, 5)},
+    }
 
-        width, height, rows = _decode_favicon_png(_favicon_png(32))
+    def test_rasterized_pixels_match_every_candidate(self) -> None:
+        """逐像素校验：图形纯白、徽章是蓝到青渐变、圆角外透明。"""
 
-        self.assertEqual((width, height), (32, 32))
-        # 圆角外的像素完全透明，否则标签页上是方块。
-        self.assertEqual(rows[0][0][3], 0)
-        self.assertEqual(rows[31][31][3], 0)
-        # 中间那根柱子（64 画布上的 x 28..36、y 24..52）在 32×32 图上覆盖 (16, 16)。
-        center = rows[16][16]
-        self.assertEqual(center[3], 255)
-        self.assertGreaterEqual(min(center[:3]), 250)
-        # 底色是对角渐变：右下更青（绿升、蓝降），左上更蓝。
-        top_left = rows[6][6]
-        bottom_right = rows[25][25]
+        self.assertEqual(set(self.PIXEL_ANCHORS), set(_FAVICON_GLYPHS))
+        for style, anchors in self.PIXEL_ANCHORS.items():
+            with mock.patch.object(dashboard_module, "_FAVICON_STYLE", style):
+                width, height, rows = _decode_favicon_png(
+                    dashboard_module._favicon_png(32)
+                )
+            self.assertEqual((width, height), (32, 32), style)
+            # 圆角外的像素完全透明，否则标签页上是方块。
+            self.assertEqual(rows[0][0][3], 0, style)
+            self.assertEqual(rows[31][31][3], 0, style)
+            white = rows[anchors["white"][1]][anchors["white"][0]]
+            self.assertEqual(white[3], 255, style)
+            self.assertGreaterEqual(min(white[:3]), 250, style)
+            gradient = rows[anchors["gradient"][1]][anchors["gradient"][0]]
+            self.assertEqual(gradient[3], 255, style)
+            self.assertLess(min(gradient[:3]), 250, style)
+            self.assertGreater(gradient[2], gradient[0], style)
+
+    def test_gradient_runs_from_blue_to_cyan(self) -> None:
+        """底色必须是对角渐变：右下更青（绿升、蓝降），左上更蓝。"""
+
+        with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "guard"):
+            _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
+        top_left = rows[4][4]
+        bottom_right = rows[27][27]
         self.assertEqual((top_left[3], bottom_right[3]), (255, 255))
         self.assertGreater(top_left[2], top_left[0])
         self.assertLess(top_left[1], bottom_right[1])
