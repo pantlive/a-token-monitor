@@ -1538,7 +1538,7 @@ __THEME_TOGGLE__
 
     <section id="usage" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Usage analytics</div><h2>用量与成本估算</h2><p class="section-description">按 Codex、Grok、Kimi、Claude Code 和 DeepSeek Harness 账号汇总本地用量，可在「按账号 / 按模型 / 按项目」三种统计维度间切换，并按账号、模型或项目筛选；账号维度沿用真实账号 ID 归并（profile 混合登录也不会串额），产品标签只作来源提示。</p></div>
+        <div><div class="section-kicker">Usage analytics</div><h2>用量与成本估算</h2></div>
         <div class="section-meta"><span class="section-count">按需统计 · 缓存 5 分钟</span><button id="usage-load-button" class="refresh-button" type="button">加载用量</button></div>
       </div>
       <div id="usage-content"><div class="empty-state">为避免周期读取大量历史 JSONL，用量统计改为按需加载。</div></div>
