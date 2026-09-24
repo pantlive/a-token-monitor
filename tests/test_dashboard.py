@@ -629,7 +629,11 @@ class DashboardTests(unittest.TestCase):
             "renderAlerts",
             "renderTrend",
             "usage-trend",
-            "renderTopProjects",
+            "renderUsageRanking",
+            "账号成本排行",
+            "项目成本排行",
+            "data-usage-dimension",
+            'id="usage-account-filter"',
             "renderKimiReconciliation",
             "budget-bar",
             "本月预算",
@@ -1604,6 +1608,21 @@ class UsageSearchDashboardTests(unittest.TestCase):
                     timeout=5,
                 ) as response:
                     empty = json.load(response)
+                with urlopen(
+                    f"{base_url}/api/usage/search?days=0&group=account",
+                    timeout=5,
+                ) as response:
+                    by_account = json.load(response)
+                with urlopen(
+                    f"{base_url}/api/usage/search?days=0&account=account-personal",
+                    timeout=5,
+                ) as response:
+                    filtered = json.load(response)
+                with urlopen(
+                    f"{base_url}/api/usage/search?days=0&account=nobody",
+                    timeout=5,
+                ) as response:
+                    nobody = json.load(response)
             finally:
                 server.close()
 
@@ -1615,9 +1634,20 @@ class UsageSearchDashboardTests(unittest.TestCase):
             "/home/dev/gamma",
         )
         self.assertEqual(payload["facets"]["models"], ["gpt-5.6-luna"])
+        self.assertEqual(payload["facets"]["accounts"], ["account-personal"])
         self.assertEqual(by_model["search"]["group"], "model")
         self.assertEqual(by_model["search"]["rows"][0]["models"], ["gpt-5.6-luna"])
         self.assertEqual(empty["search"]["matched_rows"], 0)
+        # 按账号汇总：一行一个账号，并带上产品与账号 ID。
+        self.assertEqual(by_account["search"]["group"], "account")
+        self.assertEqual(by_account["search"]["matched_rows"], 1)
+        account_row = by_account["search"]["rows"][0]
+        self.assertEqual(account_row["account"], "account-personal")
+        self.assertEqual(account_row["account_id"], "account-personal")
+        self.assertEqual(account_row["products"], ["Codex CLI"])
+        self.assertEqual(account_row["total_tokens"], 4_000)
+        self.assertEqual(filtered["search"]["totals"]["total_tokens"], 4_000)
+        self.assertEqual(nobody["search"]["matched_rows"], 0)
 
     def test_api_without_index_reports_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1659,12 +1689,39 @@ class UsageSearchDashboardTests(unittest.TestCase):
         self.assertIn('data-nav-target="usage-search"', html)
         self.assertIn('id="usage-search-content"', html)
         self.assertIn('data-usage-search-group="date"', html)
+        self.assertIn('data-usage-search-group="account"', html)
         self.assertIn('id="usage-search-model"', html)
+        self.assertIn('id="usage-search-account"', html)
         self.assertIn("/api/usage/search", html)
         self.assertLess(html.find('id="usage"'), html.find('id="usage-search"'))
         self.assertLess(html.find('id="insights"'), html.find('id="usage-search"'))
         self.assertIn('data-section-toggle="usage-search"', html)
         self.assertIn('id="usage-search-body"', html)
+
+    def test_usage_section_supports_account_dimension(self) -> None:
+        """用量与成本估算区必须能按账号统计：维度切换、账号筛选和账号排行。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = self._server(root, self._aggregator(root))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/", timeout=5) as response:
+                    html = response.read().decode("utf-8")
+            finally:
+                server.close()
+
+        self.assertIn('id="usage"', html)
+        self.assertIn("usageDimensions", html)
+        self.assertIn("data-usage-dimension", html)
+        self.assertIn("'按账号'", html)
+        self.assertIn("'按模型'", html)
+        self.assertIn("'按项目'", html)
+        self.assertIn("usageGroups", html)
+        self.assertIn("usageAccountMatches", html)
+        self.assertIn('id="usage-account-filter"', html)
+        self.assertIn("账号成本排行", html)
+        self.assertIn("匹配账号", html)
 
 
 class HousekeepingDashboardTests(unittest.TestCase):

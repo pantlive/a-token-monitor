@@ -621,6 +621,7 @@ _DASHBOARD_CSS = r"""
     .usage-tab { padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface-raised); cursor: pointer; }
     .usage-tab:hover { border-color: var(--violet-border-strong); color: var(--muted-strong); }
     .usage-tab.selected { border-color: var(--violet-border-selected); color: var(--violet-text-soft); background: var(--violet-soft); }
+    .usage-tabs-divider { width: 1px; align-self: stretch; min-height: 26px; margin: 0 3px; background: var(--line); }
     .session-toggle { margin: 10px 0 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--surface-raised); cursor: pointer; font-size: 12px; }
     .session-toggle:hover { border-color: var(--violet-border-strong); background: var(--surface-hover); }
     .usage-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
@@ -956,7 +957,7 @@ __THEME_TOGGLE__
 
     <section id="usage" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Usage analytics</div><h2>用量与成本估算</h2><p class="section-description">按 Codex、Grok、Kimi 和 DeepSeek Harness 账号、模型、项目 / 工作目录汇总本地用量。</p></div>
+        <div><div class="section-kicker">Usage analytics</div><h2>用量与成本估算</h2><p class="section-description">按 Codex、Grok、Kimi、Claude Code 和 DeepSeek Harness 账号汇总本地用量，可在「按账号 / 按模型 / 按项目」三种统计维度间切换，并按账号、模型或项目筛选；账号维度沿用真实账号 ID 归并（profile 混合登录也不会串额），产品标签只作来源提示。</p></div>
         <div class="section-meta"><span class="section-count">按需统计 · 缓存 5 分钟</span><button id="usage-load-button" class="refresh-button" type="button">加载用量</button></div>
       </div>
       <div id="usage-content"><div class="empty-state">为避免周期读取大量历史 JSONL，用量统计改为按需加载。</div></div>
@@ -1025,7 +1026,7 @@ __THEME_TOGGLE__
           <span class="section-toggle-text">
             <span class="section-kicker">Usage search</span>
             <span class="section-toggle-title">用量检索</span>
-            <span class="section-description">按日期、模型和会话检索已索引的 token 历史记录，可切换会话明细、按日期和按模型三种视图；支持按 token 总量或估算金额排序。只读取 token 元数据，不读取对话内容。</span>
+            <span class="section-description">按日期、模型、账号和会话检索已索引的 token 历史记录，可切换会话明细、按日期、按模型和按账号四种视图；支持按 token 总量或估算金额排序。只读取 token 元数据，不读取对话内容。</span>
             <span class="section-summary" id="usage-search-summary">展开查看详情</span>
           </span>
         </button>
@@ -1043,6 +1044,7 @@ __THEME_TOGGLE__
         <label class="field">起始日期<input id="usage-search-from" type="date"></label>
         <label class="field">结束日期<input id="usage-search-to" type="date"></label>
         <label class="field">模型<select id="usage-search-model"><option value="">全部模型</option></select></label>
+        <label class="field">账号<select id="usage-search-account"><option value="">全部账号</option></select></label>
         <label class="field wide">关键词<input id="usage-search-keyword" type="search" placeholder="会话 ID / 项目路径 / 模型"></label>
         <label class="field">排序<select id="usage-search-sort">
           <option value="recent" selected>最近活动</option>
@@ -1057,6 +1059,7 @@ __THEME_TOGGLE__
         <button class="usage-tab selected" type="button" data-usage-search-group="session">会话明细</button>
         <button class="usage-tab" type="button" data-usage-search-group="date">按日期汇总</button>
         <button class="usage-tab" type="button" data-usage-search-group="model">按模型汇总</button>
+        <button class="usage-tab" type="button" data-usage-search-group="account">按账号汇总</button>
       </div>
       <div id="usage-search-content"><div class="empty-state"><span class="empty-title">还没有检索</span><span class="empty-hint">点击「检索」，按日期、模型或会话查找历史 token 用量。</span></div></div>
       </div>
@@ -1208,6 +1211,11 @@ __THEME_TOGGLE__
   let selectedUsagePeriod = 'today';
   let selectedUsageModel = '';
   let selectedUsageProject = '';
+  // 用量统计维度：账号 / 模型 / 项目共用同一份叶子聚合，只切换分组方式。
+  const usageDimensions = [['account', '按账号'], ['model', '按模型'], ['project', '按项目']];
+  const usageDimensionLabels = { account: '按账号', model: '按模型', project: '按项目' };
+  let selectedUsageDimension = 'account';
+  let selectedUsageAccount = '';
   let latestState = null;
   let latestUsageState = null;
   let latestHealthState = null;
@@ -1305,25 +1313,100 @@ __THEME_TOGGLE__
     )).map((model) => model.model));
     return summary;
   };
-  const filteredUsage = (account) => {
-    let base = account;
-    if (selectedUsageProject) {
-      base = (account.projects || []).find((project) => project.project === selectedUsageProject);
-      if (!base) return null;
-    }
-    const models = Array.isArray(base.models) ? base.models : [];
-    if (!selectedUsageModel) return base;
-    const selectedModels = models.filter((model) => model.model === selectedUsageModel);
-    return selectedModels.length ? sumUsageModels(selectedModels) : null;
+  // 把当前筛选条件（账号 / 模型 / 项目）应用到账号列表上，并把模型级条目
+  // 摊平成叶子：按账号、按模型、按项目三种维度都从同一份叶子聚合，
+  // 保证任何维度的合计都等于账号合计，不会出现口径不一致。
+  const usageLeafModels = (account) => {
+    const leaves = [];
+    const projects = Array.isArray(account.projects) && account.projects.length
+      ? account.projects
+      : [{ project: '', models: account.models || [] }];
+    projects.forEach((project) => {
+      if (selectedUsageProject && (project.project || '') !== selectedUsageProject) return;
+      (project.models || []).forEach((model) => {
+        if (selectedUsageModel && model.model !== selectedUsageModel) return;
+        leaves.push({ model, project: project.project || '' });
+      });
+    });
+    return leaves;
+  };
+  const usageAccountName = (account) => account.account || account.account_id || '未知账号';
+  const usageAccountMatches = (account) => (
+    !selectedUsageAccount || usageAccountName(account) === selectedUsageAccount
+  );
+  const usageGroups = (accounts, dimension) => {
+    const groups = new Map();
+    (accounts || []).forEach((account) => {
+      const name = usageAccountName(account);
+      usageLeafModels(account).forEach((leaf) => {
+        const key = dimension === 'model'
+          ? (leaf.model.model || '未知模型')
+          : dimension === 'project'
+            ? (leaf.project || '未知项目')
+            : name;
+        let group = groups.get(key);
+        if (!group) {
+          group = { key, models: [], accounts: new Map(), profiles: new Set(), products: new Set() };
+          groups.set(key, group);
+        }
+        group.models.push(leaf.model);
+        group.accounts.set(name, (group.accounts.get(name) || 0) + Number(leaf.model.total_tokens || 0));
+        (account.profiles || []).forEach((profile) => group.profiles.add(profile));
+        (account.products || []).forEach((product) => group.products.add(product));
+      });
+    });
+    return [...groups.values()].map((group) => ({
+      ...group,
+      stats: sumUsageModels(group.models),
+      accountList: [...group.accounts.entries()].sort((a, b) => b[1] - a[1]).map((item) => item[0]),
+    }));
+  };
+  const usageTagLine = (values, fallback) => {
+    const items = [...values].filter((item) => item);
+    return items.length ? items.join(' · ') : fallback;
+  };
+  const usageAccountSubLabel = (group) => usageTagLine(
+    group.products,
+    usageTagLine(group.profiles, '未知 profile'),
+  );
+  const usageContributorLabel = (group) => {
+    const names = group.accountList || [];
+    if (!names.length) return '';
+    return names.length === 1 ? names[0] : `${names[0]} 等 ${names.length} 个账号`;
+  };
+  const usageSortByCost = (groups) => [...groups].sort((a, b) => {
+    const left = Number(a.stats.estimated_cost_usd || 0);
+    const right = Number(b.stats.estimated_cost_usd || 0);
+    if (left !== right) return right - left;
+    return Number(b.stats.total_tokens || 0) - Number(a.stats.total_tokens || 0);
+  });
+  const renderUsageRanking = (title, hint, groups, subLabel) => {
+    const ranked = usageSortByCost(groups).filter((group) => Number(group.stats.estimated_cost_usd || 0) > 0);
+    if (!ranked.length) return '';
+    const total = ranked.reduce((sum, group) => sum + Number(group.stats.estimated_cost_usd || 0), 0);
+    const max = Number(ranked[0].stats.estimated_cost_usd) || 1;
+    const top = ranked.slice(0, 5);
+    const items = top.map((group) => {
+      const cost = Number(group.stats.estimated_cost_usd || 0);
+      const share = total > 0 ? (cost / total) * 100 : 0;
+      const width = Math.max(3, Math.round((cost / max) * 100));
+      const sub = subLabel(group);
+      return `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${escapeHtml(group.key)}${sub ? `<span class="muted"> · ${escapeHtml(sub)}</span>` : ''}</span><span class="top-project-value">${escapeHtml(formatUsdCompact(cost))} · ${share.toFixed(1)}%</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
+    }).join('');
+    return `<div class="usage-top-projects"><div class="usage-trend-head"><span>${escapeHtml(title)} Top ${top.length}</span><span class="muted">${escapeHtml(hint)}</span></div>${items}</div>`;
   };
   const usageFilterControls = (periods) => {
     const models = distinctSorted(periods.flatMap((period) => (period.accounts || []).flatMap((account) => (account.models || []).map((model) => model.model))));
     const projects = distinctSorted(periods.flatMap((period) => (period.accounts || []).flatMap((account) => (account.projects || []).map((project) => project.project))));
+    const accounts = distinctSorted(periods.flatMap((period) => (period.accounts || []).map((account) => account.account || account.account_id)));
     if (!models.includes(selectedUsageModel)) selectedUsageModel = '';
     if (!projects.includes(selectedUsageProject)) selectedUsageProject = '';
+    if (!accounts.includes(selectedUsageAccount)) selectedUsageAccount = '';
     const modelOptions = [`<option value="">全部模型</option>`, ...models.map((model) => `<option value="${escapeHtml(model)}"${model === selectedUsageModel ? ' selected' : ''}>${escapeHtml(model)}</option>`)].join('');
     const projectOptions = [`<option value="">全部项目</option>`, ...projects.map((project) => `<option value="${escapeHtml(project)}"${project === selectedUsageProject ? ' selected' : ''}>${escapeHtml(project)}</option>`)].join('');
+    const accountOptions = [`<option value="">全部账号</option>`, ...accounts.map((account) => `<option value="${escapeHtml(account)}"${account === selectedUsageAccount ? ' selected' : ''}>${escapeHtml(account)}</option>`)].join('');
     return `<div class="usage-filters">
+      <label class="usage-filter">账号<select id="usage-account-filter">${accountOptions}</select></label>
       <label class="usage-filter">模型<select id="usage-model-filter">${modelOptions}</select></label>
       <label class="usage-filter">项目 / 工作目录<select id="usage-project-filter">${projectOptions}</select></label>
     </div>`;
@@ -1361,7 +1444,7 @@ __THEME_TOGGLE__
     const usageSummary = document.getElementById('usage-search-summary');
     if (usageSummary) {
       usageSummary.textContent = usageIndex.available
-        ? `索引 ${formatNumber(usageIndex.records)} 条记录 / ${formatNumber(usageIndex.sessions)} 个会话 · ${formatNumber(usageIndex.models)} 个模型 · ${formatDay(usageIndex.first_at)} ~ ${formatDay(usageIndex.last_at)}`
+        ? `索引 ${formatNumber(usageIndex.records)} 条记录 / ${formatNumber(usageIndex.sessions)} 个会话 · ${formatNumber(usageIndex.models)} 个模型 · ${formatNumber(usageIndex.accounts)} 个账号 · ${formatDay(usageIndex.first_at)} ~ ${formatDay(usageIndex.last_at)}`
         : '用量索引还是空的，先让 daemon 完成一次索引';
     }
     const housekeeping = (state && state.housekeeping) || {};
@@ -1490,25 +1573,6 @@ __THEME_TOGGLE__
     }).join('');
     return `<div class="usage-trend"><div class="usage-trend-head"><span>近 ${daily.length} 天 API 等价金额趋势</span><span class="muted">合计 ${escapeHtml(formatUsdCompact(total))}</span></div><div class="trend-chart">${bars}</div></div>`;
   };
-  const renderTopProjects = (accounts) => {
-    const rows = [];
-    (accounts || []).forEach((account) => {
-      const accountName = account.account || account.account_id || '未知账号';
-      (account.projects || []).forEach((project) => {
-        if (project.estimated_cost_usd === null || project.estimated_cost_usd === undefined) return;
-        rows.push({ project: project.project || '未知项目', account: accountName, cost: Number(project.estimated_cost_usd) });
-      });
-    });
-    rows.sort((a, b) => b.cost - a.cost);
-    const top = rows.slice(0, 5);
-    if (!top.length) return '';
-    const max = top[0].cost > 0 ? top[0].cost : 1;
-    const items = top.map((item) => {
-      const width = Math.max(3, Math.round((item.cost / max) * 100));
-      return `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${escapeHtml(item.project)}<span class="muted"> · ${escapeHtml(item.account)}</span></span><span class="top-project-value">${escapeHtml(formatUsdCompact(item.cost))}</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
-    }).join('');
-    return `<div class="usage-top-projects"><div class="usage-trend-head"><span>项目成本排行 Top ${top.length}</span><span class="muted">当前时间范围 · 按 API 等价金额</span></div>${items}</div>`;
-  };
   // Kimi booster 钱包返回的是真实扣费（分），与本地按公开 API 价的估算并排展示。
   const renderKimiReconciliation = (periods) => {
     if (!latestState || !Array.isArray(latestState.quotas)) return '';
@@ -1585,11 +1649,14 @@ __THEME_TOGGLE__
       ? usage.pricing.note
       : '金额为估算值，不代表 Plus 实际扣款。';
     const indexingNote = duplicateNote ? `${duplicateNote} ` : '';
-    const filteredAccounts = accounts.map((account) => ({
-      account,
-      stats: filteredUsage(account),
-    })).filter((item) => item.stats);
-    const statsList = filteredAccounts.map((item) => item.stats);
+    const filteredAccounts = accounts.filter(usageAccountMatches);
+    const dimensionTabs = usageDimensions.map(([key, label]) => {
+      const selected = key === selectedUsageDimension;
+      return `<button class="usage-tab${selected ? ' selected' : ''}" type="button" aria-pressed="${selected ? 'true' : 'false'}" data-usage-dimension="${escapeHtml(key)}">${escapeHtml(label)}</button>`;
+    }).join('');
+    // 三种维度共用同一份叶子聚合结果：合计始终等于账号合计，切换维度不会变化。
+    const groups = usageSortByCost(usageGroups(filteredAccounts, selectedUsageDimension));
+    const statsList = groups.map((group) => group.stats);
     const totalTokens = statsList.reduce((sum, stats) => sum + Number(stats.total_tokens || 0), 0);
     const totalCredits = sumNullable(statsList, 'estimated_credits');
     const totalUsd = sumNullable(statsList, 'estimated_cost_usd');
@@ -1611,30 +1678,87 @@ __THEME_TOGGLE__
       <div class="usage-summary-item"><div class="usage-summary-label">API 等价金额</div><div class="usage-summary-value">${escapeHtml(formatUsd(totalUsd))}</div></div>
       ${savingsItem}${budgetItem}
     </div>`;
-    const rows = filteredAccounts.map(({ account, stats }) => {
-        const models = (stats.models || []).map((model) => `<div><span class="usage-model">${escapeHtml(model.model)}</span> · ${formatNumber(model.total_tokens)} tokens</div>`).join('');
-        const profiles = (account.profiles || []).join(' · ') || '未知 profile';
-        const pricingWarning = stats.unpriced_models && stats.unpriced_models.length
-          ? `<div class="muted">未定价（未计入金额）：${escapeHtml(stats.unpriced_models.join(', '))}</div>`
-          : '';
-        return `<tr>
-          <td><div>${escapeHtml(account.account || account.account_id || '未知账号')}</div><div class="muted">${escapeHtml(profiles)}</div></td>
-          <td class="usage-models">${models || '<span class="muted">暂无模型</span>'}${pricingWarning}</td>
-          <td class="usage-number">${formatNumber(stats.input_tokens)}</td>
-          <td class="usage-number">${formatNumber(stats.cached_input_tokens)}</td>
-          <td class="usage-number">${formatNumber(stats.cache_write_input_tokens)}</td>
-          <td class="usage-number">${formatNumber(stats.output_tokens)}</td>
-          <td class="usage-number">${formatNumber(stats.reasoning_output_tokens)}</td>
-          <td class="usage-number">${formatNumber(stats.total_tokens)}</td>
-          <td class="usage-number">${formatCredits(stats.estimated_credits)}</td>
-          <td class="usage-number">${formatUsd(stats.estimated_cost_usd)}</td>
-        </tr>`;
-      }).join('');
-    container.innerHTML = `${renderTrend(usage.daily)}<div class="usage-tabs">${tabs}</div>
-      ${filterControls}${summary}${renderTopProjects(accounts)}<div class="usage-note">${indexingNote}${escapeHtml(note)} 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}${renderCommandCodeReconciliation(periods)}
+    const dimensionHeaders = {
+      account: '<tr><th>账号 / Profile</th><th>调用模型</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
+      model: '<tr><th>模型</th><th>使用账号</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
+      project: '<tr><th>项目 / 工作目录</th><th>账号</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
+    };
+    const shareText = (stats) => {
+      if (totalUsd === null || totalUsd <= 0) return '—';
+      const cost = stats.estimated_cost_usd;
+      if (cost === null || cost === undefined) return '—';
+      return `${((Number(cost) / totalUsd) * 100).toFixed(1)}%`;
+    };
+    const groupsByAccount = usageGroups(filteredAccounts, 'account');
+    const accountGroupByKey = new Map(groupsByAccount.map((group) => [group.key, group]));
+    const rows = groups.map((group) => {
+      const stats = group.stats;
+      const accountGroup = accountGroupByKey.get(group.key) || group;
+      const models = (stats.models || []).map((model) => `<div><span class="usage-model">${escapeHtml(model.model)}</span> · ${formatNumber(model.total_tokens)} tokens</div>`).join('');
+      const profiles = usageTagLine(accountGroup.profiles, '未知 profile');
+      const products = accountGroup.products.size ? usageTagLine(accountGroup.products, '') : '';
+      const pricingWarning = stats.unpriced_models && stats.unpriced_models.length
+        ? `<div class="muted">未定价（未计入金额）：${escapeHtml(stats.unpriced_models.join(', '))}</div>`
+        : '';
+      let labelCell;
+      if (selectedUsageDimension === 'model') {
+        labelCell = `<td><div>${escapeHtml(group.key)}</div><div class="muted">${escapeHtml(usageContributorLabel(group) || '未知账号')}</div></td>`;
+      } else if (selectedUsageDimension === 'project') {
+        labelCell = `<td><div>${escapeHtml(group.key)}</div><div class="muted">${escapeHtml(usageContributorLabel(group) || '未知账号')}</div></td>`;
+      } else {
+        labelCell = `<td><div>${escapeHtml(group.key)}</div><div class="muted">${escapeHtml(products ? `${products} · ${profiles}` : profiles)}</div></td>`;
+      }
+      const detailCell = selectedUsageDimension === 'account'
+        ? `<td class="usage-models">${models || '<span class="muted">暂无模型</span>'}${pricingWarning}</td>`
+        : `<td class="usage-models">${group.accountList.slice(0, 3).map((name) => `<div>${escapeHtml(name)}</div>`).join('')}${group.accountList.length > 3 ? `<div class="muted">等 ${group.accountList.length} 个账号</div>` : ''}${pricingWarning}</td>`;
+      return `<tr>
+        ${labelCell}
+        ${detailCell}
+        <td class="usage-number">${formatNumber(stats.input_tokens)}</td>
+        <td class="usage-number">${formatNumber(stats.cached_input_tokens)}</td>
+        <td class="usage-number">${formatNumber(stats.cache_write_input_tokens)}</td>
+        <td class="usage-number">${formatNumber(stats.output_tokens)}</td>
+        <td class="usage-number">${formatNumber(stats.reasoning_output_tokens)}</td>
+        <td class="usage-number">${formatNumber(stats.total_tokens)}</td>
+        <td class="usage-number">${formatCredits(stats.estimated_credits)}</td>
+        <td class="usage-number">${formatUsd(stats.estimated_cost_usd)}</td>
+        <td class="usage-number">${escapeHtml(shareText(stats))}</td>
+      </tr>`;
+    }).join('');
+    const totalsRow = groups.length > 1
+      ? `<tfoot><tr>
+        <td>合计（${formatNumber(groups.length)} 组）</td>
+        <td>${formatNumber(filteredAccounts.length)} 个账号</td>
+        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.input_tokens || 0), 0))}</td>
+        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.cached_input_tokens || 0), 0))}</td>
+        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.cache_write_input_tokens || 0), 0))}</td>
+        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.output_tokens || 0), 0))}</td>
+        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.reasoning_output_tokens || 0), 0))}</td>
+        <td class="usage-number">${formatNumber(totalTokens)}</td>
+        <td class="usage-number">${formatCredits(totalCredits)}</td>
+        <td class="usage-number">${formatUsd(totalUsd)}</td>
+        <td class="usage-number">${totalUsd && totalUsd > 0 ? '100.0%' : '—'}</td>
+      </tr></tfoot>`
+      : '';
+    const accountRanking = renderUsageRanking(
+      '账号成本排行',
+      '当前筛选 · 占比为筛选内合计',
+      groupsByAccount,
+      usageAccountSubLabel,
+    );
+    const projectRanking = renderUsageRanking(
+      '项目成本排行',
+      '当前筛选 · 按 API 等价金额',
+      usageGroups(filteredAccounts, 'project'),
+      usageContributorLabel,
+    );
+    container.innerHTML = `${renderTrend(usage.daily)}
+      <div class="usage-tabs">${tabs}<span class="usage-tabs-divider" aria-hidden="true"></span>${dimensionTabs}</div>
+      ${filterControls}${summary}${accountRanking}${projectRanking}<div class="usage-note">${indexingNote}${escapeHtml(note)} 统计维度：${escapeHtml(usageDimensionLabels[selectedUsageDimension] || '按账号')} · 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}${renderCommandCodeReconciliation(periods)}
       <div class="table-wrap usage-table"><table>
-        <thead><tr><th>账号 / Profile</th><th>调用模型</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="10" class="empty-state">这个时间范围没有匹配的模型或项目</td></tr>'}</tbody>
+        <thead>${dimensionHeaders[selectedUsageDimension] || dimensionHeaders.account}</thead>
+        <tbody>${rows || '<tr><td colspan="11" class="empty-state">这个时间范围没有匹配的账号、模型或项目</td></tr>'}</tbody>
+        ${totalsRow}
       </table></div>`;
     container.querySelectorAll('[data-usage-period]').forEach((button) => {
       button.addEventListener('click', () => {
@@ -1642,8 +1766,21 @@ __THEME_TOGGLE__
         renderUsage(state);
       });
     });
+    container.querySelectorAll('[data-usage-dimension]').forEach((button) => {
+      button.addEventListener('click', () => {
+        selectedUsageDimension = button.dataset.usageDimension || 'account';
+        renderUsage(state);
+      });
+    });
+    const accountFilter = document.getElementById('usage-account-filter');
     const modelFilter = document.getElementById('usage-model-filter');
     const projectFilter = document.getElementById('usage-project-filter');
+    if (accountFilter) {
+      accountFilter.addEventListener('change', () => {
+        selectedUsageAccount = accountFilter.value;
+        renderUsage(state);
+      });
+    }
     if (modelFilter) {
       modelFilter.addEventListener('change', () => {
         selectedUsageModel = modelFilter.value;
@@ -2015,6 +2152,8 @@ __THEME_TOGGLE__
     }
     const model = usageSearchValue('usage-search-model');
     if (model) params.set('model', model);
+    const account = usageSearchValue('usage-search-account');
+    if (account) params.set('account', account);
     const keyword = usageSearchValue('usage-search-keyword').trim();
     if (keyword) params.set('q', keyword);
     params.set('group', usageSearchGroup);
@@ -2028,6 +2167,16 @@ __THEME_TOGGLE__
     const current = select.value;
     const options = ['<option value="">全部模型</option>'].concat(
       (models || []).map((model) => `<option value="${escapeHtml(model)}"${model === current ? ' selected' : ''}>${escapeHtml(model)}</option>`)
+    );
+    select.innerHTML = options.join('');
+    select.value = current;
+  };
+  const fillUsageSearchAccounts = (accounts) => {
+    const select = document.getElementById('usage-search-account');
+    if (!select) return;
+    const current = select.value;
+    const options = ['<option value="">全部账号</option>'].concat(
+      (accounts || []).map((account) => `<option value="${escapeHtml(account)}"${account === current ? ' selected' : ''}>${escapeHtml(account)}</option>`)
     );
     select.innerHTML = options.join('');
     select.value = current;
@@ -2059,6 +2208,7 @@ __THEME_TOGGLE__
     const search = payload.search || {};
     const facets = payload.facets || {};
     fillUsageSearchModels(facets.models);
+    fillUsageSearchAccounts(facets.accounts);
     renderUsageSearchStats(search, facets);
     if (search.available === false || facets.available === false) {
       const scope = facets.records
@@ -2082,7 +2232,9 @@ __THEME_TOGGLE__
       ? '<tr><th>日期</th><th>会话 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
       : group === 'model'
         ? '<tr><th>模型</th><th>会话</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
-        : '<tr><th>时间</th><th>会话</th><th>模型</th><th>项目 / 工作目录</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>';
+        : group === 'account'
+          ? '<tr><th>账号</th><th>产品 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
+          : '<tr><th>时间</th><th>会话</th><th>模型</th><th>项目 / 工作目录</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>';
     const body = rows.map((row) => {
       const usage = row.usage || {};
       const cost = row.estimated_cost_usd === null || row.estimated_cost_usd === undefined
@@ -2106,10 +2258,18 @@ __THEME_TOGGLE__
           <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
         </tr>`;
       }
+      if (group === 'account') {
+        const products = (row.products || []).map((product) => `<span class="chip">${escapeHtml(product)}</span>`).join(' ');
+        return `<tr>
+          <td><div class="cell-main">${escapeHtml(row.account || '未知账号')}</div><div class="cell-sub">${escapeHtml(row.account_id || row.account_key || '未记录账号 ID')}</div></td>
+          <td><div>${escapeHtml(formatNumber(row.records))} 条记录</div><div class="cell-sub">${products || escapeHtml(String((row.models || []).length)) + ' 个模型'}</div></td>
+          <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
+        </tr>`;
+      }
       const sessionLabel = row.session_id || (row.session_path || '').split('/').pop() || '未知会话';
       return `<tr>
         <td><div class="cell-main">${escapeHtml(formatTime(row.last_at))}</div><div class="cell-sub">${escapeHtml(row.date)}</div></td>
-        <td><button class="chip-button" type="button" data-usage-session="${escapeHtml(row.session_id || '')}" title="下钻到该会话">${escapeHtml(String(sessionLabel).slice(0, 12))}</button><div class="cell-sub">${escapeHtml(formatNumber(row.records))} 条</div></td>
+        <td><button class="chip-button" type="button" data-usage-session="${escapeHtml(row.session_id || '')}" title="下钻到该会话">${escapeHtml(String(sessionLabel).slice(0, 12))}</button><div class="cell-sub">${escapeHtml(row.account ? `${row.account} · ` : '')}${escapeHtml(formatNumber(row.records))} 条</div></td>
         <td>${escapeHtml(row.model || '—')}</td>
         <td><span class="truncate" title="${escapeHtml(row.project || '')}">${escapeHtml(row.project || '未知目录')}</span>${models ? `<div class="cell-sub">${models}</div>` : ''}</td>
         <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
@@ -2646,7 +2806,7 @@ __THEME_TOGGLE__
       refreshUsageSearch();
     });
   });
-  ['usage-search-range', 'usage-search-model', 'usage-search-sort', 'usage-search-from', 'usage-search-to'].forEach((id) => {
+  ['usage-search-range', 'usage-search-model', 'usage-search-account', 'usage-search-sort', 'usage-search-from', 'usage-search-to'].forEach((id) => {
     document.getElementById(id)?.addEventListener('change', () => {
       usageSearchLimit = 50;
       refreshUsageSearch();
@@ -3912,6 +4072,7 @@ def _usage_search_arguments(raw_query: str) -> dict[str, Any]:
         "models": tuple(_split_values(single("model"))),
         "session": single("session"),
         "project": single("project"),
+        "account": single("account"),
         "keyword": single("q"),
         "group": group,
         "sort": sort,
@@ -4080,6 +4241,7 @@ def _usage_index_summary(
             "records": 0,
             "sessions": 0,
             "models": 0,
+            "accounts": 0,
             "first_at": None,
             "last_at": None,
         }
@@ -4091,6 +4253,7 @@ def _usage_index_summary(
             "records": 0,
             "sessions": 0,
             "models": 0,
+            "accounts": 0,
             "first_at": None,
             "last_at": None,
         }
@@ -4099,6 +4262,7 @@ def _usage_index_summary(
         "records": int(facets.get("records") or 0),
         "sessions": int(facets.get("sessions") or 0),
         "models": len(facets.get("models") or ()),
+        "accounts": len(facets.get("accounts") or ()),
         "first_at": facets.get("first_at"),
         "last_at": facets.get("last_at"),
     }
@@ -4554,6 +4718,7 @@ def _make_handler(
                             "records": 0,
                             "sessions": 0,
                             "models": [],
+                            "accounts": [],
                             "first_at": None,
                             "last_at": None,
                         }
@@ -4785,6 +4950,7 @@ def _make_handler(
                             "records": 0,
                             "sessions": 0,
                             "models": [],
+                            "accounts": [],
                             "first_at": None,
                             "last_at": None,
                         },

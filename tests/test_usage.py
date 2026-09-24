@@ -1595,8 +1595,173 @@ class UsageSearchTests(unittest.TestCase):
         self.assertEqual(result["matched_rows"], 0)
         self.assertFalse(facets["available"])
         self.assertEqual(facets["models"], [])
+        self.assertEqual(facets["accounts"], [])
         self.assertFalse(empty["available"])
         self.assertEqual(empty["rows"], [])
+
+
+class UsageAccountGroupingTests(unittest.TestCase):
+    """验证用量检索按账号聚合、账号筛选和产品标签。"""
+
+    _PERSONAL_SESSION = "33333333-3333-4333-8333-333333333333"
+    _WORK_SESSION = "44444444-4444-4444-8444-444444444444"
+
+    def _aggregator(self, root: Path) -> UsageAggregator:
+        """建立两个账号、两个会话、两个模型的用量索引。"""
+
+        personal_home = root / ".codex-personal"
+        work_home = root / ".codex-work"
+        _write_search_session(
+            personal_home,
+            self._PERSONAL_SESSION,
+            "/home/dev/alpha",
+            (
+                ("2026-08-27T01:00:00Z", "gpt-5.6-luna", 1_000),
+                ("2026-08-27T02:00:00Z", "gpt-5.6-luna", 3_000),
+            ),
+        )
+        _write_search_session(
+            work_home,
+            self._WORK_SESSION,
+            "/home/dev/beta",
+            (("2026-08-27T03:00:00Z", "gpt-5.6-sol", 5_000),),
+        )
+        aggregator = UsageAggregator(
+            discovery_interval=0.01,
+            refresh_interval=0.01,
+            cache_path=root / "state" / "usage-index.sqlite3",
+        )
+        aggregator.snapshot(
+            {
+                "personal": MultiSessionRegistry(root / "state" / "personal"),
+                "work": MultiSessionRegistry(root / "state" / "work"),
+            },
+            account_metadata={
+                "personal": {
+                    "account_id": "account-personal",
+                    "profile_name": "personal",
+                    "codex_home": str(personal_home),
+                },
+                "work": {
+                    "account_id": "account-work",
+                    "profile_name": "work",
+                    "codex_home": str(work_home),
+                },
+            },
+            now=_timestamp("2026-08-27T12:00:00Z"),
+        )
+        return aggregator
+
+    def test_period_accounts_carry_products(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            today = _period(aggregator.cached_snapshot(), "today")
+            accounts = {item["account"]: item for item in today["accounts"]}
+
+        self.assertEqual(set(accounts), {"account-personal", "account-work"})
+        for account in accounts.values():
+            self.assertEqual(account["products"], ["Codex CLI"])
+        # 累计快照产生的增量：personal 1k + 2k，work 5k。
+        self.assertEqual(accounts["account-personal"]["total_tokens"], 3_000)
+        self.assertEqual(accounts["account-work"]["total_tokens"], 5_000)
+
+    def test_groups_by_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            result = aggregator.search(group="account", sort="tokens")
+            sessions = aggregator.search(group="session")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["group"], "account")
+        self.assertEqual(result["matched_rows"], 2)
+        rows = {row["account"]: row for row in result["rows"]}
+        self.assertEqual(set(rows), {"account-personal", "account-work"})
+        self.assertEqual(rows["account-personal"]["total_tokens"], 3_000)
+        self.assertEqual(rows["account-personal"]["account_id"], "account-personal")
+        self.assertEqual(rows["account-personal"]["account_key"], "account-personal")
+        self.assertEqual(rows["account-work"]["total_tokens"], 5_000)
+        self.assertEqual(rows["account-personal"]["products"], ["Codex CLI"])
+        self.assertEqual(rows["account-personal"]["models"], ["gpt-5.6-luna"])
+        self.assertEqual(result["totals"]["sessions"], 2)
+        # 会话明细同样带账号标签，方便判断某次对话消耗了哪个账号。
+        by_session = {row["session_id"]: row for row in sessions["rows"]}
+        self.assertEqual(
+            by_session[self._PERSONAL_SESSION]["account"],
+            "account-personal",
+        )
+        self.assertEqual(by_session[self._WORK_SESSION]["account"], "account-work")
+
+    def test_filters_by_account_key_name_and_product(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            by_id = aggregator.search(account="account-work", group="account")
+            by_profile = aggregator.search(account="personal", group="account")
+            by_product = aggregator.search(account="codex", group="account")
+            missing = aggregator.search(account="不存在的账号", group="account")
+
+        self.assertEqual(by_id["matched_rows"], 1)
+        self.assertEqual(by_id["totals"]["total_tokens"], 5_000)
+        self.assertEqual(by_profile["matched_rows"], 1)
+        self.assertEqual(by_profile["totals"]["total_tokens"], 3_000)
+        self.assertEqual(by_product["totals"]["total_tokens"], 8_000)
+        self.assertEqual(missing["matched_rows"], 0)
+        self.assertEqual(missing["rows"], [])
+
+    def test_scanned_path_groups_by_account(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+            store = aggregator._persistent
+            assert store is not None
+
+            grouped = aggregator.search(group="account", sort="tokens")
+            scanned = aggregator._search_scan(store, group="account", sort="tokens")
+
+        self.assertEqual(
+            [row["account"] for row in grouped["rows"]],
+            [row["account"] for row in scanned["rows"]],
+        )
+        self.assertEqual(
+            [row["total_tokens"] for row in grouped["rows"]],
+            [row["total_tokens"] for row in scanned["rows"]],
+        )
+        self.assertEqual(
+            scanned["rows"][0]["products"],
+            ["Codex CLI"],
+        )
+
+    def test_facets_list_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            aggregator = self._aggregator(Path(temporary_directory))
+
+            facets = aggregator.usage_facets()
+
+        self.assertEqual(
+            facets["accounts"],
+            ["account-personal", "account-work"],
+        )
+
+    def test_unknown_account_rows_are_kept_grouped(self) -> None:
+        """索引里还没有账号信息的旧文件按未知账号归组，不能丢数据。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            aggregator = self._aggregator(root)
+            store = aggregator._persistent
+            assert store is not None
+            index = root / "state" / "usage-index.sqlite3"
+            connection = sqlite3.connect(index)
+            connection.execute("DELETE FROM usage_file_account")
+            connection.commit()
+            connection.close()
+
+            result = aggregator.search(group="account", sort="tokens")
+
+        self.assertEqual(result["matched_rows"], 1)
+        self.assertEqual(result["rows"][0]["account"], "未知账号")
+        self.assertEqual(result["totals"]["total_tokens"], 8_000)
 
 
 class SessionUsageTests(unittest.TestCase):

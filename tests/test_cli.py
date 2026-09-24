@@ -769,6 +769,72 @@ class CliTests(unittest.TestCase):
             self.assertEqual(by_model, 0)
             self.assertIn("gpt-5.6-luna", buffer.getvalue())
 
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                by_account = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "usage",
+                        "--days",
+                        "0",
+                        "--group",
+                        "account",
+                        "--json",
+                    ]
+                )
+            account_payload = json.loads(buffer.getvalue())
+
+            self.assertEqual(by_account, 0)
+            self.assertEqual(account_payload["search"]["group"], "account")
+            self.assertEqual(
+                [row["account"] for row in account_payload["search"]["rows"]],
+                ["account-personal"],
+            )
+            self.assertEqual(
+                account_payload["search"]["rows"][0]["products"],
+                ["Codex CLI"],
+            )
+            self.assertEqual(
+                account_payload["facets"]["accounts"],
+                ["account-personal"],
+            )
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                filtered_by_account = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "usage",
+                        "--days",
+                        "0",
+                        "--group",
+                        "account",
+                        "--account",
+                        "account-personal",
+                    ]
+                )
+            self.assertEqual(filtered_by_account, 0)
+            self.assertIn("account-personal", buffer.getvalue())
+            self.assertIn("Codex CLI", buffer.getvalue())
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                missing_account = main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "usage",
+                        "--days",
+                        "0",
+                        "--account",
+                        "nobody",
+                    ]
+                )
+            self.assertEqual(missing_account, 0)
+            self.assertIn("没有符合条件的用量记录", buffer.getvalue())
+
     def test_usage_command_without_index_is_empty(self) -> None:
         """用量索引不存在时给出提示而不是报错。"""
 
