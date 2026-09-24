@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from _platform_support import requires_proc, requires_symlinks
 from token_monitor.process_backend import ObservedConnection, reset_cache
 from token_monitor.traffic import (
     SocketCounters,
@@ -26,6 +27,7 @@ _MIB = 1024 * 1024
 class TrafficMonitorTests(unittest.TestCase):
     """验证外发增量告警，且回环和大基线不会误报。"""
 
+    @requires_symlinks
     def test_first_sample_is_baseline_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -55,6 +57,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertEqual(process.observed_external_bytes, 0)
         self.assertEqual(first.alerts, ())
 
+    @requires_symlinks
     def test_large_external_burst_raises_danger(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -89,6 +92,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertIn("DeepSeek Harness", second.alerts[0].message)
         self.assertNotIn("SECRET", second.alerts[0].message)
 
+    @requires_symlinks
     def test_loopback_bytes_do_not_trigger_upload_alerts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -118,6 +122,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertIsNone(process.alert_level)
         self.assertEqual(second.alerts, ())
 
+    @requires_symlinks
     def test_child_sockets_count_toward_parent_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -155,6 +160,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertEqual(process.alert_level, "warn")
         self.assertIn(21, process.pids)
 
+    @requires_symlinks
     def test_monitor_process_tree_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -185,6 +191,7 @@ class TrafficMonitorTests(unittest.TestCase):
 
         self.assertEqual(snapshot.processes, ())
 
+    @requires_symlinks
     def test_warn_threshold_is_below_danger(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -209,6 +216,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.processes[0].alert_level, "warn")
         self.assertEqual(snapshot.alerts[0].kind, "burst")
 
+    @requires_symlinks
     def test_anomalous_processes_are_listed_first(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -248,6 +256,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.processes[0].alert_level, "warn")
         self.assertIsNone(snapshot.processes[1].alert_level)
 
+    @requires_symlinks
     def test_dsh_web_ui_listen_port_is_not_treated_as_upload(self) -> None:
         """DeepSeek Harness 长期把会话推给浏览器，不应算异常上传。"""
 
@@ -300,6 +309,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertTrue(is_loopback("::1"))
         self.assertFalse(is_loopback("1.1.1.1"))
 
+    @requires_symlinks
     def test_new_alerts_are_published_to_sink_with_process_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -348,6 +358,7 @@ class TrafficMonitorTests(unittest.TestCase):
         self.assertEqual(payload["process_key"], "codex:70:1000")
         self.assertEqual(payload["cwd"], str(root / "project"))
 
+    @requires_symlinks
     def test_sink_failure_does_not_break_traffic_monitoring(self) -> None:
         def failing_sink(alerts: object) -> None:
             raise RuntimeError("磁盘写入失败")
@@ -381,6 +392,7 @@ class TrafficMonitorTests(unittest.TestCase):
 class PlatformDegradationTests(unittest.TestCase):
     """没有 netlink（macOS）时退化成 process-only，不再抛异常。"""
 
+    @requires_proc
     def test_reader_returns_empty_without_netlink(self) -> None:
         saved = socket.AF_NETLINK
         del socket.AF_NETLINK
@@ -391,6 +403,7 @@ class PlatformDegradationTests(unittest.TestCase):
 
         self.assertEqual(counters, {})
 
+    @requires_symlinks
     def test_poll_without_netlink_reports_process_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -407,7 +420,7 @@ class PlatformDegradationTests(unittest.TestCase):
                     return_value="macOS 没有 netlink（INET_DIAG）",
                 ),
                 mock.patch(
-                    "token_monitor.traffic.scan_macos_connections",
+                    "token_monitor.traffic.scan_process_connections",
                     return_value={10: (connection,)},
                 ),
                 mock.patch(
@@ -430,6 +443,7 @@ class PlatformDegradationTests(unittest.TestCase):
         self.assertEqual(payload["source"], "process-only")
         self.assertIn("reason", payload)
 
+    @requires_symlinks
     def test_poll_survives_a_reader_that_assumes_linux(self) -> None:
         """注入的 reader 抛 AttributeError 时按不可用处理，不影响主循环。"""
 

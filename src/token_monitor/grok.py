@@ -219,7 +219,11 @@ def list_grok_active_sessions(
     home = _normalize_path(grok_home)
     sessions_root = home / "sessions"
     observed_at = time.time() if now is None else float(now)
-    agents = scan_running_agents(proc_root=proc_root, products=("grok",))
+    agents = scan_running_agents(
+        proc_root=proc_root,
+        products=("grok",),
+        session_roots=(sessions_root,),
+    )
     index = load_session_index(home)
     grouped: dict[str, list[int]] = {}
     open_by_session: dict[str, Path] = {}

@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from _platform_support import requires_chmod
 from token_monitor.retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
@@ -28,6 +29,7 @@ from token_monitor.service import (
 class ServiceTests(unittest.TestCase):
     """验证后台服务不会丢失账号、路径和安全配置。"""
 
+    @requires_chmod
     def test_config_round_trip_and_permissions(self) -> None:
         """服务配置应完整往返并限制为当前用户可读写。"""
 

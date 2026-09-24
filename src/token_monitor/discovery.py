@@ -93,7 +93,9 @@ class ProcessScanner:
         ignore_pids: tuple[int, ...] | None = None,
     ) -> None:
         self.session_root = (session_root or default_session_root()).expanduser()
-        self.proc_root = proc_root if proc_root is not None else Path("/proc")
+        # 中文注释：保留 None 表示“按平台自动选择后端”，显式路径（测试、容器）
+        # 才固定按 /proc 语义处理。
+        self.proc_root = proc_root
         self.ignore_pids = set(ignore_pids if ignore_pids is not None else (os.getpid(),))
         try:
             self._session_root_resolved = self.session_root.resolve()
@@ -103,15 +105,16 @@ class ProcessScanner:
     def scan(self) -> tuple[ProcessObservation, ...]:
         """扫描当前可读进程，返回持有 session JSONL 的进程。"""
 
-        from .process_backend import select_backend
+        from .process_backend import process_root, select_backend
 
-        if select_backend(self.proc_root) == "macos":
-            return self._scan_macos()
-        if not self.proc_root.is_dir():
+        if select_backend(self.proc_root) in {"macos", "windows"}:
+            return self._scan_portable()
+        proc_path = process_root(self.proc_root)
+        if not proc_path.is_dir():
             return ()
         observations: list[ProcessObservation] = []
         try:
-            process_directories = tuple(self.proc_root.iterdir())
+            process_directories = tuple(proc_path.iterdir())
         except OSError:
             return ()
         for process_directory in process_directories:
@@ -122,13 +125,21 @@ class ProcessScanner:
                 observations.append(observation)
         return tuple(observations)
 
-    def _scan_macos(self) -> tuple[ProcessObservation, ...]:
-        """macOS：用 ps + lsof 找到持有 session JSONL 的 agent 进程。"""
+    def _scan_portable(self) -> tuple[ProcessObservation, ...]:
+        """macOS / Windows：用平台后端找到持有 session JSONL 的 agent 进程。
 
-        from .process_backend import scan_macos_agents
+        macOS 走 ``ps`` + ``lsof``，Windows 走 Toolhelp32 + Restart Manager；
+        两者都返回统一的 :class:`~token_monitor.agents.RunningAgent`。
+        """
+
+        from .agents import scan_running_agents
 
         observations: list[ProcessObservation] = []
-        for agent in scan_macos_agents(ignore_pids=tuple(sorted(self.ignore_pids))):
+        agents = scan_running_agents(
+            ignore_pids=tuple(sorted(self.ignore_pids)),
+            session_roots=(self.session_root,),
+        )
+        for agent in agents:
             open_paths = {
                 path
                 for path in agent.open_paths

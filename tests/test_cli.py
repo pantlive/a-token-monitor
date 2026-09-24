@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from _platform_support import requires_proc
 from token_monitor.accounts import build_account_specs
 from token_monitor.alerts import TrafficAlertStore
 from token_monitor.cli import (
@@ -1115,6 +1116,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("<string>run</string>", output)
         self.assertIn(str(root / "state" / "launchd.log"), output)
 
+    @requires_proc
     def test_traffic_without_netlink_degrades_instead_of_crashing(self) -> None:
         """没有 AF_NETLINK 时 traffic 命令给平台说明而不是抛异常。"""
 

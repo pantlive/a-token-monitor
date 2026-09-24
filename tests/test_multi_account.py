@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from _platform_support import requires_proc
 from token_monitor.accounts import build_account_specs
 from token_monitor.grok import resolve_grok_homes
 from token_monitor.monitor import MonitorConfig
@@ -396,6 +397,7 @@ class ConstructorSemanticsTests(unittest.TestCase):
 class HealthInstrumentationTests(unittest.TestCase):
     """验证 daemon 健康埋点:整轮状态、单账号失败隔离和热重载登记。"""
 
+    @requires_proc
     def test_run_once_marks_main_loop_and_accounts_ok(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
@@ -416,6 +418,7 @@ class HealthInstrumentationTests(unittest.TestCase):
         self.assertEqual(main_loop, "ok")
         self.assertEqual(account, "ok")
 
+    @requires_proc
     def test_single_account_failure_does_not_stop_others(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()

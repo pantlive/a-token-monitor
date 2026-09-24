@@ -27,7 +27,7 @@ from .process_backend import (
     ObservedProcess,
     netlink_reason,
     process_root,
-    scan_macos_connections,
+    scan_process_connections,
     scan_processes,
 )
 
@@ -554,7 +554,10 @@ class TrafficMonitor:
         member_pids = tuple(
             sorted({pid for pids in grouped.values() for pid in pids})
         )
-        observed_connections = scan_macos_connections(member_pids)
+        observed_connections = scan_process_connections(
+            member_pids,
+            self.proc_root,
+        )
         results: list[ProcessTraffic] = []
         seen_keys: set[str] = set()
         with self._lock:

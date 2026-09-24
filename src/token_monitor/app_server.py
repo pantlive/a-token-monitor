@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .process_backend import launch_command
 from .quota import QuotaSnapshot, parse_rate_limits_result
 
 
@@ -71,7 +72,12 @@ class AppServerClient:
 
         if self.process is not None:
             return
-        command = [self.config.codex_path, "app-server", "--listen", "stdio://"]
+        command = launch_command(
+            self.config.codex_path,
+            "app-server",
+            "--listen",
+            "stdio://",
+        )
         try:
             self.process = subprocess.Popen(
                 command,

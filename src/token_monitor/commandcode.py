@@ -528,6 +528,7 @@ def list_commandcode_active_sessions(
     agents = scan_running_agents(
         proc_root=proc_root,
         products=(_COMMANDCODE_PROFILE_NAME,),
+        session_roots=(projects_root,),
     )
     grouped: dict[str, list[int]] = {}
     paths_by_session: dict[str, Path] = {}

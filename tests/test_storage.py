@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _platform_support import requires_chmod
 from token_monitor.models import JobState, JobStatus
 from token_monitor.storage import StateError, StateStore
 
@@ -14,6 +15,7 @@ from token_monitor.storage import StateError, StateStore
 class StateStoreTests(unittest.TestCase):
     """验证状态和原始输出日志可以安全恢复。"""
 
+    @requires_chmod
     def test_round_trip_and_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             state_dir = Path(temporary_directory) / "monitor"

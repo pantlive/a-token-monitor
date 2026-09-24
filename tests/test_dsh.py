@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _platform_support import requires_symlinks
 from token_monitor.dsh import (
     list_dsh_active_sessions,
     parse_dsh_projcache,
@@ -57,6 +58,7 @@ class DshAccountTests(unittest.TestCase):
 class DshSessionTests(unittest.TestCase):
     """验证只把打开 session.lock 的进程算作活动会话。"""
 
+    @requires_symlinks
     def test_lists_lock_backed_session_and_skips_title(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

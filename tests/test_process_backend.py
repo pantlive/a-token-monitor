@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from _platform_support import requires_symlinks
 from token_monitor import process_backend
 from token_monitor.agents import scan_running_agents
 
@@ -262,6 +263,7 @@ class ProcBackendTests(unittest.TestCase):
         self.assertEqual([agent.pid for agent in agents], [501])
         self.assertEqual(agents[0].open_paths, (transcript,))
 
+    @requires_symlinks
     def test_scan_processes_reads_proc_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -32,6 +32,7 @@ from .multi_models import (
     SessionStatus,
     TrackedSession,
 )
+from .process_backend import launch_command
 from .quota import QuotaSnapshot, merge_sparse_update
 from .quota_fallback import JsonlQuotaFallbackReader, recent_session_paths
 from .registry import MultiSessionRegistry, RegistryError
@@ -656,17 +657,15 @@ class MultiSessionMonitor:
         return protected
 
     def _pid_is_alive(self, pid: int) -> bool:
-        """以零信号检查进程是否存在，不向进程发送实际信号。"""
+        """判断进程是否存活。
 
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+        中文注释：这里必须走跨平台实现——Windows 上 ``os.kill(pid, 0)``
+        会直接 ``TerminateProcess``，用它探测存活会把被监控的 agent 杀掉。
+        """
+
+        from .process_backend import process_alive
+
+        return process_alive(pid)
 
     def _signal_pid(self, pid: int, sig: int) -> None:
         """向用户 Codex 进程发送退出信号。"""
@@ -787,7 +786,8 @@ class MultiSessionMonitor:
         if not holders:
             return True
         for pid in sorted(holders):
-            self._signal_pid(pid, signal.SIGKILL)
+            # Windows 没有 SIGKILL，退回 SIGTERM（在 Windows 上等同 TerminateProcess）
+            self._signal_pid(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         deadline = time.time() + min(2.0, max(self._PROCESS_STOP_TIMEOUT, 0.01))
         while time.time() < deadline and self._session_holder_pids(session):
             time.sleep(self._PROCESS_STOP_POLL)
@@ -1649,14 +1649,14 @@ class MultiSessionMonitor:
 
         if not session.session_id:
             raise RuntimeError("没有 session ID，拒绝自动 resume")
-        return [
+        return launch_command(
             self.config.codex_path,
             "exec",
             "resume",
             "--json",
             session.session_id,
             self.config.continuation_prompt,
-        ]
+        )
 
     def _environment(self) -> dict[str, str] | None:
         """为当前账号构造 Codex 子进程环境。"""
