@@ -165,8 +165,8 @@ class SourceStringScanTests(unittest.TestCase):
 class PageSubstitutionTests(unittest.TestCase):
     """替换结果的质量守卫：不能出现中英混杂，覆盖率只能前进。"""
 
-    # 覆盖率棘轮：每补一批目录就把它调小，最后一轮要求 0。
-    UNCOVERED_LIMIT = 230
+    # 覆盖率棘轮：主页与设置页模板已经 0 残留，涨回去就直接失败。
+    UNCOVERED_LIMIT = 0
 
     def test_substitution_never_produces_mixed_script_runs(self) -> None:
         """中文旁边紧邻英文字母就是翻坏了（例如「不Available」）。"""
@@ -193,7 +193,7 @@ class PageSubstitutionTests(unittest.TestCase):
         self.assertLessEqual(
             remaining,
             self.UNCOVERED_LIMIT,
-            f"未翻译片段涨到 {remaining} 条，请补目录表或调小 UNCOVERED_LIMIT",
+            f"模板里又出现 {remaining} 条未翻译片段，请补目录表（或确认是否新增了文案）",
         )
 
 

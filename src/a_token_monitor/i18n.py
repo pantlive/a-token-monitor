@@ -19,8 +19,7 @@ import re
 from collections.abc import Iterator, Mapping
 from typing import Any
 
-from .i18n_catalog import PAGE as _CATALOG_PAGE
-from .i18n_catalog import VALUE as _CATALOG_VALUE
+from .i18n_catalog import EN as _CATALOG
 
 # 支持的语言；zh 是源语言，不需要目录表。
 SUPPORTED_LANGUAGES: tuple[str, ...] = ("zh", "en")
@@ -40,13 +39,12 @@ _QUOTED_PATTERN = re.compile(
 EN_COMPLETE = False
 
 # 目录表放在 i18n_catalog.py 里，便于分批维护与 review。
-# 页面替换只认「整片段」条目（_EN_PAGE），精确翻译两者都用（_EN_VALUE）。
-_EN_PAGE: dict[str, str] = dict(_CATALOG_PAGE)
-_EN_VALUE: dict[str, str] = {**_CATALOG_VALUE, **_CATALOG_PAGE}
-_EN_VALUE.setdefault("中文", "中文")
-_EN_VALUE.setdefault("English", "English")
-# 兼容旧名字：很多测试与工具按 _EN 取目录。
-_EN = _EN_VALUE
+_EN: dict[str, str] = dict(_CATALOG)
+_EN.setdefault("中文", "中文")
+_EN.setdefault("English", "English")
+# 兼容旧名字：工具与测试里两种叫法都出现过。
+_EN_PAGE = _EN
+_EN_VALUE = _EN
 
 
 def contains_cjk(text: str) -> bool:
@@ -109,7 +107,7 @@ def translate(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
 
     if lang != "en" or not text:
         return text
-    return _EN_VALUE.get(text, text)
+    return _EN.get(text, text)
 
 
 def substitute(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
@@ -125,8 +123,8 @@ def substitute(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
 
     if lang != "en" or not text:
         return text
-    for source in sorted(_EN_VALUE, key=len, reverse=True):
-        target = _EN_VALUE[source]
+    for source in sorted(_EN, key=len, reverse=True):
+        target = _EN[source]
         if source not in text:
             continue
         pattern = re.compile(
@@ -370,7 +368,7 @@ def missing_entries(text: str) -> tuple[str, ...]:
 def catalog_size() -> int:
     """当前英文条目数量（文档与测试用）。"""
 
-    return len(_EN_PAGE) + len(_CATALOG_VALUE)
+    return len(_EN)
 
 
 def _process_env() -> Mapping[str, str]:
