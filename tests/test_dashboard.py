@@ -22,10 +22,11 @@ from token_monitor.housekeeping import (
     DiskThresholds,
     HousekeepingMonitor,
 )
+from token_monitor import dashboard as dashboard_module
 from token_monitor.dashboard import (
     _BASE_CSS,
     _DASHBOARD_HTML,
-    _FAVICON_BARS,
+    _FAVICON_GLYPHS,
     _SETTINGS_HTML,
     _brand_mark_svg,
     DashboardConfig,
@@ -1582,14 +1583,100 @@ class FaviconTests(unittest.TestCase):
         self.assertNotIn("<image", svg)
         self.assertNotIn("data-theme", svg)
         self.assertNotIn("prefers-color-scheme", svg)
-        rects = [item for item in root.iter() if item.tag.endswith("}rect")]
-        # 一个徽章底 + 三根柱子。
-        self.assertEqual(len(rects), 1 + len(_FAVICON_BARS))
         bars = [
-            (float(item.get("x")), float(item.get("y")))
-            for item in rects[1:]
+            item
+            for item in _FAVICON_GLYPHS["bars"]
+            if not isinstance(item, dict) and item[0] == "rect"
         ]
-        self.assertEqual(bars, [(x, y) for x, y, _, _ in _FAVICON_BARS])
+        groups = [item for item in root.iter() if item.tag.endswith("}g")]
+        self.assertEqual(len(groups), 1)
+        glyph_rects = [
+            item for item in groups[0].iter() if item.tag.endswith("}rect")
+        ]
+        self.assertEqual(len(glyph_rects), len(bars))
+        self.assertEqual(
+            [
+                (float(item.get("x")), float(item.get("y")))
+                for item in glyph_rects
+            ],
+            [(item[1], item[2]) for item in bars],
+        )
+        # 高水位刻度是挖洞：必须有 mask，且洞用黑色画。
+        self.assertIn("<mask", svg)
+        self.assertIn('fill="black"', svg)
+
+    def test_all_candidate_styles_render(self) -> None:
+        """Stitch 方案的每个候选都要能出 SVG 和位图，方便换方案。"""
+
+        for style in _FAVICON_GLYPHS:
+            with mock.patch.object(dashboard_module, "_FAVICON_STYLE", style):
+                svg = _favicon_svg()
+                root = ElementTree.fromstring(svg)
+                self.assertEqual(root.get("viewBox"), "0 0 64 64")
+                self.assertIn("<linearGradient", svg)
+                self.assertGreaterEqual(
+                    len([item for item in root.iter() if item.tag.endswith("}rect")]),
+                    1,
+                )
+                _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
+                painted = [
+                    pixel
+                    for row in rows
+                    for pixel in row
+                    if pixel[3] > 200
+                ]
+                self.assertGreater(len(painted), 200, style)
+                # 图形必须真的画出白色部分，而不是只有一个空徽章。
+                white = [pixel for pixel in painted if min(pixel[:3]) > 240]
+                self.assertGreater(len(white), 20, style)
+
+    def test_switching_the_style_changes_the_version_token(self) -> None:
+        """换图标必须换 URL 指纹，否则浏览器会一直用旧图标。"""
+
+        tokens = {}
+        for style in _FAVICON_GLYPHS:
+            with mock.patch.object(dashboard_module, "_FAVICON_STYLE", style):
+                tokens[style] = dashboard_module._favicon_token()
+        self.assertEqual(len(set(tokens.values())), len(tokens))
+
+    def test_geometry_primitives_cover_their_shapes(self) -> None:
+        """原语的点包含判定：直接决定光栅化结果，逐条钉住。"""
+
+        inside = dashboard_module._inside_shape
+        self.assertTrue(inside(20.0, 20.0, ("circle", 20.0, 20.0, 4.0)))
+        self.assertFalse(inside(26.0, 20.0, ("circle", 20.0, 20.0, 4.0)))
+        # 圆环：只有描边宽度内的点算命中。
+        self.assertTrue(inside(24.0, 20.0, ("ring", 20.0, 20.0, 4.0, 1.0)))
+        self.assertFalse(inside(20.0, 20.0, ("ring", 20.0, 20.0, 4.0, 1.0)))
+        # 圆头线段：端点外侧半个线宽内仍然算命中（圆头）。
+        self.assertTrue(inside(13.0, 20.0, ("capsule", 10.0, 20.0, 30.0, 20.0, 6.0)))
+        self.assertFalse(inside(6.0, 20.0, ("capsule", 10.0, 20.0, 30.0, 20.0, 6.0)))
+        # 圆弧只覆盖给定角度区间。
+        arc = ("arc", 20.0, 20.0, 10.0, 0.0, 90.0, 2.0)
+        self.assertTrue(inside(30.0, 20.0, arc))
+        self.assertFalse(inside(10.0, 20.0, arc))
+        # 折线按到线段的最短距离判定。
+        self.assertTrue(
+            inside(15.0, 15.5, ("polyline", ((10.0, 10.0), (20.0, 20.0)), 2.0))
+        )
+        self.assertFalse(
+            inside(10.0, 20.0, ("polyline", ((10.0, 10.0), (20.0, 20.0)), 2.0))
+        )
+        # 多边形按射线法填充。
+        square = ("polygon", ((10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)))
+        self.assertTrue(inside(15.0, 15.0, square))
+        self.assertFalse(inside(25.0, 15.0, square))
+
+    def test_cut_shapes_punch_holes_through_the_glyph(self) -> None:
+        """挖洞处必须露出渐变底色，而不是白色。"""
+
+        with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "bars"):
+            _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
+        # 高水位刻度孔中心：画布 (46, 18.5) → 32px 图上的 (23, 9)。
+        hole = rows[9][23]
+        self.assertEqual(hole[3], 255)
+        self.assertGreater(hole[2], hole[0])  # 露出的是蓝→青渐变，不是白色
+        self.assertLess(min(hole[:3]), 240)
 
     def test_ico_contains_16_and_32_pixel_pngs(self) -> None:
         ico = _favicon_ico()
