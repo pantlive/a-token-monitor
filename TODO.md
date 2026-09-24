@@ -177,6 +177,10 @@
     账号都显示成最后一个账号的套餐；改为把值挂在各自的 state 上，并补了会在
     旧代码上失败的回归用例（两个账号 plus / prolite）。
   - 套餐优先级调整为 auth.json 优先、账号启动快照兜底：续费或换号后不必重启 daemon。
+  - 卡片头像徽标改用订阅缩写（产品与套餐的单词首字母，最多 3 个字符）：
+    `Codex · Plus → CP`、`Codex · Pro Lite → CPL`、`Grok · SuperGrok → GS`、
+    `Command Code · GOAT → CCG`、`Kimi → K`，悬停显示完整订阅名；替换原来没有意义的
+    账号 ID 前两位（UUID 账号显示成「3」「5」），同产品不同套餐也能一眼区分。
 
 - [x] Dashboard 浏览器标签图标
   - `/favicon.svg` + `/favicon.ico`（16/32 PNG 回退）两个路由，Dashboard 与设置页
