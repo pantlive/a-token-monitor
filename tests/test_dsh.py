@@ -8,15 +8,15 @@ import unittest
 from pathlib import Path
 
 from _platform_support import requires_symlinks
-from token_monitor.dsh import (
+from a_token_monitor.dsh import (
     list_dsh_active_sessions,
     parse_dsh_projcache,
     read_dsh_account,
     read_dsh_quota,
     resolve_dsh_homes,
 )
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 
 class DshAccountTests(unittest.TestCase):

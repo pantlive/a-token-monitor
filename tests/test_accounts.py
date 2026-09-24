@@ -11,21 +11,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from _platform_support import requires_proc
-from token_monitor.accounts import (
+from a_token_monitor.accounts import (
     _path_suffix,
     build_account_specs,
     build_additional_account_spec,
 )
-from token_monitor.alerts import AlertStoreError
-from token_monitor.multi_models import (
+from a_token_monitor.alerts import AlertStoreError
+from a_token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
     TrackedSession,
 )
-from token_monitor.monitor import MonitorConfig
-from token_monitor.multi_account import MultiAccountMonitor
-from token_monitor.traffic import TrafficAlert
-from token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.monitor import MonitorConfig
+from a_token_monitor.multi_account import MultiAccountMonitor
+from a_token_monitor.traffic import TrafficAlert
+from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
 
 
 class _FakeAppServer:
@@ -108,7 +108,7 @@ class AccountTests(unittest.TestCase):
             )
             _FakeAppServer.configs = []
             with patch(
-                "token_monitor.monitor.AppServerClient",
+                "a_token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(
@@ -159,7 +159,7 @@ class AccountTests(unittest.TestCase):
             )
             _FakeAppServer.configs = []
             with patch(
-                "token_monitor.monitor.AppServerClient",
+                "a_token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(
@@ -167,7 +167,7 @@ class AccountTests(unittest.TestCase):
                     state_dir=root / "state",
                     config=MonitorConfig(auto_resume=False),
                 )
-                with self.assertLogs("token_monitor.multi_account", level="ERROR"):
+                with self.assertLogs("a_token_monitor.multi_account", level="ERROR"):
                     monitor._record_alerts([_sample_alert()])
                 stored = monitor.alert_store.query()
                 database_file = monitor.alert_store.database_file
@@ -194,7 +194,7 @@ class AccountTests(unittest.TestCase):
             )
             _FakeAppServer.configs = []
             with patch(
-                "token_monitor.monitor.AppServerClient",
+                "a_token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(
@@ -209,7 +209,7 @@ class AccountTests(unittest.TestCase):
                         side_effect=AlertStoreError("磁盘不可写"),
                     ),
                     self.assertLogs(
-                        "token_monitor.multi_account",
+                        "a_token_monitor.multi_account",
                         level="ERROR",
                     ) as captured,
                 ):
@@ -242,7 +242,7 @@ class AccountTests(unittest.TestCase):
             )
             _FakeAppServer.configs = []
             with patch(
-                "token_monitor.monitor.AppServerClient",
+                "a_token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(
@@ -261,7 +261,7 @@ class AccountTests(unittest.TestCase):
                 )
                 labels = [target.label for target in monitor.housekeeping.targets]
                 with self.assertLogs(
-                    "token_monitor.multi_account",
+                    "a_token_monitor.multi_account",
                     level="WARNING",
                 ) as captured:
                     monitor._check_advice(1_000.0)
@@ -292,7 +292,7 @@ class AccountTests(unittest.TestCase):
             )
             _FakeAppServer.configs = []
             with patch(
-                "token_monitor.monitor.AppServerClient",
+                "a_token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(
@@ -350,7 +350,7 @@ class AccountTests(unittest.TestCase):
             provider_root = root / "missing"
             _FakeAppServer.configs = []
             with patch(
-                "token_monitor.monitor.AppServerClient",
+                "a_token_monitor.monitor.AppServerClient",
                 _FakeAppServer,
             ):
                 monitor = MultiAccountMonitor(

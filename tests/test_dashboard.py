@@ -17,15 +17,15 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from token_monitor.alerts import TrafficAlertStore
-from token_monitor.housekeeping import (
+from a_token_monitor.alerts import TrafficAlertStore
+from a_token_monitor.housekeeping import (
     AuditTarget,
     DiskThresholds,
     HousekeepingMonitor,
 )
-from token_monitor import dashboard as dashboard_module
-from token_monitor.accounts import CodexAccount, read_codex_plan_type
-from token_monitor.dashboard import (
+from a_token_monitor import dashboard as dashboard_module
+from a_token_monitor.accounts import CodexAccount, read_codex_plan_type
+from a_token_monitor.dashboard import (
     _BASE_CSS,
     _DASHBOARD_HTML,
     _FAVICON_GLYPHS,
@@ -39,18 +39,18 @@ from token_monitor.dashboard import (
     build_multi_dashboard_state,
     favicon_response,
 )
-from token_monitor.health import HealthTracker
-from token_monitor.retention import RetentionController, RetentionError
-from token_monitor.multi_models import (
+from a_token_monitor.health import HealthTracker
+from a_token_monitor.retention import RetentionController, RetentionError
+from a_token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
     TrackedSession,
 )
-from token_monitor.quota import QuotaSnapshot, QuotaWindow
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.scan_dirs import ScanDirsController
-from token_monitor.traffic import TrafficAlert
-from token_monitor.usage import UsageAggregator
+from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.scan_dirs import ScanDirsController
+from a_token_monitor.traffic import TrafficAlert
+from a_token_monitor.usage import UsageAggregator
 
 
 class DashboardTests(unittest.TestCase):
@@ -377,7 +377,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "token_monitor.dashboard.read_kimi_quota",
+                    "a_token_monitor.dashboard.read_kimi_quota",
                     return_value=None,
                 ):
                     with urlopen(
@@ -448,7 +448,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "token_monitor.dashboard.read_commandcode_quota",
+                    "a_token_monitor.dashboard.read_commandcode_quota",
                     return_value=quota,
                 ):
                     with urlopen(
@@ -615,7 +615,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "token_monitor.dashboard.read_kimi_quota",
+                    "a_token_monitor.dashboard.read_kimi_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -694,7 +694,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "token_monitor.dashboard.read_kimi_quota",
+                    "a_token_monitor.dashboard.read_kimi_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -812,11 +812,11 @@ class DashboardTests(unittest.TestCase):
             )
             with (
                 mock.patch(
-                    "token_monitor.dashboard.list_kimi_active_sessions",
+                    "a_token_monitor.dashboard.list_kimi_active_sessions",
                     return_value=(kimi_session,),
                 ),
                 mock.patch(
-                    "token_monitor.dashboard.list_dsh_active_sessions",
+                    "a_token_monitor.dashboard.list_dsh_active_sessions",
                     return_value=(dsh_session,),
                 ),
             ):
@@ -1158,8 +1158,8 @@ class GrokSessionDashboardTests(unittest.TestCase):
     """验证 Grok 活动会话以统一字段进入 Dashboard 状态。"""
 
     def test_grok_sessions_use_unified_fields(self) -> None:
-        from token_monitor.multi_models import DetectionConfidence, SessionStatus
-        from token_monitor.multi_models import TrackedSession as Model
+        from a_token_monitor.multi_models import DetectionConfidence, SessionStatus
+        from a_token_monitor.multi_models import TrackedSession as Model
 
         session = Model(
             thread_id="grok:session-1",
@@ -1185,11 +1185,11 @@ class GrokSessionDashboardTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             with (
                 mock.patch(
-                    "token_monitor.dashboard.list_grok_active_sessions",
+                    "a_token_monitor.dashboard.list_grok_active_sessions",
                     return_value=(session,),
                 ),
                 mock.patch(
-                    "token_monitor.dashboard.read_grok_quota",
+                    "a_token_monitor.dashboard.read_grok_quota",
                     return_value=None,
                 ),
             ):
@@ -1296,10 +1296,10 @@ class NoCodexDashboardTests(unittest.TestCase):
             )
             with (
                 mock.patch(
-                    "token_monitor.dashboard.read_grok_account",
+                    "a_token_monitor.dashboard.read_grok_account",
                     side_effect=RuntimeError("模拟 Grok 目录损坏"),
                 ),
-                self.assertLogs("token_monitor.dashboard", level="ERROR") as captured,
+                self.assertLogs("a_token_monitor.dashboard", level="ERROR") as captured,
             ):
                 state = build_multi_dashboard_state(
                     {},
@@ -1347,11 +1347,11 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             with (
                 mock.patch(
-                    "token_monitor.dashboard.list_claude_active_sessions",
+                    "a_token_monitor.dashboard.list_claude_active_sessions",
                     return_value=(session,),
                 ),
                 mock.patch(
-                    "token_monitor.dashboard.read_grok_quota",
+                    "a_token_monitor.dashboard.read_grok_quota",
                     return_value=None,
                 ),
             ):
@@ -1440,7 +1440,7 @@ class ThemeTests(unittest.TestCase):
             'id="theme-toggle"',
             'id="theme-label"',
             "data-theme-mode",
-            "token-monitor-theme",
+            "a-token-monitor-theme",
             "prefers-color-scheme: light",
             "theme-icon-light",
             "theme-icon-dark",
@@ -3412,10 +3412,10 @@ class HealthEndpointTests(unittest.TestCase):
             try:
                 with (
                     mock.patch(
-                        "token_monitor.dashboard.read_grok_account",
+                        "a_token_monitor.dashboard.read_grok_account",
                         side_effect=RuntimeError("模拟 Grok 目录损坏"),
                     ),
-                    self.assertLogs("token_monitor.dashboard", level="ERROR"),
+                    self.assertLogs("a_token_monitor.dashboard", level="ERROR"),
                 ):
                     status, payload = self._get(base_url, "/api/state")
             finally:
@@ -3439,7 +3439,7 @@ class HealthEndpointTests(unittest.TestCase):
         server = self._server(housekeeping=FailingHousekeeping())
         base_url = f"http://{server.address[0]}:{server.address[1]}"
         try:
-            with self.assertLogs("token_monitor.dashboard", level="ERROR"):
+            with self.assertLogs("a_token_monitor.dashboard", level="ERROR"):
                 status, payload = self._get(base_url, "/api/state")
         finally:
             server.close()

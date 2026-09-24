@@ -6,7 +6,7 @@ import json
 import unittest
 from datetime import datetime
 
-from token_monitor.events import parse_event_line
+from a_token_monitor.events import parse_event_line
 
 
 class EventParserTests(unittest.TestCase):

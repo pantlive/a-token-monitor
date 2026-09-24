@@ -31,7 +31,7 @@ class AppServerConfig:
 
     codex_path: str = "codex"
     request_timeout: float = 15.0
-    client_name: str = "token_monitor"
+    client_name: str = "a_token_monitor"
     client_version: str = "0.5.0"
     codex_home: Path | None = None
 

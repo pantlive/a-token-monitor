@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-from token_monitor.housekeeping import (
+from a_token_monitor.housekeeping import (
     AuditTarget,
     CleanupCriteria,
     DiskThresholds,

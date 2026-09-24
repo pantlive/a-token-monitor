@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 from _platform_support import requires_chmod
-from token_monitor.models import JobState, JobStatus
-from token_monitor.storage import StateError, StateStore
+from a_token_monitor.models import JobState, JobStatus
+from a_token_monitor.storage import StateError, StateStore
 
 
 class StateStoreTests(unittest.TestCase):

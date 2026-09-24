@@ -39,9 +39,9 @@ from .usage import (
 )
 
 
-SERVICE_NAME = "token-monitor.service"
-# 改名前的单元名：只用于识别旧安装，便于清理和兼容查询，新安装一律用 SERVICE_NAME。
-LEGACY_SERVICE_NAME = "codex-reset-monitor.service"
+SERVICE_NAME = "a-token-monitor.service"
+# 两次改名前的单元名：只用于识别旧安装，便于清理和兼容查询，新安装一律用 SERVICE_NAME。
+LEGACY_SERVICE_NAMES = ("token-monitor.service", "codex-reset-monitor.service")
 
 
 class ServiceError(RuntimeError):
@@ -439,7 +439,7 @@ class UserServiceManager:
         arguments = (
             str(self.python_executable),
             "-m",
-            "token_monitor",
+            "a_token_monitor",
             "--state-dir",
             str(self.state_dir),
             "service",
@@ -488,8 +488,9 @@ class UserServiceManager:
 
         if self.unit_path.exists():
             return SERVICE_NAME
-        if (self.unit_dir / LEGACY_SERVICE_NAME).exists():
-            return LEGACY_SERVICE_NAME
+        for legacy_name in LEGACY_SERVICE_NAMES:
+            if (self.unit_dir / legacy_name).exists():
+                return legacy_name
         return SERVICE_NAME
 
     def status(self) -> int:
@@ -527,17 +528,20 @@ class UserServiceManager:
     def uninstall(self) -> None:
         """停止并移除服务定义；监控数据库和历史记录继续保留。"""
 
-        legacy_unit = self.unit_dir / LEGACY_SERVICE_NAME
-        if not self.unit_path.exists() and legacy_unit.exists():
-            # 改名前的安装：停掉并移除旧单元，避免遗留后台进程。
-            self._systemctl("disable", "--now", LEGACY_SERVICE_NAME, check=False)
-            try:
-                legacy_unit.unlink(missing_ok=True)
-            except OSError as error:
-                raise ServiceError(f"无法移除旧版后台服务文件: {error}") from error
-            self._systemctl("daemon-reload")
-            self._systemctl("reset-failed", LEGACY_SERVICE_NAME, check=False)
-            return
+        if not self.unit_path.exists():
+            for legacy_name in LEGACY_SERVICE_NAMES:
+                legacy_unit = self.unit_dir / legacy_name
+                if not legacy_unit.exists():
+                    continue
+                # 改名前的安装：停掉并移除旧单元，避免遗留后台进程。
+                self._systemctl("disable", "--now", legacy_name, check=False)
+                try:
+                    legacy_unit.unlink(missing_ok=True)
+                except OSError as error:
+                    raise ServiceError(f"无法移除旧版后台服务文件: {error}") from error
+                self._systemctl("daemon-reload")
+                self._systemctl("reset-failed", legacy_name, check=False)
+                return
         self._systemctl(
             "disable",
             "--now",
@@ -723,7 +727,7 @@ def _list_string(values: list[Any], index: int) -> str:
 
 
 # 中文注释：macOS 用 launchd 的 Label 作为 plist 文件名和 launchctl 目标名。
-LAUNCHD_LABEL = "com.token-monitor.daemon"
+LAUNCHD_LABEL = "com.a-token-monitor.daemon"
 
 
 class LaunchdServiceManager:
@@ -787,7 +791,7 @@ class LaunchdServiceManager:
         arguments = (
             str(self.python_executable),
             "-m",
-            "token_monitor",
+            "a_token_monitor",
             "--state-dir",
             str(self.state_dir),
             "service",
@@ -942,7 +946,7 @@ def _current_uid() -> int:
 TASK_SCHEDULER_XML = """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Author>token-monitor</Author>
+    <Author>a-token-monitor</Author>
     <Description>{description}</Description>
     <URI>\\{task_name}</URI>
   </RegistrationInfo>
@@ -995,7 +999,7 @@ class TaskSchedulerServiceManager:
         state_dir: Path,
         unit_dir: Path | None = None,
         python_executable: Path | None = None,
-        task_name: str = "TokenMonitor",
+        task_name: str = "ATokenMonitor",
         user: str | None = None,
     ) -> None:
         """创建计划任务管理器，并规范化所有运行路径。
@@ -1009,7 +1013,7 @@ class TaskSchedulerServiceManager:
         self.state_dir = _absolute_path(state_dir)
         self.task_name = task_name
         self.user = user.strip() if user else None
-        self.task_path = self.state_dir / "token-monitor-task.xml"
+        self.task_path = self.state_dir / "a-token-monitor-task.xml"
         self.log_path = self.state_dir / "daemon.log"
         self.python_executable = _absolute_path(
             python_executable or Path(sys.executable)
@@ -1044,7 +1048,7 @@ class TaskSchedulerServiceManager:
         # 层引号，内部路径各自单独加引号，右尖括号重定向到 daemon.log。
         return (
             f'/c ""{self.python_executable}"'
-            " -m token_monitor"
+            " -m a_token_monitor"
             f' --state-dir "{self.state_dir}"'
             " service run"
             f' >> "{self.log_path}" 2>&1"'

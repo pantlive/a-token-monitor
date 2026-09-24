@@ -11,13 +11,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from _platform_support import requires_chmod
-from token_monitor.retention import (
+from a_token_monitor.retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
 )
-from token_monitor.scan_dirs import ScanDirsConfig, ScanDirsError
-from token_monitor.service import (
-    LEGACY_SERVICE_NAME,
+from a_token_monitor.scan_dirs import ScanDirsConfig, ScanDirsError
+from a_token_monitor.service import (
+    LEGACY_SERVICE_NAMES,
     SERVICE_NAME,
     ServiceConfig,
     ServiceError,
@@ -351,7 +351,7 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("UMask=0077", unit)
             self.assertNotIn(".codex-work", unit)
 
-    @patch("token_monitor.service._run_command", return_value=0)
+    @patch("a_token_monitor.service._run_command", return_value=0)
     def test_install_writes_files_and_enables_unit(
         self,
         run_command: Mock,
@@ -383,36 +383,39 @@ class ServiceTests(unittest.TestCase):
                 ],
             )
 
-    @patch("token_monitor.service._run_command", return_value=0)
+    @patch("a_token_monitor.service._run_command", return_value=0)
     def test_status_and_logs_fall_back_to_legacy_unit(
         self,
         run_command: Mock,
     ) -> None:
         """改名前的旧单元仍应能被查询，避免升级后看不到后台服务。"""
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            unit_dir = root / "units"
-            unit_dir.mkdir()
-            (unit_dir / LEGACY_SERVICE_NAME).write_text("", encoding="utf-8")
-            manager = UserServiceManager(
-                state_dir=root / "state",
-                unit_dir=unit_dir,
-            )
+        for legacy_name in LEGACY_SERVICE_NAMES:
+            with self.subTest(legacy_name=legacy_name):
+                run_command.reset_mock()
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    unit_dir = root / "units"
+                    unit_dir.mkdir()
+                    (unit_dir / legacy_name).write_text("", encoding="utf-8")
+                    manager = UserServiceManager(
+                        state_dir=root / "state",
+                        unit_dir=unit_dir,
+                    )
 
-            self.assertEqual(manager.active_service_name, LEGACY_SERVICE_NAME)
-            manager.status()
-            manager.logs(lines=10, follow=False)
+                    self.assertEqual(manager.active_service_name, legacy_name)
+                    manager.status()
+                    manager.logs(lines=10, follow=False)
 
-            status_command = run_command.call_args_list[0].args[0]
-            self.assertEqual(
-                status_command,
-                ["systemctl", "--user", "status", LEGACY_SERVICE_NAME, "--no-pager"],
-            )
-            logs_command = run_command.call_args_list[1].args[0]
-            self.assertIn(LEGACY_SERVICE_NAME, logs_command)
+                    status_command = run_command.call_args_list[0].args[0]
+                    self.assertEqual(
+                        status_command,
+                        ["systemctl", "--user", "status", legacy_name, "--no-pager"],
+                    )
+                    logs_command = run_command.call_args_list[1].args[0]
+                    self.assertIn(legacy_name, logs_command)
 
-    @patch("token_monitor.service._run_command", return_value=0)
+    @patch("a_token_monitor.service._run_command", return_value=0)
     def test_new_unit_takes_precedence_over_legacy(
         self,
         run_command: Mock,
@@ -424,7 +427,8 @@ class ServiceTests(unittest.TestCase):
             unit_dir = root / "units"
             unit_dir.mkdir()
             (unit_dir / SERVICE_NAME).write_text("", encoding="utf-8")
-            (unit_dir / LEGACY_SERVICE_NAME).write_text("", encoding="utf-8")
+            for legacy_name in LEGACY_SERVICE_NAMES:
+                (unit_dir / legacy_name).write_text("", encoding="utf-8")
             manager = UserServiceManager(
                 state_dir=root / "state",
                 unit_dir=unit_dir,
@@ -438,38 +442,41 @@ class ServiceTests(unittest.TestCase):
                 ["systemctl", "--user", "status", SERVICE_NAME, "--no-pager"],
             )
 
-    @patch("token_monitor.service._run_command", return_value=0)
+    @patch("a_token_monitor.service._run_command", return_value=0)
     def test_uninstall_removes_legacy_unit(
         self,
         run_command: Mock,
     ) -> None:
         """卸载应识别旧安装并移除旧单元文件。"""
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            unit_dir = root / "units"
-            unit_dir.mkdir()
-            legacy_unit = unit_dir / LEGACY_SERVICE_NAME
-            legacy_unit.write_text("", encoding="utf-8")
-            manager = UserServiceManager(
-                state_dir=root / "state",
-                unit_dir=unit_dir,
-            )
+        for legacy_name in LEGACY_SERVICE_NAMES:
+            with self.subTest(legacy_name=legacy_name):
+                run_command.reset_mock()
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    unit_dir = root / "units"
+                    unit_dir.mkdir()
+                    legacy_unit = unit_dir / legacy_name
+                    legacy_unit.write_text("", encoding="utf-8")
+                    manager = UserServiceManager(
+                        state_dir=root / "state",
+                        unit_dir=unit_dir,
+                    )
 
-            manager.uninstall()
+                    manager.uninstall()
 
-            self.assertFalse(legacy_unit.exists())
-            commands = [call.args[0] for call in run_command.call_args_list]
-            self.assertEqual(
-                commands[0],
-                [
-                    "systemctl",
-                    "--user",
-                    "disable",
-                    "--now",
-                    LEGACY_SERVICE_NAME,
-                ],
-            )
+                    self.assertFalse(legacy_unit.exists())
+                    commands = [call.args[0] for call in run_command.call_args_list]
+                    self.assertEqual(
+                        commands[0],
+                        [
+                            "systemctl",
+                            "--user",
+                            "disable",
+                            "--now",
+                            legacy_name,
+                        ],
+                    )
 
     def test_systemd_quote_blocks_expansion(self) -> None:
         """路径中的空格、美元符和百分号不得被 systemd 二次解释。"""

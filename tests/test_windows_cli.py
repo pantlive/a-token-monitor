@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from token_monitor.cli import main
+from a_token_monitor.cli import main
 
 
 class WindowsServiceCliTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class WindowsServiceCliTests(unittest.TestCase):
             root = Path(temporary_directory)
             buffer = io.StringIO()
             with (
-                mock.patch("token_monitor.service.sys.platform", "win32"),
+                mock.patch("a_token_monitor.service.sys.platform", "win32"),
                 contextlib.redirect_stdout(buffer),
             ):
                 code = main(
@@ -44,8 +44,8 @@ class WindowsServiceCliTests(unittest.TestCase):
             root = Path(temporary_directory)
             buffer = io.StringIO()
             with (
-                mock.patch("token_monitor.service.sys.platform", "win32"),
-                mock.patch("token_monitor.service.subprocess.run") as run,
+                mock.patch("a_token_monitor.service.sys.platform", "win32"),
+                mock.patch("a_token_monitor.service.subprocess.run") as run,
                 mock.patch.dict(
                     os.environ,
                     {"CODEX_HOME": str(root / "missing-codex-home")},
@@ -62,7 +62,7 @@ class WindowsServiceCliTests(unittest.TestCase):
                     ]
                 )
 
-            task_path = root / "state" / "token-monitor-task.xml"
+            task_path = root / "state" / "a-token-monitor-task.xml"
             task_exists = task_path.exists()
             config_exists = (root / "state" / "service.json").exists()
 
@@ -70,7 +70,7 @@ class WindowsServiceCliTests(unittest.TestCase):
         self.assertTrue(task_exists)
         self.assertTrue(config_exists)
         output = buffer.getvalue()
-        self.assertIn("token-monitor-task.xml", output)
+        self.assertIn("a-token-monitor-task.xml", output)
         commands = [" ".join(call.args[0]) for call in run.call_args_list]
         self.assertTrue(any("schtasks" in command for command in commands), commands)
         self.assertTrue(any("/Create" in command for command in commands), commands)

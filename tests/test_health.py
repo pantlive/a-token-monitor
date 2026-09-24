@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from token_monitor.health import ComponentHealth, HealthTracker, sanitize_error
+from a_token_monitor.health import ComponentHealth, HealthTracker, sanitize_error
 
 
 class SanitizeErrorTests(unittest.TestCase):

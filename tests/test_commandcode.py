@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from _platform_support import requires_symlinks
-from token_monitor.commandcode import (
+from a_token_monitor.commandcode import (
     _clear_quota_cache,
     list_commandcode_active_sessions,
     read_commandcode_account,
@@ -18,7 +18,7 @@ from token_monitor.commandcode import (
     read_commandcode_session_info,
     resolve_commandcode_homes,
 )
-from token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
 
 
 ACCOUNT_ID = "a8f7ddce-358a-4441-9d10-de053e64c79f"

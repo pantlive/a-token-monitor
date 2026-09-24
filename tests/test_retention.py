@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from token_monitor.alerts import TrafficAlertStore
-from token_monitor.multi_models import DetectionConfidence, SessionStatus, TrackedSession
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.retention import (
+from a_token_monitor.alerts import TrafficAlertStore
+from a_token_monitor.multi_models import DetectionConfidence, SessionStatus, TrackedSession
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
     HistoryDataManager,
@@ -20,8 +20,8 @@ from token_monitor.retention import (
     RetentionSettings,
     db_file_bytes,
 )
-from token_monitor.traffic import TrafficAlert
-from token_monitor.usage import _UsageIndexStore
+from a_token_monitor.traffic import TrafficAlert
+from a_token_monitor.usage import _UsageIndexStore
 
 
 NOW = 1_800_000_000.0

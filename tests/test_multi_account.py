@@ -8,12 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from _platform_support import requires_proc
-from token_monitor.accounts import build_account_specs
-from token_monitor.grok import resolve_grok_homes
-from token_monitor.monitor import MonitorConfig
-from token_monitor.multi_account import AccountMonitor, MultiAccountMonitor
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.retention import RetentionError
+from a_token_monitor.accounts import build_account_specs
+from a_token_monitor.grok import resolve_grok_homes
+from a_token_monitor.monitor import MonitorConfig
+from a_token_monitor.multi_account import AccountMonitor, MultiAccountMonitor
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.retention import RetentionError
 
 
 class _FakeMonitor:
@@ -339,7 +339,7 @@ class ConstructorSemanticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
             with patch(
-                "token_monitor.multi_account.resolve_grok_homes",
+                "a_token_monitor.multi_account.resolve_grok_homes",
                 wraps=resolve_grok_homes,
             ) as mocked:
                 monitor = MultiAccountMonitor(
@@ -360,7 +360,7 @@ class ConstructorSemanticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
             with patch(
-                "token_monitor.multi_account.resolve_grok_homes",
+                "a_token_monitor.multi_account.resolve_grok_homes",
                 wraps=resolve_grok_homes,
             ) as mocked:
                 monitor = MultiAccountMonitor(

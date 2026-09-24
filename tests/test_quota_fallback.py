@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from token_monitor.discovery import JsonlSessionReader
-from token_monitor.quota_fallback import (
+from a_token_monitor.discovery import JsonlSessionReader
+from a_token_monitor.quota_fallback import (
     JsonlQuotaFallbackReader,
     read_jsonl_quota,
     recent_session_paths,

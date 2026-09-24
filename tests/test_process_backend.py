@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 from _platform_support import requires_symlinks
-from token_monitor import process_backend
-from token_monitor.agents import scan_running_agents
+from a_token_monitor import process_backend
+from a_token_monitor.agents import scan_running_agents
 
 _PS_OUTPUT = """\
     1     0 Mon Jan  1 00:00:00 2026 /sbin/launchd

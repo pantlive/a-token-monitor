@@ -1312,7 +1312,7 @@ _THEME_BOOT_SCRIPT = r"""  <script>
     // 主题预置：在样式解析前写入 data-theme / data-theme-mode，避免切换主题时闪白或闪黑。
     (() => {
       try {
-        const stored = window.localStorage.getItem('token-monitor-theme');
+        const stored = window.localStorage.getItem('a-token-monitor-theme');
         const mode = ['light', 'dark', 'system'].includes(stored) ? stored : 'system';
         const prefersLight = window.matchMedia
           ? window.matchMedia('(prefers-color-scheme: light)').matches
@@ -1338,7 +1338,7 @@ _THEME_TOGGLE_HTML = r"""        <button id="theme-toggle" class="theme-toggle" 
 """
 
 _THEME_SCRIPT = r"""  // 主题：跟随系统 / 白天 / 夜间，选择存 localStorage，切换不需要刷新页面。
-  const THEME_STORAGE_KEY = 'token-monitor-theme';
+  const THEME_STORAGE_KEY = 'a-token-monitor-theme';
   const THEME_MODES = ['system', 'light', 'dark'];
   const THEME_LABELS = { system: '跟随系统', light: '白天', dark: '夜间' };
   const themeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
@@ -1783,7 +1783,7 @@ __THEME_TOGGLE__
   let insightsPollTimer = 0;
   let insightsPeriodDays = '';
   // 低频分区默认折叠：状态记在 localStorage，展开时才加载明细。
-  const COLLAPSED_SECTIONS_KEY = 'token-monitor-collapsed-sections';
+  const COLLAPSED_SECTIONS_KEY = 'a-token-monitor-collapsed-sections';
   const DEFAULT_COLLAPSED = ['alert-history', 'usage-search', 'housekeeping'];
   const readCollapsedSections = () => {
     try {
@@ -3977,7 +3977,7 @@ class DashboardServer:
         self._server = server
         self._thread = Thread(
             target=server.serve_forever,
-            name="token-monitor-dashboard",
+            name="a-token-monitor-dashboard",
             daemon=True,
         )
         self._thread.start()
@@ -5132,7 +5132,7 @@ def _make_handler(
     class DashboardRequestHandler(BaseHTTPRequestHandler):
         """处理 Dashboard 页面、只读状态和告警历史请求。"""
 
-        server_version = "TokenMonitorDashboard/0.9"
+        server_version = "ATokenMonitorDashboard/0.9"
 
         def do_GET(self) -> None:
             """返回静态页面或当前监控状态。"""

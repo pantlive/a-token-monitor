@@ -8,12 +8,12 @@ import unittest
 from pathlib import Path
 
 from _platform_support import requires_chmod
-from token_monitor.alerts import (
+from a_token_monitor.alerts import (
     AlertQuery,
     AlertStoreError,
     TrafficAlertStore,
 )
-from token_monitor.traffic import TrafficAlert
+from a_token_monitor.traffic import TrafficAlert
 
 
 _MIB = 1024 * 1024
