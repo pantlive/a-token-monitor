@@ -1710,7 +1710,15 @@ __THEME_TOGGLE__
   const formatCredits = (value) => value === null || value === undefined ? '不可反推' : `${Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 4 })} credits`;
   const formatUsd = (value) => value === null || value === undefined ? '未知' : `$${Number(value).toFixed(6)}`;
   const formatUsdCompact = (value) => value === null || value === undefined ? '未计价' : `$${Number(value).toFixed(2)}`;
-  const accountInitials = (value) => String(value || '?').trim().split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || '?';
+  // 中文注释：头像显示订阅缩写，而不是账号 ID 的前两位（"3" / "5" 这种看不出含义）。
+  // 规则：产品与套餐各取单词首字母，最多 3 个字符——Codex · Plus → CP、
+  // Codex · Pro Lite → CPL、Grok · SuperGrok → GS、Command Code · GOAT → CCG、Kimi → K。
+  const subscriptionInitials = (value) => {
+    const words = String(value || '').split(/[^0-9A-Za-z\u4e00-\u9fff]+/).filter(Boolean);
+    if (!words.length) return '?';
+    const letters = [words[0][0], ...words.slice(1).map((word) => word[0])];
+    return letters.join('').slice(0, 3).toUpperCase() || '?';
+  };
   // 订阅类型：Codex 的 planType 是小写（plus / prolite），Grok 是 SuperGrok，
   // Command Code 是 GOAT；未收录的值只做首字母大写，形如模型名的原样保留。
   const PLAN_NAMES = {
@@ -3275,7 +3283,7 @@ __THEME_TOGGLE__
       const accountSource = accountQuotas.map((quota) => quota.source).filter((source) => source).join(' · ');
       return `<article class="account-block">
         <div class="account-heading">
-          <div class="account-identity"><div class="account-avatar" aria-hidden="true">${escapeHtml(accountInitials(accountId))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
+          <div class="account-identity"><div class="account-avatar" aria-hidden="true" title="${escapeHtml(subscription)}">${escapeHtml(subscriptionInitials(subscription))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
           <div class="account-side"><span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
         </div>
         <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>

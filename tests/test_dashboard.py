@@ -2235,6 +2235,18 @@ class FaviconTests(unittest.TestCase):
             page,
         )
 
+    def test_account_avatar_shows_the_subscription(self) -> None:
+        """头像显示订阅缩写（CP / CPL / GS / CCG），不再是账号 ID 的前两位。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const subscriptionInitials = (value) => {", page)
+        self.assertIn(
+            'title="${escapeHtml(subscription)}">${escapeHtml(subscriptionInitials(subscription))}',
+            page,
+        )
+        # 旧的「账号 ID 前两位」实现不该留下残骸。
+        self.assertNotIn("accountInitials", page)
+
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
 
