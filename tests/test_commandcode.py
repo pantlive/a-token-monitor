@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,12 +14,15 @@ from unittest import mock
 from _platform_support import requires_symlinks
 from a_token_monitor.commandcode import (
     _clear_quota_cache,
+    _commandcode_project_dir,
+    _commandcode_project_slug,
     list_commandcode_active_sessions,
     read_commandcode_account,
     read_commandcode_quota,
     read_commandcode_session_info,
     resolve_commandcode_homes,
 )
+from a_token_monitor.multi_models import DetectionConfidence
 from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
 
 
@@ -104,8 +109,9 @@ def _write_process(
     open_files: tuple[Path, ...] = (),
     ppid: int = 1,
     start: str = "1000",
+    cwd: str | None = None,
 ) -> None:
-    """写入一个假的 /proc 进程目录。"""
+    """写入一个假的 /proc 进程目录；cwd 用于测试工作目录回退。"""
 
     directory = proc_root / str(pid)
     (directory / "fd").mkdir(parents=True)
@@ -118,6 +124,8 @@ def _write_process(
         f"{pid} ({comm}) " + " ".join(fields),
         encoding="utf-8",
     )
+    if cwd is not None:
+        (directory / "cwd").symlink_to(cwd)
     for index, path in enumerate(open_files, start=3):
         (directory / "fd" / str(index)).symlink_to(path)
 
@@ -549,6 +557,187 @@ class CommandCodeSessionTests(unittest.TestCase):
             )
 
         self.assertEqual(sessions, ())
+
+
+class CommandCodeProjectFallbackTests(unittest.TestCase):
+    """验证进程不持有句柄时按工作目录回退识别活动会话。"""
+
+    SESSION_ID = "9d1f5b6e-6c2a-4c1f-8a3d-2f4e6b8c0a12"
+
+    def test_project_slug_matches_official_directory_layout(self) -> None:
+        """slug 规则要与官方 CLI 的 projects 目录名一致（含驼峰拆词与小写）。"""
+
+        cases = {
+            "/home/lsl/project/github/Heart-Plan": "home-lsl-project-github-heart-plan",
+            "/home/lsl/project/github/MemoIsle": "home-lsl-project-github-memo-isle",
+            "/home/lsl/project/gitlab/HandSlitLampTrain": (
+                "home-lsl-project-gitlab-hand-slit-lamp-train"
+            ),
+            "/home/lsl/project/gitlab/frame-gen": "home-lsl-project-gitlab-frame-gen",
+            "/home/lsl/tmp": "home-lsl-tmp",
+            "/": "root",
+        }
+        for cwd, expected in cases.items():
+            with self.subTest(cwd=cwd):
+                self.assertEqual(_commandcode_project_slug(cwd), expected)
+        # 目录名超过 80 字符时按官方规则截断，仍然唯一。
+        long_cwd = "/tmp/" + "a" * 200
+        self.assertEqual(len(_commandcode_project_slug(long_cwd)), 80)
+
+    @requires_symlinks
+    def test_falls_back_to_project_directory_without_open_file(self) -> None:
+        """CLI 只在写入瞬间打开文件，没有句柄时要能按 cwd 找到最近会话。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = _make_commandcode_home(root)
+            messages = _write_session(home, self.SESSION_ID, cwd="/workspace/demo")
+            proc_root = root / "proc"
+            _write_process(
+                proc_root,
+                pid=80,
+                comm="MainThread",
+                command=("node", "/usr/bin/command-code"),
+                cwd="/workspace/demo",
+            )
+
+            sessions = list_commandcode_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=time.time(),
+            )
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.session_id, self.SESSION_ID)
+        self.assertEqual(session.pids, (80,))
+        self.assertEqual(session.cwd, "/workspace/demo")
+        # 目录推断出来的证据等级要低于句柄证据。
+        self.assertEqual(session.confidence, DetectionConfidence.RECENT_FILE)
+        self.assertEqual(
+            str(messages),
+            str(Path(str(session.jsonl_path))),
+        )
+
+    @requires_symlinks
+    def test_skips_stale_sessions_in_the_project_directory(self) -> None:
+        """项目目录里很久以前写过的会话不能被当成当前活动会话。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = _make_commandcode_home(root)
+            messages = _write_session(home, self.SESSION_ID, cwd="/workspace/demo")
+            stale = time.time() - 12 * 3600
+            os.utime(messages, (stale, stale))
+            proc_root = root / "proc"
+            _write_process(
+                proc_root,
+                pid=81,
+                comm="MainThread",
+                command=("node", "/usr/bin/command-code"),
+                cwd="/workspace/demo",
+            )
+
+            sessions = list_commandcode_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=time.time(),
+            )
+
+        self.assertEqual(sessions, ())
+
+    @requires_symlinks
+    def test_skips_sessions_created_before_the_process_started(self) -> None:
+        """能读出进程启动时间时，早于进程启动的会话不算活动。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = _make_commandcode_home(root)
+            messages = _write_session(home, self.SESSION_ID, cwd="/workspace/demo")
+            now = time.time()
+            older = now - 600
+            os.utime(messages, (older, older))
+            proc_root = root / "proc"
+            proc_root.mkdir(parents=True, exist_ok=True)
+            # btime 设为「即将启动」，start 为 10 秒后 → 进程比会话文件新。
+            (proc_root / "stat").write_text(
+                f"cpu 0 0 0 0\nbtime {int(now)}\n",
+                encoding="utf-8",
+            )
+            _write_process(
+                proc_root,
+                pid=82,
+                comm="MainThread",
+                command=("node", "/usr/bin/command-code"),
+                cwd="/workspace/demo",
+                start="1000",
+            )
+
+            sessions = list_commandcode_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=now,
+            )
+
+        self.assertEqual(sessions, ())
+
+    @requires_symlinks
+    def test_ignores_processes_running_in_other_directories(self) -> None:
+        """进程工作目录与项目目录对不上时不能张冠李戴。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = _make_commandcode_home(root)
+            _write_session(home, self.SESSION_ID, cwd="/workspace/demo")
+            proc_root = root / "proc"
+            _write_process(
+                proc_root,
+                pid=83,
+                comm="MainThread",
+                command=("node", "/usr/bin/command-code"),
+                cwd="/workspace/other",
+            )
+
+            sessions = list_commandcode_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=time.time(),
+            )
+            resolved = _commandcode_project_dir(
+                home / "projects",
+                "/workspace/other",
+            )
+
+        self.assertEqual(sessions, ())
+        self.assertIsNone(resolved)
+
+    @requires_symlinks
+    def test_open_file_evidence_wins_over_directory_fallback(self) -> None:
+        """同一个会话既有句柄又有目录匹配时，证据等级取更高的句柄。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = _make_commandcode_home(root)
+            messages = _write_session(home, self.SESSION_ID, cwd="/workspace/demo")
+            proc_root = root / "proc"
+            _write_process(
+                proc_root,
+                pid=84,
+                comm="MainThread",
+                command=("node", "/usr/bin/command-code"),
+                open_files=(messages,),
+                cwd="/workspace/demo",
+            )
+
+            sessions = list_commandcode_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=time.time(),
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].confidence, DetectionConfidence.OPEN_FILE)
+        self.assertEqual(sessions[0].pids, (84,))
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .agents import scan_running_agents
+from .process_backend import process_root
 from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
 from .quota import QuotaSnapshot, QuotaWindow
 
@@ -515,6 +517,125 @@ def _plan_name(subscription: Mapping[str, Any] | None) -> str | None:
     return plan_id
 
 
+# 中文注释：官方 CLI 用 slugify(cwd) 作为 projects 下的目录名（非字母数字压成 "-"、
+# 斜杠压成 "-"、去掉首尾的 "-." 并截断到 80 字符）。这里复刻同一套规则，才能在
+# 进程不持有会话句柄时按工作目录反查项目目录。
+_COMMANDCODE_SLUG_LIMIT = 80
+# 回退匹配时允许的会话新鲜度上限（拿不到进程启动时间时使用）。
+_COMMANDCODE_FALLBACK_WINDOW = 6 * 3600.0
+
+
+def _commandcode_project_slug(cwd: str) -> str:
+    """把工作目录映射成 ``projects`` 下的目录名（与官方 slugify 一致）。
+
+    官方用的是 lodash kebabCase 风格：先按非字母数字切开，再把 camelCase 与
+    连续大写（缩略词）拆成单词，全部小写后用 ``-`` 连接。实测
+    ``/home/lsl/project/github/Heart-Plan`` → ``home-lsl-project-github-heart-plan``、
+    ``.../MemoIsle`` → ``...-memo-isle``、``.../HandSlitLampTrain`` → ``...-hand-slit-lamp-train``。
+    """
+
+    words: list[str] = []
+    for chunk in re.split(r"[^A-Za-z0-9]+", cwd):
+        if not chunk:
+            continue
+        # 缩略词后接单词（HTTPServer → HTTP|Server）与普通驼峰（memoIsle → memo|Isle）。
+        spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", chunk)
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", spaced)
+        words.extend(part.lower() for part in spaced.split() if part)
+    slug = "-".join(words)
+    return slug[:_COMMANDCODE_SLUG_LIMIT] or "root"
+
+
+def _commandcode_project_dir(projects_root: Path, cwd: str) -> Path | None:
+    """按工作目录找 ``projects`` 下的项目目录，返回 None 表示没有。
+
+    先用精确 slug 命中；目录名被截断或官方规则略有变化时，退化成前缀匹配——
+    真正的会话归属仍然由会话头里的 cwd 二次校验，不会因为放宽目录匹配而串项目。
+    """
+
+    slug = _commandcode_project_slug(cwd)
+    exact = projects_root / slug
+    try:
+        if exact.is_dir():
+            return exact
+        entries = tuple(projects_root.iterdir())
+    except OSError:
+        return None
+    prefix = slug[:40]
+    for entry in entries:
+        if entry.is_dir() and prefix and entry.name.startswith(prefix):
+            return entry
+    return None
+
+
+def _commandcode_session_files(project_dir: Path) -> tuple[Path, ...]:
+    """列出项目目录里的会话消息文件（排除 checkpoints），按修改时间倒序。"""
+
+    try:
+        entries = tuple(project_dir.iterdir())
+    except OSError:
+        return ()
+    files: list[tuple[float, Path]] = []
+    for entry in entries:
+        name = entry.name
+        if not name.endswith(".jsonl") or name.endswith(".checkpoints.jsonl"):
+            continue
+        try:
+            files.append((entry.stat().st_mtime, entry))
+        except OSError:
+            continue
+    files.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+    return tuple(path for _, path in files)
+
+
+def _boot_time(proc_root: Path | None) -> float | None:
+    """读取内核启动时间，用于把 ``stat`` 里的 starttime 换算成 epoch。"""
+
+    root = process_root(proc_root)
+    try:
+        content = (root / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in content.splitlines():
+        if line.startswith("btime "):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    return float(parts[1])
+                except ValueError:
+                    return None
+    return None
+
+
+def _commandcode_process_started_at(
+    start_token: str,
+    proc_root: Path | None,
+) -> float | None:
+    """把 ``/proc/<pid>/stat`` 的 starttime 换算成 epoch 秒；判不出来时返回 None。"""
+
+    if not start_token.isdigit():
+        return None
+    try:
+        ticks = float(os.sysconf("SC_CLK_TCK"))
+    except (ValueError, OSError):
+        return None
+    if ticks <= 0:
+        return None
+    boot = _boot_time(proc_root)
+    if boot is None:
+        return None
+    return boot + int(start_token) / ticks
+
+
+def _is_same_path(left: str, right: str) -> bool:
+    """比较两个路径是否同一个位置（忽略符号链接差异）。"""
+
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return str(left) == str(right)
+
+
 def list_commandcode_active_sessions(
     commandcode_home: Path,
     proc_root: Path | None = None,
@@ -532,6 +653,9 @@ def list_commandcode_active_sessions(
     )
     grouped: dict[str, list[int]] = {}
     paths_by_session: dict[str, Path] = {}
+    # 句柄证据与目录回退证据分开记，同一个会话优先按句柄计。
+    open_matched: set[str] = set()
+    cwd_matched: set[str] = set()
     for agent in agents:
         for path in agent.open_paths:
             session_id = _commandcode_session_id_from_path(path, projects_root)
@@ -540,11 +664,48 @@ def list_commandcode_active_sessions(
             grouped.setdefault(session_id, [])
             if agent.pid not in grouped[session_id]:
                 grouped[session_id].append(agent.pid)
+            open_matched.add(session_id)
             # 会话头只能从消息文件读取；meta.json 只作为兜底，避免抢占。
             if path.name.endswith(".jsonl"):
                 paths_by_session[session_id] = path
             else:
                 paths_by_session.setdefault(session_id, path)
+        if agent.cwd is None:
+            continue
+        # 中文注释：官方 CLI 只在写入的瞬间打开会话文件，进程多数时间不持有句柄，
+        # 因此再按工作目录反查 projects/<slug>/，取「进程启动之后修改过、且会话头
+        # 记录的 cwd 与进程一致」的最近一个会话（与 Grok 的 cwd 回退同一思路，
+        # 但证据等级记成 RECENT_FILE，面板上能区分是句柄证据还是目录推断）。
+        project_dir = _commandcode_project_dir(projects_root, str(agent.cwd))
+        if project_dir is None:
+            continue
+        started_at = _commandcode_process_started_at(agent.start_token, proc_root)
+        for candidate in _commandcode_session_files(project_dir):
+            try:
+                modified = candidate.stat().st_mtime
+            except OSError:
+                continue
+            if started_at is not None:
+                if modified < started_at - 5.0:
+                    continue
+            elif observed_at - modified > _COMMANDCODE_FALLBACK_WINDOW:
+                continue
+            session_id = _commandcode_session_id_from_path(candidate, projects_root)
+            if session_id is None:
+                continue
+            info = read_commandcode_session_info(candidate)
+            if info is None or info.cwd is None:
+                continue
+            if not _is_same_path(info.cwd, str(agent.cwd)):
+                continue
+            grouped.setdefault(session_id, [])
+            if agent.pid not in grouped[session_id]:
+                grouped[session_id].append(agent.pid)
+            paths_by_session.setdefault(session_id, candidate)
+            # 已经有句柄证据的会话不要被降级成目录推断。
+            if session_id not in open_matched:
+                cwd_matched.add(session_id)
+            break
     sessions: list[TrackedSession] = []
     for session_id, pids in grouped.items():
         jsonl_path = paths_by_session.get(session_id)
@@ -557,7 +718,11 @@ def list_commandcode_active_sessions(
                 cwd=info.cwd if info is not None else None,
                 source="command-code-cli",
                 status=SessionStatus.RUNNING,
-                confidence=DetectionConfidence.OPEN_FILE,
+                confidence=(
+                    DetectionConfidence.RECENT_FILE
+                    if session_id in cwd_matched
+                    else DetectionConfidence.OPEN_FILE
+                ),
                 first_seen_at=(
                     info.started_at
                     if info is not None and info.started_at is not None

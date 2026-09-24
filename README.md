@@ -238,6 +238,11 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 - Claude Code 活动会话以进程实际打开的会话 JSONL 为准（`/proc/<pid>/fd`），
   项目、模型和开始时间只读文件头部，不读取提示词或工具输出；同一会话被多个进程
   打开时合并 pids，与 Kimi / DSH / Grok 的识别口径一致。
+- Command Code 活动会话优先取 `~/.commandcode/projects/<slug>/<id>.jsonl` 的打开句柄，
+  官方 CLI 只在写入瞬间打开文件，因此进程不持有句柄时按工作目录反查项目目录
+  （slug 规则与官方 slugify 一致：驼峰拆词 + 小写 + 80 字符截断），再取「进程启动之后
+  修改过、且会话头里的 cwd 与进程一致」的最近一个会话；这类目录推断记成
+  `recent_file` 证据等级，与句柄证据（`open_file`）区分开。
 - Grok 活动会话以 Grok CLI 进程实际打开的会话文件为准（`/proc/<pid>/fd`），
   进程不持有句柄时退回按工作目录匹配；会话目录名里的 URL 编码项目路径会还原成
   真实目录，模型与创建时间来自 `summary.json`。同一会话被多个进程打开时合并 pids，
