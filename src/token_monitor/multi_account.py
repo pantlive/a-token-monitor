@@ -690,6 +690,7 @@ class MultiAccountMonitor:
                 "account_id": item.account.account_id,
                 "profile_name": item.account.name,
                 "codex_home": str(item.account.home),
+                "plan_type": item.account.plan_type,
             }
             for item in self.account_monitors
         }

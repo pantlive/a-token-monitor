@@ -117,7 +117,10 @@ def read_dsh_quota(dsh_home: Path, now: float | None = None) -> QuotaSnapshot | 
     return QuotaSnapshot(
         observed_at=observed_at,
         windows=(),
-        plan_type=account.model or "dsh",
+        # 中文注释：DSH 没有订阅套餐，这里不再把模型名当成套餐塞进 plan_type
+        # （模型名放在 metadata.model，面板上按「产品 · 套餐」展示时才不会出现
+        # 「DeepSeek Harness · deepseek/deepseek-v4.1-flash」这种伪套餐）。
+        plan_type=None,
         source="dsh-local",
         metadata=metadata,
     )

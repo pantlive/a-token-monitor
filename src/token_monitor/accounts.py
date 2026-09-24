@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -21,6 +23,9 @@ class CodexAccount:
     session_root: Path
     state_dir: Path
     account_id: str | None = None
+    # 中文注释：订阅类型（plus / pro / prolite …）来自本地 auth.json 的
+    # chatgpt_plan_type，只用于展示，不参与账号归组。
+    plan_type: str | None = None
 
     def __post_init__(self) -> None:
         """校验账号配置不会产生空标识。"""
@@ -103,6 +108,7 @@ def build_account_specs(
                 session_root=account_session_root,
                 state_dir=account_state_dir,
                 account_id=read_codex_account_id(home),
+                plan_type=read_codex_plan_type(home),
             )
         )
     return tuple(accounts)
@@ -148,7 +154,96 @@ def build_additional_account_spec(
         session_root=normalized_home / "sessions",
         state_dir=account_state_dir,
         account_id=read_codex_account_id(normalized_home),
+        plan_type=read_codex_plan_type(normalized_home),
     )
+
+
+def _read_auth_payload(codex_home: Path) -> Mapping[str, object] | None:
+    """读取 ``auth.json`` 的结构；认证文件缺失或不兼容时返回 ``None``。
+
+    调用方只应提取账号 ID、订阅类型这类元数据字段，绝不能把令牌内容写进
+    日志或返回值。
+    """
+
+    auth_file = codex_home.expanduser() / "auth.json"
+    try:
+        payload = json.loads(auth_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _auth_containers(payload: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """返回 auth.json 里可能存放元数据的层：tokens 优先，其次是根对象。"""
+
+    containers: list[Mapping[str, object]] = [payload]
+    tokens = payload.get("tokens")
+    if isinstance(tokens, Mapping):
+        containers.insert(0, tokens)
+    return containers
+
+
+def _jwt_claims(token: object) -> Mapping[str, object] | None:
+    """解析 JWT 的 payload 段（不做签名校验，只读公开 claim）。"""
+
+    if not isinstance(token, str) or token.count(".") != 2:
+        return None
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (ValueError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return claims if isinstance(claims, Mapping) else None
+
+
+# 中文注释：auth.json 变动很少但会被 Dashboard 每 5 秒读取一次，按 mtime 缓存。
+_PLAN_CACHE: dict[Path, tuple[int, str | None]] = {}
+
+
+def read_codex_plan_type(codex_home: Path) -> str | None:
+    """读取 Codex 的订阅类型（``plus`` / ``pro`` / ``prolite`` 等）。
+
+    来源优先级：auth.json（含 tokens）里的同名字段 → ``tokens.id_token`` 中
+    ``https://api.openai.com/auth`` 的 ``chatgpt_plan_type`` claim。只解析套餐名，
+    不校验签名、不发起网络请求，也不读取或返回任何令牌内容。
+    """
+
+    auth_file = codex_home.expanduser() / "auth.json"
+    try:
+        modified = auth_file.stat().st_mtime_ns
+    except OSError:
+        return None
+    cached = _PLAN_CACHE.get(auth_file)
+    if cached is not None and cached[0] == modified:
+        return cached[1]
+    plan = _extract_plan_type(_read_auth_payload(codex_home))
+    _PLAN_CACHE[auth_file] = (modified, plan)
+    return plan
+
+
+def _extract_plan_type(payload: Mapping[str, object] | None) -> str | None:
+    """从 auth.json 结构里提取订阅类型。"""
+
+    if payload is None:
+        return None
+    for container in _auth_containers(payload):
+        for key in ("chatgpt_plan_type", "plan_type", "planType"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for container in _auth_containers(payload):
+        claims = _jwt_claims(container.get("id_token"))
+        if claims is None:
+            continue
+        nested = claims.get("https://api.openai.com/auth")
+        sources = [nested] if isinstance(nested, Mapping) else []
+        sources.append(claims)
+        for source in sources:
+            value = source.get("chatgpt_plan_type")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 def read_codex_account_id(codex_home: Path) -> str | None:
@@ -159,15 +254,11 @@ def read_codex_account_id(codex_home: Path) -> str | None:
     由调用方退回使用登录目录名称。
     """
 
-    auth_file = codex_home.expanduser() / "auth.json"
-    try:
-        payload = json.loads(auth_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, Mapping):
+    payload = _read_auth_payload(codex_home)
+    if payload is None:
         return None
 
-    containers: list[Mapping[str, object]] = [payload]
+    containers: list[Mapping[str, object]] = _auth_containers(payload)
     tokens = payload.get("tokens")
     if isinstance(tokens, Mapping):
         containers.insert(0, tokens)

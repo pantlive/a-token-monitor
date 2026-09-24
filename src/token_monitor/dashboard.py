@@ -17,6 +17,7 @@ from threading import Lock, Thread
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from .accounts import read_codex_plan_type
 from .alerts import (
     MAX_QUERY_LIMIT,
     AlertQuery,
@@ -1491,7 +1492,7 @@ __THEME_TOGGLE__
 
     <section id="accounts" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片按真实账号 ID 分组，profile 混合登录也不会串额；活动会话默认折叠，可点击再展开，会话表里可直接归档单个已结束的 Codex 会话。</p></div>
+        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片以「产品 · 订阅类型」为标题（如 Codex · Plus、Grok · SuperGrok），账号 ID 与 profile 退到次要信息行；账号仍按真实账号 ID 分组，profile 混合登录也不会串额。活动会话默认折叠，可点击再展开，会话表里可直接归档单个已结束的 Codex 会话。</p></div>
         <div class="section-meta"><span class="section-count" id="account-section-count">— 个账号</span></div>
       </div>
       <div id="account-list" class="account-list"><div class="empty-state">正在读取账号状态…</div></div>
@@ -1690,6 +1691,22 @@ __THEME_TOGGLE__
   const formatUsd = (value) => value === null || value === undefined ? '未知' : `$${Number(value).toFixed(6)}`;
   const formatUsdCompact = (value) => value === null || value === undefined ? '未计价' : `$${Number(value).toFixed(2)}`;
   const accountInitials = (value) => String(value || '?').trim().split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || '?';
+  // 订阅类型：Codex 的 planType 是小写（plus / prolite），Grok 是 SuperGrok，
+  // Command Code 是 GOAT；未收录的值只做首字母大写，形如模型名的原样保留。
+  const PLAN_NAMES = {
+    plus: 'Plus', pro: 'Pro', prolite: 'Pro Lite', probusiness: 'Pro Business',
+    team: 'Team', business: 'Business', enterprise: 'Enterprise', free: 'Free',
+    edu: 'Edu', max: 'Max', supergrok: 'SuperGrok',
+    supergrokheavy: 'SuperGrok Heavy', goat: 'GOAT'
+  };
+  const planLabel = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (raw.includes('/')) return raw;
+    const mapped = PLAN_NAMES[raw.toLowerCase().replace(/[\s_-]+/g, '')];
+    if (mapped) return mapped;
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  };
   const statusClass = (status) => ['running', 'limit_blocked', 'waiting_for_approval', 'failed', 'orphaned'].includes(status) ? status : 'other';
   const renderQuotaCards = (quotas) => {
     if (!Array.isArray(quotas) || quotas.length === 0) {
@@ -3151,13 +3168,14 @@ __THEME_TOGGLE__
       const accountId = account.account_id || name;
       const productLabel = (id, label) => account.product === id || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === id) ? label : null;
       const product = productLabel('kimi', 'Kimi') || productLabel('grok', 'Grok') || productLabel('dsh', 'DeepSeek Harness') || productLabel('command-code', 'Command Code') || productLabel('claude', 'Claude Code') || 'Codex';
-      const plan = accountQuotas.length ? accountQuotas.map((quota) => quota.plan_type || '未知').join(' · ') : '未知';
+      const plans = distinctSorted(accountQuotas.map((quota) => planLabel(quota.plan_type)).concat([planLabel(account.plan_type)]));
+      const subscription = plans.length ? `${product} · ${plans.join(' / ')}` : product;
       const activeCount = accountCounts.active ?? accountSessions.length;
       const accountSource = accountQuotas.map((quota) => quota.source).filter((source) => source).join(' · ');
       return `<article class="account-block">
         <div class="account-heading">
-          <div class="account-identity"><div class="account-avatar" aria-hidden="true">${escapeHtml(accountInitials(accountId))}</div><div><div class="account-label">Account ID</div><h3 class="account-title">${escapeHtml(accountId)}</h3><div class="account-meta">Profile：${escapeHtml(profiles || name)}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
-          <div class="account-side"><span class="plan-badge">${escapeHtml(product)} · ${escapeHtml(plan)}</span><span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
+          <div class="account-identity"><div class="account-avatar" aria-hidden="true">${escapeHtml(accountInitials(accountId))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
+          <div class="account-side"><span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
         </div>
         <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
         <div class="quota-grid">${renderQuotaCards(accountQuotas)}</div>
@@ -4079,6 +4097,23 @@ def _record_provider_success(
         health.record_success(f"provider:{provider_key}")
 
 
+def _profile_plan_type(metadata: Mapping[str, object]) -> str | None:
+    """返回一个 profile 的订阅类型。
+
+    优先用扫描目录元数据里已有的值；缺失时按 ``CODEX_HOME`` 读一次
+    ``auth.json``（读取按 mtime 缓存，不会每 5 秒重复解析）。Grok / Kimi /
+    Command Code 等 provider 的订阅类型由各自的额度快照提供。
+    """
+
+    declared = metadata.get("plan_type")
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    codex_home = metadata.get("codex_home")
+    if not isinstance(codex_home, str) or not codex_home.strip():
+        return None
+    return read_codex_plan_type(Path(codex_home))
+
+
 def build_multi_dashboard_state(
     registries: Mapping[str, MultiSessionRegistry],
     account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
@@ -4100,6 +4135,7 @@ def build_multi_dashboard_state(
         profile_metadata = metadata_by_profile.get(profile_name, {})
         account_id = profile_metadata.get("account_id")
         display_name = account_id or profile_name
+        plan_type = _profile_plan_type(profile_metadata)
         account_states.append(
             build_dashboard_state(
                 registry,
@@ -4129,6 +4165,8 @@ def build_multi_dashboard_state(
             quota_with_account["account_id"] = account_id
             quota_with_account["profile_name"] = profile_name
             quota_with_account["codex_home"] = codex_home
+            if not quota_with_account.get("plan_type") and plan_type:
+                quota_with_account["plan_type"] = plan_type
             quota_key = (account_key, "snapshot", "snapshot")
             previous_quota = quota_by_key.get(quota_key)
             if previous_quota is None or float(
@@ -4143,11 +4181,14 @@ def build_multi_dashboard_state(
             {
                 "name": account_name,
                 "account_id": account_id,
+                "plan_type": plan_type,
                 "profiles": [],
                 "quota": None,
                 "counts": {},
             },
         )
+        if plan_type and not account.get("plan_type"):
+            account["plan_type"] = plan_type
         profile = {
             "name": profile_name,
             "codex_home": codex_home,
