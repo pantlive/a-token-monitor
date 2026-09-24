@@ -27,6 +27,7 @@ from token_monitor.dashboard import (
     _DASHBOARD_HTML,
     _FAVICON_BARS,
     _SETTINGS_HTML,
+    _brand_mark_svg,
     DashboardConfig,
     DashboardServer,
     _favicon_ico,
@@ -1557,7 +1558,7 @@ def _decode_favicon_png(
 
 
 class FaviconTests(unittest.TestCase):
-    """验证浏览器标签图标：两个页面都注入，且 SVG / ICO 两种路由都能取到。"""
+    """验证浏览器标签图标：两个页面都注入，页面内 logo 与它同图，路由都能取到。"""
     def test_both_pages_link_the_favicon_once(self) -> None:
         token = _favicon_token()
         self.assertRegex(token, r"^[0-9a-f]{10}$")
@@ -1639,6 +1640,48 @@ class FaviconTests(unittest.TestCase):
         self.assertLess(top_left[1], bottom_right[1])
         self.assertGreater(top_left[2], bottom_right[2])
         self.assertGreater(bottom_right[1], bottom_right[0])
+
+    def test_page_logo_is_the_same_artwork_as_the_tab_icon(self) -> None:
+        """页面内品牌图形与标签页图标必须出自同一份几何，不能各画一套。"""
+
+        def geometry(svg: str) -> list[tuple[str, str, str, str, str]]:
+            root = ElementTree.fromstring(svg)
+            return [
+                (
+                    item.get("x"),
+                    item.get("y"),
+                    item.get("width"),
+                    item.get("height"),
+                    item.get("rx"),
+                )
+                for item in root.iter()
+                if item.tag.endswith("}rect")
+            ]
+
+        mark = _brand_mark_svg()
+        favicon = _favicon_svg()
+        self.assertEqual(geometry(mark), geometry(favicon))
+        self.assertEqual(
+            [stop.get("stop-color") for stop in ElementTree.fromstring(mark).iter()
+             if stop.tag.endswith("}stop")],
+            [stop.get("stop-color") for stop in ElementTree.fromstring(favicon).iter()
+             if stop.tag.endswith("}stop")],
+        )
+        # 标签页图标要有可访问名称；页面内的那个只是装饰（外层 aria-hidden）。
+        self.assertIn('aria-label="Token Monitor"', favicon)
+        self.assertIn('aria-hidden="true"', mark)
+        self.assertNotIn("receipt", mark)
+
+    def test_both_pages_use_the_shared_logo(self) -> None:
+        for html in (_DASHBOARD_HTML, _SETTINGS_HTML):
+            self.assertEqual(html.count('class="brand-mark"'), 1)
+            self.assertIn('class="brand-mark" aria-hidden="true">' + _brand_mark_svg(), html)
+            # 旧的「文档 / 清单」图形已经彻底退场。
+            self.assertNotIn("M7 4.5h10v15H7z", html)
+            self.assertNotIn("__BRAND_MARK__", html)
+        # 一页里品牌图形只出现一次，避免同 id 渐变重复定义。
+        self.assertEqual(_DASHBOARD_HTML.count('id="brand-badge"'), 1)
+        self.assertEqual(_SETTINGS_HTML.count('id="brand-badge"'), 1)
 
     def test_icon_routes_accept_version_parameters(self) -> None:
         self.assertIsNotNone(favicon_response("/favicon.svg?v=abc123"))

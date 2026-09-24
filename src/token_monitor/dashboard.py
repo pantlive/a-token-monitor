@@ -411,19 +411,10 @@ _BASE_CSS = r"""
       gap: 11px;
       padding: 2px 10px 28px;
     }
-    .brand-mark {
-      display: grid;
-      width: 36px;
-      height: 36px;
-      flex: 0 0 auto;
-      place-items: center;
-      border: 1px solid var(--violet-border-accent);
-      border-radius: 10px;
-      color: white;
-      background: var(--violet);
-      box-shadow: 0 8px 20px var(--violet-glow);
-    }
-    .brand-mark svg { width: 20px; height: 20px; }
+    /* 中文注释：品牌图形与浏览器标签页图标是同一份几何（含渐变徽章），
+       所以容器只负责尺寸，不再叠一层紫色底板。 */
+    .brand-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; }
+    .brand-mark svg { display: block; width: 36px; height: 36px; border-radius: 8px; box-shadow: 0 8px 20px var(--violet-glow); }
     .brand-name { font-size: 15px; font-weight: 750; letter-spacing: -.02em; }
     .brand-name span { color: var(--violet-text); }
     .sidebar-brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 400; }
@@ -828,8 +819,12 @@ _FAVICON_LINK = (
 )
 
 
-def _favicon_svg() -> str:
-    """按共享几何生成矢量图标。"""
+def _icon_svg(gradient_id: str, label: str | None = None) -> str:
+    """按共享几何生成图标 SVG：标签页图标和页面内 logo 用的是同一份图形。
+
+    ``gradient_id`` 让同一页面里多处引用也不会撞 id；``label`` 为空时按装饰性
+    图形处理（外层已经有 aria-hidden）。
+    """
 
     stops = "".join(
         f'<stop offset="{index}" stop-color="{_hex_color(color)}"/>'
@@ -841,16 +836,36 @@ def _favicon_svg() -> str:
         for x, y, width, height in _FAVICON_BARS
     )
     size = int(_FAVICON_SIZE)
+    attributes = (
+        f'role="img" aria-label="{label}"' if label else 'aria-hidden="true"'
+    )
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
-        f'viewBox="0 0 {size} {size}" role="img" aria-label="Token Monitor">'
-        '<defs><linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
+        f"{attributes}>"
+        f'<defs><linearGradient id="{gradient_id}" x1="0" y1="0" x2="1" y2="1">'
         f"{stops}</linearGradient></defs>"
         f'<rect width="{size}" height="{size}" rx="{_FAVICON_RADIUS:g}" '
-        'fill="url(#badge)"/>'
+        f'fill="url(#{gradient_id})"/>'
         f'<g fill="{_hex_color(_FAVICON_FOREGROUND)}">{bars}</g>'
         "</svg>"
     )
+
+
+def _favicon_svg() -> str:
+    """浏览器标签页图标：带尺寸和可访问名称，可独立作为图片加载。"""
+
+    svg = _icon_svg("badge", label="Token Monitor")
+    return svg.replace(
+        "<svg ",
+        f'<svg width="{int(_FAVICON_SIZE)}" height="{int(_FAVICON_SIZE)}" ',
+        1,
+    )
+
+
+def _brand_mark_svg() -> str:
+    """页面内品牌图形：与标签页图标同一份几何，只换主题里的渐变 id。"""
+
+    return _icon_svg("brand-badge")
 
 
 def _inside_rounded_square(
@@ -1071,6 +1086,7 @@ _PAGE_THEME_REPLACEMENTS = (
     ("__THEME_TOGGLE__", _THEME_TOGGLE_HTML),
     ("__THEME_SCRIPT__", _THEME_SCRIPT),
     ("__FAVICON__", _FAVICON_LINK),
+    ("__BRAND_MARK__", _brand_mark_svg()),
 )
 
 
@@ -1103,9 +1119,7 @@ __THEME_BOOT__
 <div class="app-shell">
   <aside class="sidebar" aria-label="Dashboard 导航">
     <div class="sidebar-brand">
-      <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5h10v15H7z"/><path d="M10 8h4M10 12h4M10 16h2"/></svg>
-      </div>
+      <div class="brand-mark" aria-hidden="true">__BRAND_MARK__</div>
       <div><div class="brand-name">Token <span>Monitor</span></div><small>本地 code agent 控制台</small></div>
     </div>
     <div class="sidebar-label">工作台</div>
@@ -3113,9 +3127,7 @@ __THEME_BOOT__
 <div class="app-shell">
   <aside class="sidebar" aria-label="设置导航">
     <div class="sidebar-brand">
-      <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5h10v15H7z"/><path d="M10 8h4M10 12h4M10 16h2"/></svg>
-      </div>
+      <div class="brand-mark" aria-hidden="true">__BRAND_MARK__</div>
       <div><div class="brand-name">Token <span>Monitor</span></div><small>本地 code agent 控制台</small></div>
     </div>
     <div class="sidebar-label">工作台</div>
