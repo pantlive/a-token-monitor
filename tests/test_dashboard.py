@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -1363,6 +1364,83 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
             if account.get("product") == "claude"
         ]
         self.assertTrue(claude_accounts)
+
+
+class ThemeTests(unittest.TestCase):
+    """验证白天 / 夜间主题的变量覆盖与切换入口。"""
+
+    @staticmethod
+    def _variables(block: str) -> set[str]:
+        return set(re.findall(r"(--[a-z0-9-]+)\s*:", block))
+
+    def _blocks(self) -> tuple[str, str]:
+        style = re.search(r"<style>(.*?)</style>", _DASHBOARD_HTML, re.S).group(1)
+        dark = re.search(r":root\s*\{(.*?)\}", style, re.S).group(1)
+        light = re.search(
+            r'\[data-theme="light"\]\s*\{(.*?)\}',
+            style,
+            re.S,
+        ).group(1)
+        return dark, light
+
+    def test_light_theme_overrides_every_dark_variable(self) -> None:
+        """白天模式必须覆盖全部语义变量，否则会漏出深色底。"""
+
+        dark, light = self._blocks()
+
+        self.assertTrue(self._variables(dark))
+        self.assertEqual(
+            sorted(self._variables(dark) - self._variables(light)),
+            [],
+        )
+        self.assertIn("color-scheme: dark", dark)
+        self.assertIn("color-scheme: light", light)
+
+    def test_theme_blocks_contain_no_hardcoded_colors(self) -> None:
+        """两个页面的主题块之外都不允许再有硬编码颜色，否则白天模式会漏色。"""
+
+        for name, page in (("dashboard", _DASHBOARD_HTML), ("settings", _SETTINGS_HTML)):
+            with self.subTest(page=name):
+                style = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+                body = re.sub(r":root\s*\{.*?\}", "", style, flags=re.S)
+                body = re.sub(
+                    r'\[data-theme="light"\]\s*\{.*?\}',
+                    "",
+                    body,
+                    flags=re.S,
+                )
+
+                leftovers = re.findall(
+                    r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)",
+                    body,
+                )
+                self.assertEqual(leftovers, [])
+
+    def test_theme_toggle_is_wired(self) -> None:
+        """页面要有切换按钮、localStorage 记忆与系统偏好监听。"""
+
+        for marker in (
+            'id="theme-toggle"',
+            'id="theme-label"',
+            "data-theme-mode",
+            "token-monitor-theme",
+            "prefers-color-scheme: light",
+            "theme-icon-light",
+            "theme-icon-dark",
+        ):
+            self.assertIn(marker, _DASHBOARD_HTML)
+
+    def test_both_pages_share_one_theme_implementation(self) -> None:
+        """Dashboard 与设置页共用同一份主题实现，且不能重复注入。"""
+
+        for name, page in (("dashboard", _DASHBOARD_HTML), ("settings", _SETTINGS_HTML)):
+            with self.subTest(page=name):
+                self.assertNotIn("__THEME_", page)
+                self.assertEqual(page.count("const THEME_STORAGE_KEY"), 1)
+                self.assertEqual(page.count('id="theme-toggle"'), 1)
+                # 一处用于首屏预置，一处用于跟随系统时的运行时监听
+                self.assertEqual(page.count("prefers-color-scheme: light"), 2)
+                self.assertIn('id="theme-label"', page)
 
 
 class UsageSearchDashboardTests(unittest.TestCase):
