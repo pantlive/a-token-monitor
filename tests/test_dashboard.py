@@ -2358,6 +2358,32 @@ class FaviconTests(unittest.TestCase):
         self.assertNotIn("const productLabel = (id, label) =>", page)
         self.assertIn('`<span class="muted">/${escapeHtml(accountId)}</span>`', page)
 
+    def test_top_conversations_show_subscription_and_session(self) -> None:
+        """最贵对话标签：订阅（产品 · 套餐）· 账号 · 会话 · 项目路径。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const conversationTitle = (item) => {", page)
+        self.assertIn(
+            "const conversationDetail = (item, fullSessionId = false) => {",
+            page,
+        )
+        # 行内显示前 12 位会话 ID，完整 ID 放整行 tooltip。
+        self.assertIn(
+            "sessionId ? `会话 ${fullSessionId ? sessionId : sessionId.slice(0, 12)}` : '',",
+            page,
+        )
+        self.assertIn(
+            "`${conversationTitle(item)} · ${conversationDetail(item, true)}`",
+            page,
+        )
+        # 订阅与账号卡片同源（/api/state + planLabel 归一化）。
+        self.assertIn("const topSubscriptions = usageAccountSubscriptions();", page)
+        self.assertIn("const statRow = (label, valueText, width, hint, title) =>", page)
+        self.assertIn(
+            """<span class="top-project-label"${title ? ` title="${escapeHtml(title)}"` : ''}""",
+            page,
+        )
+
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
 
