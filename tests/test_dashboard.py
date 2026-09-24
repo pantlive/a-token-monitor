@@ -2290,6 +2290,22 @@ class FaviconTests(unittest.TestCase):
             )
         )
 
+    def test_account_ranking_uses_subscription_and_id(self) -> None:
+        """账号成本排行标签是「产品 · 套餐/账号 ID」，与账号卡片同源。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const accountProductLabel = (account) => {", page)
+        self.assertIn("const usageAccountSubscriptions = () => {", page)
+        self.assertIn("const usageAccountRankingLabel = (group) => {", page)
+        self.assertIn("const projectLabel = (group) => {", page)
+        # 排行渲染改成接收「标签 HTML」函数，两个排行各自决定格式。
+        self.assertIn("const renderUsageRanking = (title, hint, groups, labelOf) => {", page)
+        self.assertIn("usageAccountRankingLabel,", page)
+        self.assertIn("projectLabel,", page)
+        # 卡片里的产品映射抽成公用函数，避免两处叫法不一致。
+        self.assertNotIn("const productLabel = (id, label) =>", page)
+        self.assertIn('`<span class="muted">/${escapeHtml(accountId)}</span>`', page)
+
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
 

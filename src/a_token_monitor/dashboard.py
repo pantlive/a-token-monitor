@@ -2016,9 +2016,17 @@ __THEME_TOGGLE__
             : name;
         let group = groups.get(key);
         if (!group) {
-          group = { key, models: [], accounts: new Map(), profiles: new Set(), products: new Set() };
+          group = {
+            key,
+            models: [],
+            accounts: new Map(),
+            profiles: new Set(),
+            products: new Set(),
+            accountId: account.account_id || '',
+          };
           groups.set(key, group);
         }
+        if (!group.accountId && account.account_id) group.accountId = account.account_id;
         group.models.push(leaf.model);
         group.accounts.set(name, (group.accounts.get(name) || 0) + Number(leaf.model.total_tokens || 0));
         (account.profiles || []).forEach((profile) => group.profiles.add(profile));
@@ -2039,6 +2047,45 @@ __THEME_TOGGLE__
     group.products,
     usageTagLine(group.profiles, '未知 profile'),
   );
+  // 中文注释：产品展示名与「账号与额度」卡片共用同一套映射（Codex / Grok / Kimi /
+  // DeepSeek Harness / Command Code / Claude Code），避免两处叫法不一致。
+  const accountProductLabel = (account) => {
+    const profiles = (account && account.profiles) || [];
+    const matches = (id) => account && (account.product === id || profiles.some((profile) => (typeof profile === 'string' ? profile : profile.name) === id));
+    return matches('kimi') ? 'Kimi'
+      : matches('grok') ? 'Grok'
+        : matches('dsh') ? 'DeepSeek Harness'
+          : matches('command-code') ? 'Command Code'
+            : matches('claude') ? 'Claude Code'
+              : 'Codex';
+  };
+  // 账号 → 产品 · 套餐：套餐取自 /api/state（与卡片同源、同一套展示名归一化）。
+  const usageAccountSubscriptions = () => {
+    const map = new Map();
+    const accounts = (latestState && Array.isArray(latestState.accounts)) ? latestState.accounts : [];
+    const quotas = (latestState && Array.isArray(latestState.quotas)) ? latestState.quotas : [];
+    accounts.forEach((account) => {
+      const plans = distinctSorted(
+        quotas
+          .filter((quota) => (quota.account || 'codex') === account.name)
+          .map((quota) => planLabel(quota.plan_type))
+          .concat([planLabel(account.plan_type)]),
+      );
+      map.set(account.name, { product: accountProductLabel(account), plan: plans.join(' / ') });
+    });
+    return map;
+  };
+  // 账号成本排行的标签：`Codex · Plus/账号 ID`，与卡片标题同源。
+  const usageAccountRankingLabel = (group) => {
+    const meta = usageAccountSubscriptions().get(group.key) || {};
+    const product = meta.product || usageTagLine(group.products, '未知产品');
+    const subscription = meta.plan ? `${product} · ${meta.plan}` : product;
+    const accountId = group.accountId || group.key;
+    const suffix = accountId && accountId.toLowerCase() !== product.toLowerCase()
+      ? `<span class="muted">/${escapeHtml(accountId)}</span>`
+      : '';
+    return `${escapeHtml(subscription)}${suffix}`;
+  };
   const usageContributorLabel = (group) => {
     const names = group.accountList || [];
     if (!names.length) return '';
@@ -2050,7 +2097,7 @@ __THEME_TOGGLE__
     if (left !== right) return right - left;
     return Number(b.stats.total_tokens || 0) - Number(a.stats.total_tokens || 0);
   });
-  const renderUsageRanking = (title, hint, groups, subLabel) => {
+  const renderUsageRanking = (title, hint, groups, labelOf) => {
     const ranked = usageSortByCost(groups).filter((group) => Number(group.stats.estimated_cost_usd || 0) > 0);
     if (!ranked.length) return '';
     const total = ranked.reduce((sum, group) => sum + Number(group.stats.estimated_cost_usd || 0), 0);
@@ -2060,8 +2107,7 @@ __THEME_TOGGLE__
       const cost = Number(group.stats.estimated_cost_usd || 0);
       const share = total > 0 ? (cost / total) * 100 : 0;
       const width = Math.max(3, Math.round((cost / max) * 100));
-      const sub = subLabel(group);
-      return `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${escapeHtml(group.key)}${sub ? `<span class="muted"> · ${escapeHtml(sub)}</span>` : ''}</span><span class="top-project-value">${escapeHtml(formatUsdCompact(cost))} · ${share.toFixed(1)}%</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
+      return `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${labelOf(group)}</span><span class="top-project-value">${escapeHtml(formatUsdCompact(cost))} · ${share.toFixed(1)}%</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
     }).join('');
     return `<div class="usage-top-projects"><div class="usage-trend-head"><span>${escapeHtml(title)} Top ${top.length}</span><span class="muted">${escapeHtml(hint)}</span></div>${items}</div>`;
   };
@@ -2422,13 +2468,17 @@ __THEME_TOGGLE__
       '账号成本排行',
       '当前筛选 · 占比为筛选内合计',
       groupsByAccount,
-      usageAccountSubLabel,
+      usageAccountRankingLabel,
     );
+    const projectLabel = (group) => {
+      const sub = usageContributorLabel(group);
+      return `${escapeHtml(group.key)}${sub ? `<span class="muted"> · ${escapeHtml(sub)}</span>` : ''}`;
+    };
     const projectRanking = renderUsageRanking(
       '项目成本排行',
       '当前筛选 · 按 API 等价金额',
       usageGroups(filteredAccounts, 'project'),
-      usageContributorLabel,
+      projectLabel,
     );
     // 中文注释：两个排行并排两列；只有一个有数据时（例如全是未定价模型）
     // 让剩下那个占满整行，避免半张空栏。
@@ -3310,8 +3360,7 @@ __THEME_TOGGLE__
       const accountCounts = account.counts || {};
       const profiles = (account.profiles || []).map((profile) => typeof profile === 'string' ? profile : profile.name).filter((profile) => profile).join(' · ');
       const accountId = account.account_id || name;
-      const productLabel = (id, label) => account.product === id || (account.profiles || []).some((profile) => (typeof profile === 'string' ? profile : profile.name) === id) ? label : null;
-      const product = productLabel('kimi', 'Kimi') || productLabel('grok', 'Grok') || productLabel('dsh', 'DeepSeek Harness') || productLabel('command-code', 'Command Code') || productLabel('claude', 'Claude Code') || 'Codex';
+      const product = accountProductLabel(account);
       const plans = distinctSorted(accountQuotas.map((quota) => planLabel(quota.plan_type)).concat([planLabel(account.plan_type)]));
       const subscription = plans.length ? `${product} · ${plans.join(' / ')}` : product;
       const activeCount = accountCounts.active ?? accountSessions.length;
