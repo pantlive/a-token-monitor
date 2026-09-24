@@ -5,3 +5,5 @@ __pycache__/
 .token-monitor/
 .codex-reset-monitor/
 .venv/
+build/
+dist/

@@ -159,6 +159,10 @@
     缺失 plan_type 时由账号元数据补齐（Dashboard 与 CLI 共用同一份字段）。
   - DSH 不再把模型名塞进 `plan_type`（模型仍在 metadata.model），避免出现
     「DeepSeek Harness · deepseek/deepseek-v4.1-flash」这种伪套餐。
+  - 修掉多账号串味：套餐原先在外层循环算好、被内层循环复用，导致两个 Codex
+    账号都显示成最后一个账号的套餐；改为把值挂在各自的 state 上，并补了会在
+    旧代码上失败的回归用例（两个账号 plus / prolite）。
+  - 套餐优先级调整为 auth.json 优先、账号启动快照兜底：续费或换号后不必重启 daemon。
 
 - [x] Dashboard 浏览器标签图标
   - `/favicon.svg` + `/favicon.ico`（16/32 PNG 回退）两个路由，Dashboard 与设置页

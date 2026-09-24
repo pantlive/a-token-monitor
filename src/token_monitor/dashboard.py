@@ -4105,13 +4105,17 @@ def _profile_plan_type(metadata: Mapping[str, object]) -> str | None:
     Command Code 等 provider 的订阅类型由各自的额度快照提供。
     """
 
+    codex_home = metadata.get("codex_home")
+    if isinstance(codex_home, str) and codex_home.strip():
+        # 中文注释：auth.json 是 Codex 自己写入的，优先级高于账号构造时的快照，
+        # 这样续费或换号后不必重启 daemon（读取按 mtime 缓存）。
+        live = read_codex_plan_type(Path(codex_home))
+        if live:
+            return live
     declared = metadata.get("plan_type")
     if isinstance(declared, str) and declared.strip():
         return declared.strip()
-    codex_home = metadata.get("codex_home")
-    if not isinstance(codex_home, str) or not codex_home.strip():
-        return None
-    return read_codex_plan_type(Path(codex_home))
+    return None
 
 
 def build_multi_dashboard_state(
@@ -4136,18 +4140,21 @@ def build_multi_dashboard_state(
         account_id = profile_metadata.get("account_id")
         display_name = account_id or profile_name
         plan_type = _profile_plan_type(profile_metadata)
-        account_states.append(
-            build_dashboard_state(
-                registry,
-                account_name=display_name,
-                account_id=account_id,
-                profile_name=profile_metadata.get(
-                    "profile_name",
-                    profile_name,
-                ),
-                codex_home=profile_metadata.get("codex_home"),
-            )
+        prepared = build_dashboard_state(
+            registry,
+            account_name=display_name,
+            account_id=account_id,
+            profile_name=profile_metadata.get(
+                "profile_name",
+                profile_name,
+            ),
+            codex_home=profile_metadata.get("codex_home"),
         )
+        # 中文注释：把订阅类型挂在各自的 state 上。第二个循环按账号遍历，
+        # 若在这里依赖外层变量，多账号时会全部用成最后一个 profile 的套餐
+        # （曾经因此把两个 Codex 账号都显示成同一个套餐）。
+        prepared["plan_type"] = plan_type
+        account_states.append(prepared)
     quotas: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
     accounts_by_key: dict[str, dict[str, Any]] = {}
@@ -4157,6 +4164,7 @@ def build_multi_dashboard_state(
         account_id = state.get("account_id")
         profile_name = str(state.get("profile_name") or account_name)
         codex_home = state.get("codex_home")
+        plan_type = state.get("plan_type")
         account_key = str(account_id or f"profile:{profile_name}")
         quota = state.get("quota")
         if isinstance(quota, dict):
