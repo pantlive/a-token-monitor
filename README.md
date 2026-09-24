@@ -254,6 +254,9 @@ a-token-monitor service uninstall
   字节、不产生流量告警），会明确提示原因。
 - 活动会话依赖系统自带的 `ps` 与 `lsof`；`lsof` 被裁剪时会话仍按目录识别，
   但缺少「打开了哪个会话文件」的证据。
+- Claude Code 额度从 Keychain 读取 OAuth 凭据：首次读取时 macOS 会弹出
+  「是否允许访问 Keychain」对话框，选「允许」后不再出现；这不是程序卡死。
+  拒绝授权只会导致 Claude 额度不显示，其余功能不受影响。
 
 ### Windows
 

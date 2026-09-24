@@ -293,6 +293,9 @@ a-token-monitor service uninstall
 - Active sessions rely on the system `ps` and `lsof`; when `lsof` is unavailable, sessions
   are still detected by directory but the “which session file is open” evidence is
   missing.
+- Claude Code quotas read the OAuth credential from the Keychain: on first access macOS
+  shows an "allow Keychain access" dialog — pick Allow (it won't ask again); this is not
+  a hang. Denying it only hides Claude quota; everything else keeps working.
 
 ### Windows
 
