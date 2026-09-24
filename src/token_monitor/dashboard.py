@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import struct
@@ -787,11 +788,10 @@ _FAVICON_SVG_ROUTE = "/favicon.svg"
 _FAVICON_ICO_ROUTE = "/favicon.ico"
 _FAVICON_SVG_MIME = "image/svg+xml"
 _FAVICON_ICO_MIME = "image/x-icon"
-# 中文注释：先给 ICO 回退、再给 SVG，浏览器按自己支持的类型挑选。
-_FAVICON_LINK = (
-    f'  <link rel="icon" href="{_FAVICON_ICO_ROUTE}" sizes="16x16 32x32">\n'
-    f'  <link rel="icon" href="{_FAVICON_SVG_ROUTE}" type="{_FAVICON_SVG_MIME}">\n'
-)
+# 中文注释：图标是内容寻址的（URL 带几何指纹）且可以长期缓存。浏览器会把
+# 「这个页面没有图标」也记进 favicon 数据库，改图标时指纹变化等于换 URL，
+# 于是旧浏览器一定会重新拉取，不会一直顶着空白标签。
+_FAVICON_CACHE_SECONDS = 604800
 _FAVICON_ICO_CACHE: bytes | None = None
 
 
@@ -799,6 +799,33 @@ def _hex_color(color: tuple[int, int, int]) -> str:
     """把 RGB 三元组转成 SVG 用的 #rrggbb。"""
 
     return "#{:02x}{:02x}{:02x}".format(*color)
+
+
+def _favicon_token() -> str:
+    """返回图标几何的短指纹，用作 favicon URL 的版本参数。"""
+
+    payload = repr(
+        (
+            _FAVICON_SIZE,
+            _FAVICON_RADIUS,
+            _FAVICON_BACKGROUND,
+            _FAVICON_FOREGROUND,
+            _FAVICON_BARS,
+            _FAVICON_BAR_RADIUS,
+            _FAVICON_ICO_SIZES,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
+
+
+# 中文注释：先给 ICO（老浏览器与 Safari 稳），再给 SVG（大小屏幕都清晰），
+# 浏览器按自己支持的类型挑选。
+_FAVICON_LINK = (
+    f'  <link rel="icon" type="{_FAVICON_ICO_MIME}" '
+    f'href="{_FAVICON_ICO_ROUTE}?v={_favicon_token()}" sizes="16x16 32x32">\n'
+    f'  <link rel="icon" type="{_FAVICON_SVG_MIME}" '
+    f'href="{_FAVICON_SVG_ROUTE}?v={_favicon_token()}">\n'
+)
 
 
 def _favicon_svg() -> str:
@@ -946,11 +973,16 @@ def _favicon_ico() -> bytes:
 
 
 def favicon_response(path: str) -> tuple[str, bytes] | None:
-    """返回 favicon 路由对应的 MIME 与内容；不是 favicon 路由时返回 None。"""
+    """返回 favicon 路由对应的 MIME 与内容；不是 favicon 路由时返回 None。
 
-    if path == _FAVICON_SVG_ROUTE:
+    带 ``?v=<指纹>`` 的版本参数会被忽略，这样页面可以用内容寻址的 URL
+    绕开浏览器里「这个页面没有图标」的旧缓存。
+    """
+
+    route = path.split("?", 1)[0]
+    if route == _FAVICON_SVG_ROUTE:
         return _FAVICON_SVG_MIME, _favicon_svg().encode("utf-8")
-    if path == _FAVICON_ICO_ROUTE:
+    if route == _FAVICON_ICO_ROUTE:
         return _FAVICON_ICO_MIME, _favicon_ico()
     return None
 
@@ -4761,6 +4793,7 @@ def _make_handler(
                     status=200,
                     content_type=favicon[0],
                     body=favicon[1],
+                    cache_seconds=_FAVICON_CACHE_SECONDS,
                 )
                 return
             if path == "/healthz":
@@ -5049,6 +5082,7 @@ def _make_handler(
                     content_type=favicon[0],
                     body=favicon[1],
                     include_body=False,
+                    cache_seconds=_FAVICON_CACHE_SECONDS,
                 )
                 return
             if path == "/healthz":
@@ -5619,13 +5653,24 @@ def _make_handler(
             content_type: str,
             body: bytes,
             include_body: bool = True,
+            cache_seconds: int | None = None,
         ) -> None:
-            """发送带有本地安全响应头的字节响应。"""
+            """发送带有本地安全响应头的字节响应。
+
+            ``cache_seconds`` 只给内容寻址的静态资源（例如带版本号的 favicon）用；
+            监控状态与页面默认一律 ``no-store``，避免浏览器缓存出过期的监控数据。
+            """
 
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            if cache_seconds is None:
+                self.send_header("Cache-Control", "no-store")
+            else:
+                self.send_header(
+                    "Cache-Control",
+                    f"public, max-age={int(cache_seconds)}",
+                )
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header(
