@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 
 from token_monitor.alerts import TrafficAlertStore
 from token_monitor.housekeeping import (
@@ -22,9 +25,13 @@ from token_monitor.housekeeping import (
 from token_monitor.dashboard import (
     _BASE_CSS,
     _DASHBOARD_HTML,
+    _FAVICON_BARS,
     _SETTINGS_HTML,
     DashboardConfig,
     DashboardServer,
+    _favicon_ico,
+    _favicon_png,
+    _favicon_svg,
     build_multi_dashboard_state,
 )
 from token_monitor.health import HealthTracker
@@ -1510,6 +1517,150 @@ class StylesheetIntegrityTests(unittest.TestCase):
         actions = re.search(r"\n    \.topbar-actions \{([^}]*)\}", _BASE_CSS)
         self.assertIsNotNone(actions)
         self.assertIn("flex-wrap: wrap", actions.group(1))
+
+
+def _decode_favicon_png(
+    raw: bytes,
+) -> tuple[int, int, list[list[tuple[int, int, int, int]]]]:
+    """最小 PNG 解码器：只处理本模块生成的 8 位 RGBA、过滤器 0 的图标。"""
+
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    offset = 8
+    width = height = 0
+    compressed = bytearray()
+    while offset < len(raw):
+        length = struct.unpack(">I", raw[offset : offset + 4])[0]
+        kind = raw[offset + 4 : offset + 8]
+        payload = raw[offset + 8 : offset + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, color_type = struct.unpack(">IIBB", payload[:10])
+            assert (depth, color_type) == (8, 6)
+        elif kind == b"IDAT":
+            compressed.extend(payload)
+        offset += 12 + length
+    data = zlib.decompress(bytes(compressed))
+    stride = width * 4
+    rows: list[list[tuple[int, int, int, int]]] = []
+    for row in range(height):
+        start = row * (stride + 1)
+        assert data[start] == 0, "图标 PNG 只应使用过滤器 0"
+        line = data[start + 1 : start + 1 + stride]
+        rows.append(
+            [
+                (line[index], line[index + 1], line[index + 2], line[index + 3])
+                for index in range(0, stride, 4)
+            ]
+        )
+    return width, height, rows
+
+
+class FaviconTests(unittest.TestCase):
+    """验证浏览器标签图标：两个页面都注入，且 SVG / ICO 两种路由都能取到。"""
+    def test_both_pages_link_the_favicon_once(self) -> None:
+        for html in (_DASHBOARD_HTML, _SETTINGS_HTML):
+            self.assertNotIn("__FAVICON__", html)
+            self.assertEqual(html.count('rel="icon"'), 2)
+            self.assertEqual(html.count('href="/favicon.ico"'), 1)
+            self.assertEqual(html.count('href="/favicon.svg"'), 1)
+            self.assertEqual(html.count('type="image/svg+xml"'), 1)
+
+    def test_svg_icon_is_valid_and_uses_shared_geometry(self) -> None:
+        svg = _favicon_svg()
+        root = ElementTree.fromstring(svg)
+
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertEqual(root.get("viewBox"), "0 0 64 64")
+        # 图标是自包含的：不引用外部资源、不依赖主题（否则标签图标会跟着页面闪）。
+        self.assertNotIn("<image", svg)
+        self.assertNotIn("data-theme", svg)
+        self.assertNotIn("prefers-color-scheme", svg)
+        rects = [item for item in root.iter() if item.tag.endswith("}rect")]
+        # 一个徽章底 + 三根柱子。
+        self.assertEqual(len(rects), 1 + len(_FAVICON_BARS))
+        bars = [
+            (float(item.get("x")), float(item.get("y")))
+            for item in rects[1:]
+        ]
+        self.assertEqual(bars, [(x, y) for x, y, _, _ in _FAVICON_BARS])
+
+    def test_ico_contains_16_and_32_pixel_pngs(self) -> None:
+        ico = _favicon_ico()
+
+        reserved, image_type, count = struct.unpack("<HHH", ico[:6])
+        self.assertEqual((reserved, image_type, count), (0, 1, 2))
+        self.assertIs(_favicon_ico(), ico)  # 生成结果缓存，重复请求不再重算
+        sizes = []
+        for index in range(count):
+            entry = ico[6 + index * 16 : 22 + index * 16]
+            width, height, _, _, planes, depth, length, offset = struct.unpack(
+                "<BBBBHHII",
+                entry,
+            )
+            self.assertEqual((width, height, planes, depth), (width, height, 1, 32))
+            payload = ico[offset : offset + length]
+            self.assertEqual(payload[:8], b"\x89PNG\r\n\x1a\n")
+            header = payload[8:33]
+            self.assertEqual(header[:4], struct.pack(">I", 13))  # IHDR 长度
+            self.assertEqual(header[4:8], b"IHDR")
+            png_width, png_height, depth, color_type = struct.unpack(
+                ">IIBB",
+                header[8:18],
+            )
+            self.assertEqual((png_width, png_height), (width, height))
+            self.assertEqual((depth, color_type), (8, 6))
+            sizes.append(width)
+        self.assertEqual(sizes, [16, 32])
+
+    def test_rasterized_pixels_match_the_svg_shape(self) -> None:
+        """光栅图必须真的画出柱子：中心白、圆角外透明、底色是蓝到青。"""
+
+        width, height, rows = _decode_favicon_png(_favicon_png(32))
+
+        self.assertEqual((width, height), (32, 32))
+        # 圆角外的像素完全透明，否则标签页上是方块。
+        self.assertEqual(rows[0][0][3], 0)
+        self.assertEqual(rows[31][31][3], 0)
+        # 中间那根柱子（64 画布上的 x 28..36、y 24..52）在 32×32 图上覆盖 (16, 16)。
+        center = rows[16][16]
+        self.assertEqual(center[3], 255)
+        self.assertGreaterEqual(min(center[:3]), 250)
+        # 底色是对角渐变：右下更青（绿升、蓝降），左上更蓝。
+        top_left = rows[6][6]
+        bottom_right = rows[25][25]
+        self.assertEqual((top_left[3], bottom_right[3]), (255, 255))
+        self.assertGreater(top_left[2], top_left[0])
+        self.assertLess(top_left[1], bottom_right[1])
+        self.assertGreater(top_left[2], bottom_right[2])
+        self.assertGreater(bottom_right[1], bottom_right[0])
+
+    def test_routes_serve_icons_with_the_right_mime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = DashboardServer(
+                registries={"codex": MultiSessionRegistry(root / "state")},
+                config=DashboardConfig(port=0),
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+            server.start()
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/favicon.svg", timeout=5) as response:
+                    svg_type = response.headers["Content-Type"]
+                    svg_body = response.read()
+                with urlopen(f"{base_url}/favicon.ico", timeout=5) as response:
+                    ico_type = response.headers["Content-Type"]
+                    ico_body = response.read()
+            finally:
+                server.close()
+
+        self.assertEqual(svg_type, "image/svg+xml")
+        self.assertEqual(ico_type, "image/x-icon")
+        self.assertEqual(svg_body.decode("utf-8"), _favicon_svg())
+        self.assertEqual(ico_body, _favicon_ico())
 
 
 class UsageSearchDashboardTests(unittest.TestCase):
