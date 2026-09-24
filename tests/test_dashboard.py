@@ -27,6 +27,7 @@ from a_token_monitor import dashboard as dashboard_module
 from a_token_monitor.accounts import CodexAccount, read_codex_plan_type
 from a_token_monitor.dashboard import (
     _BASE_CSS,
+    _DASHBOARD_CSS,
     _DASHBOARD_HTML,
     _FAVICON_GLYPHS,
     _SETTINGS_HTML,
@@ -1513,6 +1514,42 @@ class StylesheetIntegrityTests(unittest.TestCase):
             item for item in self.CRITICAL_SELECTORS if item not in selectors
         ]
         self.assertEqual(missing, [])
+
+    def test_account_cards_stay_aligned(self) -> None:
+        """跨卡片对齐的三条前提：卡片等高、表头等高、额度行固定列。
+
+        实测过的坑：`.account-list` 用 align-items:start 时卡片按内容高度收缩
+        （533px vs 485px）；账号 ID 长短让 meta 折成 1/2 行、表头高度 102/83px；
+        百分比列用 auto 时进度条一行一个长度（259 / 274 / 294 / 314px）。
+        """
+
+        css = _BASE_CSS + _DASHBOARD_CSS
+
+        def rules(selector: str) -> list[str]:
+            return re.findall(rf"\n    {re.escape(selector)} \{{([^}}]*)\}}", css)
+
+        list_rules = rules(".account-list")
+        self.assertTrue(list_rules)
+        self.assertTrue(all("align-items: start" not in rule for rule in list_rules))
+        row_rules = rules(".quota-row")
+        self.assertTrue(row_rules)
+        self.assertTrue(
+            any("92px minmax(60px, 1fr) 76px" in rule for rule in row_rules),
+            row_rules,
+        )
+        meta_rules = rules(".account-meta")
+        self.assertTrue(meta_rules)
+        self.assertTrue(
+            any(
+                "min-height: 3.1em" in rule and "-webkit-line-clamp: 2" in rule
+                for rule in meta_rules
+            ),
+            meta_rules,
+        )
+        self.assertIn(
+            ".account-block .quota-rows-block + .account-subtitle { margin-top: auto; }",
+            css,
+        )
 
     def test_shell_can_shrink_and_topbar_wraps(self) -> None:
         """主区域必须可收缩、顶栏允许换行，否则新增按钮会挤出视口。"""

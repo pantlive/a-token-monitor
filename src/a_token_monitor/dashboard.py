@@ -579,14 +579,20 @@ _DASHBOARD_CSS = r"""
     .section-block.is-collapsed { padding-bottom: 18px; }
     .section-block.is-collapsed .section-body { display: none; }
     .section-body { margin-top: 2px; }
-    .account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 15px; align-items: start; }
-    .account-block { padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
+    /* 中文注释：同一行的卡片等高（默认 stretch），否则高度不一，页脚和行位置都会错开。 */
+    .account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 15px; }
+    .account-block { display: flex; flex-direction: column; padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
+    /* 中文注释：紧跟在额度行之后的那段小标题（活动会话）吃掉剩余空间，
+       卡片等高时页脚自然贴底对齐；注意不能用 :nth-of-type，它按 div 序号算。 */
+    .account-block .quota-rows-block + .account-subtitle { margin-top: auto; }
     .account-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
     .account-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .account-avatar { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border: 1px solid var(--violet-border); border-radius: 10px; color: var(--violet-text-accent); background: var(--violet-soft); font-size: 13px; font-weight: 750; }
     .account-label { color: var(--cyan); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
     .account-title { margin: 2px 0 3px; font-size: 17px; letter-spacing: -.02em; overflow-wrap: anywhere; }
-    .account-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    /* 中文注释：账号 ID 长短会让 meta 折成 1 行或 2 行，这里固定成两行高度，
+       heading 高度才不会跟着变、三行额度窗口才能跨卡片对齐。 */
+    .account-meta { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 3.1em; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
     .account-side { display: grid; justify-items: end; gap: 7px; text-align: right; }
     .plan-badge { padding: 4px 8px; border: 1px solid var(--cyan-border); border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
     .account-activity { color: var(--muted); font-size: 11px; }
@@ -596,7 +602,7 @@ _DASHBOARD_CSS = r"""
     .quota-row {
       /* 两行布局：第一行「周期 / 进度条 / 百分比」，第二行把重置时间放在进度条下方。
          卡片并排时宽度会变，固定四列会把右侧文案挤出卡片，所以让重置换行。 */
-      grid-template-columns: 92px minmax(90px, 1fr) auto;
+      grid-template-columns: 92px minmax(60px, 1fr) 76px;
       grid-template-areas: "label bar percent" "label meta meta";
       row-gap: 3px;
       min-height: 52px;
@@ -1780,16 +1786,16 @@ __THEME_TOGGLE__
     const level = main.is_exhausted ? 'danger' : percent >= 80 ? 'warn' : '';
     const stateText = main.is_exhausted ? '已耗尽' : unknown ? '未返回已用比例' : '可用';
     const badge = rest.length
-      ? `<span class="quota-badge" title="${escapeHtml(ordered.map((window) => quotaWindowTitle(window)).join('\n'))}">另有 ${rest.length} 条</span>`
+      ? ` <span class="quota-badge" title="${escapeHtml(ordered.map((window) => quotaWindowTitle(window)).join('\n'))}">另有 ${rest.length} 条</span>`
       : '';
     const meta = unknown
       ? `${escapeHtml(stateText)} · ${escapeHtml(quotaDuration(main))}`
       : `重置 ${escapeHtml(formatReset(main.resets_at))} · ${escapeHtml(quotaDuration(main))}`;
     return `<div class="quota-row ${level || 'ok'}">
-      <span class="quota-row-label" title="${escapeHtml(quotaWindowTitle(main))}">${escapeHtml(label)}${badge}</span>
+      <span class="quota-row-label">${escapeHtml(label)}</span>
       <div class="bar quota-bar"><span class="${level}" style="width:${percent}%"></span></div>
       <span class="quota-row-percent ${level}">${escapeHtml(quotaPercentText(main))}</span>
-      <span class="quota-row-meta">${meta}</span>
+      <span class="quota-row-meta">${meta}${badge}</span>
     </div>`;
   };
   const renderQuotaRows = (quotas) => {
