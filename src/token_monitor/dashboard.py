@@ -80,23 +80,23 @@ _BASE_CSS = r"""
     :root {
       color-scheme: dark;
       --bg: #0b0f14;
+      --sidebar: #0d131a;
       --panel: #111820;
       --panel-soft: #192532;
-      --text: #edf3f8;
-      --muted: #8fa0b4;
-      --line: #263849;
-      --green: #34d399;
-      --yellow: #f59e0b;
-      --red: #fb7185;
-      --blue: #60a5fa;
-      --sidebar: #0d131a;
       --surface-raised: #151f2a;
       --surface-hover: #1d2c3a;
+      --text: #edf3f8;
+      --muted: #8fa0b4;
       --muted-strong: #b8c5d3;
+      --line: #263849;
       --line-soft: #1c2a37;
+      --green: #34d399;
       --green-soft: #12372d;
+      --yellow: #f59e0b;
       --yellow-soft: #3b2b11;
+      --red: #fb7185;
       --red-soft: #3d1d29;
+      --blue: #60a5fa;
       --blue-soft: #152f4d;
       --violet: #8b5cf6;
       --violet-soft: #241c47;
@@ -122,8 +122,8 @@ _BASE_CSS = r"""
       --violet-border-strong: #5541a0;
       --violet-border-active: #3b2b69;
       --violet-border-selected: #654bc0;
-      --violet-text-accent: #c4b5fd;
       --violet-text: #b9a4ff;
+      --violet-text-accent: #c4b5fd;
       --violet-text-soft: #eee9ff;
       --violet-text-strong: #f4f0ff;
       --violet-glow: rgba(139, 92, 246, .24);
@@ -146,7 +146,7 @@ _BASE_CSS = r"""
 
     /* 中文注释：白天模式复用同一组语义变量，只覆盖取值；JS 在 <html> 上切换
        data-theme，保证所有组件（含 SVG 图表、健康徽标、告警等级）一起变色。 */
-    [data-theme="light"] {
+    html[data-theme="light"] {
       color-scheme: light;
       --bg: #f5f7fb;
       --sidebar: #ffffff;
@@ -188,8 +188,8 @@ _BASE_CSS = r"""
       --violet-border-strong: #b7a6f3;
       --violet-border-active: #ddd4fc;
       --violet-border-selected: #b9a8f5;
-      --violet-text-accent: #6d4aff;
       --violet-text: #5a35d6;
+      --violet-text-accent: #6d4aff;
       --violet-text-soft: #4630a8;
       --violet-text-strong: #35247f;
       --violet-glow: rgba(109, 74, 255, .18);
@@ -212,10 +212,163 @@ _BASE_CSS = r"""
       --focus-ring: rgba(14, 116, 144, .28);
       --shadow: 0 12px 28px rgba(15, 32, 56, .10);
     }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 24px;
+      max-width: 1680px;
+      margin: 0 auto;
+    }
+    main { min-width: 0; }
+    .sidebar {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      min-height: calc(100vh - 48px);
+      padding: 18px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+    .sidebar-brand { padding: 2px 10px 18px; font-weight: 700; }
+    .sidebar-brand small { display: block; margin-top: 3px; color: var(--muted); font-weight: 400; }
+    .sidebar nav { display: grid; gap: 6px; }
+    .sidebar-link {
+      display: block;
+      padding: 9px 10px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: var(--muted);
+      text-decoration: none;
+    }
+    .sidebar-link:hover, .sidebar-link.active { border-color: var(--line); color: var(--text); background: var(--panel-soft); }
+    .sidebar-foot { margin: 24px 10px 0; color: var(--muted); font-size: 12px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: end; }
+    h1 { margin: 0; font-size: 26px; letter-spacing: .01em; }
+    h2 { margin: 0 0 14px; font-size: 17px; }
+    .muted { color: var(--muted); }
+    .error {
+      display: none;
+      margin: 18px 0;
+      padding: 12px 14px;
+      border: 1px solid var(--red);
+      border-radius: 10px;
+      color: var(--red);
+      background: var(--red-soft-strong);
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+      margin: 24px 0;
+    }
+    .card, .panel {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+    .card { padding: 16px; }
+    .card-label { color: var(--muted); font-size: 12px; }
+    .card-value { margin-top: 5px; font-size: 24px; font-weight: 700; }
+    .quota-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+    .account-list { display: grid; gap: 16px; }
+    .account-block {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel-soft);
+    }
+    .account-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .account-title { margin: 0; font-size: 18px; }
+    .account-subtitle {
+      margin: 18px 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .account-block .account-subtitle:first-of-type { margin-top: 0; }
+    .account-block .quota-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .account-block .table-wrap { margin: 0 -8px -8px; }
+    .quota-card { padding: 16px; }
+    .quota-title { display: flex; justify-content: space-between; gap: 8px; }
+    .quota-name { font-weight: 700; }
+    .quota-percent { font-size: 20px; font-weight: 700; }
+    .bar { height: 8px; margin: 12px 0; border-radius: 99px; background: var(--panel-soft); overflow: hidden; }
+    .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+    .bar > span.warn { background: var(--yellow); }
+    .bar > span.danger { background: var(--red); }
+    .quota-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; color: var(--muted); font-size: 12px; }
+    .quota-meta dd { margin: 0; color: var(--text); text-align: right; }
+    .panel { margin-top: 24px; padding: 18px; overflow: hidden; }
+    .panel-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 19px; }
+    .section-description { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .section-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+    .section-count { padding: 4px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); white-space: nowrap; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 900px; }
+    th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+    td { font-size: 13px; }
+    .session-id { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
+    .cwd, .event, .error-text { max-width: 340px; overflow-wrap: anywhere; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; white-space: nowrap; }
+    .pill.running { color: var(--green); background: var(--green-soft-strong); }
+    .pill.limit_blocked { color: var(--yellow); background: var(--yellow-soft-strong); }
+    .pill.waiting_for_approval { color: var(--blue); background: var(--blue-soft-strong); }
+    .pill.failed, .pill.orphaned { color: var(--red); background: var(--red-soft-strong); }
+    .pill.other { color: var(--muted); background: var(--panel-soft); }
+    .usage-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+    .usage-tab {
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: var(--panel-soft);
+      cursor: pointer;
+    }
+    .usage-tab.selected { border-color: var(--blue); color: var(--text); background: var(--blue-soft-strong); }
+    .usage-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 12px; }
+    .usage-filter { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    .usage-filter select {
+      min-width: 220px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      background: var(--panel-soft);
+    }
+    .usage-note { margin-bottom: 12px; color: var(--muted); font-size: 12px; }
+    .usage-table table { min-width: 1180px; }
+    .usage-models { display: grid; gap: 3px; min-width: 180px; }
+    .usage-model { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
+    .usage-number { white-space: nowrap; }
+
+    /* Stitch 运维控制台视觉：用深色 graphite、violet 主色和 cyan 状态色重排信息层级。 */
+
     html { scroll-behavior: smooth; }
     body {
       padding: 0;
-      color: var(--text);
       background: var(--bg);
       font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       letter-spacing: -.01em;
@@ -304,11 +457,11 @@ _BASE_CSS = r"""
     .health-detail ul { margin: 8px 0 0; padding-left: 18px; }
     .health-detail li { margin: 4px 0; }
     .sidebar-foot { margin: 0; color: var(--muted-faint); font-size: 11px; }
-    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 72px; margin-bottom: 34px; border-bottom: 1px solid var(--line-soft); }
+    .topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; row-gap: 12px; min-height: 72px; margin-bottom: 34px; border-bottom: 1px solid var(--line-soft); }
     .breadcrumb { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
     .breadcrumb strong { color: var(--muted-strong); font-weight: 600; }
     .breadcrumb-separator { color: var(--muted-separator); }
-    .topbar-actions { display: flex; align-items: center; gap: 15px; }
+    .topbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 15px; row-gap: 10px; }
     .refresh-button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
     .refresh-button:hover { border-color: var(--violet); color: var(--text); background: var(--surface-raised); }
     .refresh-button:disabled { cursor: wait; opacity: .7; }
