@@ -8,7 +8,7 @@ version = "0.9.0"
 description = "Monitor Codex, Grok, Kimi, DeepSeek Harness and other code agents"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [
     { name = "pantlive", email = "clickly@163.com" },

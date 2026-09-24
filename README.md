@@ -594,3 +594,13 @@ DevDeck 会将 `{port}` 替换成项目配置的端口，因此可以直接在 D
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## 许可证
+
+GNU General Public License v3.0 或更新版本（`GPL-3.0-or-later`），完整条款见
+[LICENSE](LICENSE)。
+
+Copyright (C) 2026 pantlive
+
+可以自由使用、修改和分发本程序；但分发本程序或其修改版时，必须同样以 GPL 授权，
+并一并向接收者提供完整源码，不得附加额外限制。
