@@ -15,8 +15,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +30,7 @@ from typing import Any, Mapping, Sequence
 
 from .agents import scan_running_agents
 from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
+from .quota import QuotaSnapshot, QuotaWindow
 
 # 中文注释：一次解析最多保留的 message.id，用于跨轮次去重。
 _MAX_SEEN_IDS = 400
@@ -584,3 +591,250 @@ def _normalize_path(path: Path) -> Path:
 
 _POLICY_LOCK = threading.Lock()
 _POLICY_CACHE: dict[Path, tuple[float, bool]] = {}
+
+
+# ---------------------------------------------------------------- 订阅额度
+#
+# Claude Code 没有公开的额度接口；它的 /usage 命令读取的是未公开的
+# https://api.anthropic.com/api/oauth/usage（社区抓包发现，上游可能变动）。
+# 请求用本地 OAuth access token 做 Bearer 鉴权：Linux / Windows 读
+# ``~/.claude/.credentials.json``，macOS 读 Keychain 的
+# 「Claude Code-credentials」条目。token 只放进请求头，绝不写入返回值、
+# 日志或异常消息。该接口的 429 限速很激进（被限后可能半小时不恢复），
+# 所以成功结果缓存 5 分钟、失败结果缓存 1 分钟，宁可展示稍旧的数据也不
+# 频繁请求。access token 过期时不主动刷新（交给 Claude Code 自己刷新），
+# 接口返回 401/403 就按额度暂不可读处理。
+
+_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CLAUDE_USAGE_BETA = "oauth-2025-04-20"
+_CLAUDE_USAGE_TIMEOUT_SECONDS = 8.0
+_CLAUDE_CREDENTIALS_NAME = ".credentials.json"
+_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+_CLAUDE_KEYCHAIN_TIMEOUT_SECONDS = 5.0
+_CLAUDE_MAX_RESPONSE_BYTES = 256 * 1024
+_QUOTA_CACHE_SUCCESS_TTL_SECONDS = 300.0
+_QUOTA_CACHE_FAILURE_TTL_SECONDS = 60.0
+
+_HttpJsonCaller = Callable[[str, Mapping[str, str], float], tuple[int, Any]]
+
+_quota_cache: dict[Path, tuple[float, QuotaSnapshot | None]] = {}
+_quota_cache_lock = threading.Lock()
+
+
+def read_claude_quota(
+    home: Path,
+    now: float | None = None,
+    *,
+    http_get_json: _HttpJsonCaller | None = None,
+    keychain_reader: Callable[[], Mapping[str, Any] | None] | None = None,
+) -> QuotaSnapshot | None:
+    """通过 Claude Code 的 OAuth usage 接口读取订阅额度（5 小时 / 周窗口）。
+
+    任何网络、凭据或解析问题都返回 ``None``，绝不抛出。使用真实 HTTP 时
+    结果带缓存（成功 5 分钟、失败 1 分钟），避免 Dashboard 轮询反复请求
+    触发接口的激进限速。
+    """
+
+    root = _normalize_path(home)
+    moment = time.time() if now is None else now
+    use_cache = http_get_json is None and keychain_reader is None
+    if use_cache:
+        with _quota_cache_lock:
+            cached = _quota_cache.get(root)
+        if cached is not None:
+            cached_at, cached_value = cached
+            ttl = (
+                _QUOTA_CACHE_SUCCESS_TTL_SECONDS
+                if cached_value is not None
+                else _QUOTA_CACHE_FAILURE_TTL_SECONDS
+            )
+            if moment - cached_at < ttl:
+                return cached_value
+    try:
+        snapshot = _fetch_claude_quota(
+            root,
+            moment,
+            http_get_json=http_get_json or _http_get_json,
+            keychain_reader=keychain_reader or _read_macos_keychain,
+        )
+    except Exception:
+        # 防御：配额读取是可选增强，任何意外都不能让监控崩溃。
+        snapshot = None
+    if use_cache:
+        with _quota_cache_lock:
+            _quota_cache[root] = (moment, snapshot)
+    return snapshot
+
+
+def _clear_quota_cache() -> None:
+    """清空配额缓存（测试用）。"""
+
+    with _quota_cache_lock:
+        _quota_cache.clear()
+
+
+def _fetch_claude_quota(
+    home: Path,
+    now: float,
+    *,
+    http_get_json: _HttpJsonCaller,
+    keychain_reader: Callable[[], Mapping[str, Any] | None],
+) -> QuotaSnapshot | None:
+    oauth = _read_claude_oauth(home, keychain_reader)
+    if oauth is None:
+        return None
+    access_token = oauth.get("accessToken")
+    if not isinstance(access_token, str) or not access_token:
+        return None
+    status, payload = http_get_json(
+        _CLAUDE_USAGE_URL,
+        {
+            "Authorization": f"Bearer {access_token}",
+            "anthropic-beta": _CLAUDE_USAGE_BETA,
+            "Accept": "application/json",
+        },
+        _CLAUDE_USAGE_TIMEOUT_SECONDS,
+    )
+    if status != 200:
+        return None
+    return _parse_claude_usage(
+        payload,
+        observed_at=now,
+        plan_type=_text(oauth.get("subscriptionType")),
+    )
+
+
+def _read_claude_oauth(
+    home: Path,
+    keychain_reader: Callable[[], Mapping[str, Any] | None],
+) -> Mapping[str, Any] | None:
+    """读取 ``claudeAiOauth`` 凭据段；文件缺失时退回 macOS Keychain。"""
+
+    payload = _read_json_object(home / _CLAUDE_CREDENTIALS_NAME)
+    if payload is None:
+        payload = keychain_reader()
+    if payload is None:
+        return None
+    oauth = payload.get("claudeAiOauth")
+    return oauth if isinstance(oauth, Mapping) else None
+
+
+def _read_macos_keychain() -> Mapping[str, Any] | None:
+    """从 macOS Keychain 读取 Claude Code 的 OAuth 凭据（其它平台返回 None）。"""
+
+    if sys.platform != "darwin" or shutil.which("security") is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                _CLAUDE_KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_KEYCHAIN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _parse_claude_usage(
+    payload: Any,
+    *,
+    observed_at: float,
+    plan_type: str | None = None,
+) -> QuotaSnapshot | None:
+    """解析 usage 接口返回的 ``five_hour`` / ``seven_day`` 等窗口。"""
+
+    data = payload if isinstance(payload, Mapping) else {}
+    windows = [
+        window
+        for window in (
+            _usage_window("claude", "5-hour", 300.0, data.get("five_hour")),
+            _usage_window("claude", "Weekly", 10080.0, data.get("seven_day")),
+            _usage_window(
+                "claude-design",
+                "Claude Design（周）",
+                10080.0,
+                data.get("seven_day_omelette"),
+            ),
+        )
+        if window is not None
+    ]
+    if not windows:
+        return None
+    return QuotaSnapshot(
+        observed_at=observed_at,
+        windows=tuple(windows),
+        plan_type=plan_type,
+        source="claude-oauth",
+        raw_limit_ids=tuple(window.limit_id for window in windows),
+    )
+
+
+def _usage_window(
+    limit_id: str,
+    name: str,
+    minutes: float,
+    value: Any,
+) -> QuotaWindow | None:
+    """把 ``{"utilization": 21.0, "resets_at": "..."}`` 转成额度窗口。"""
+
+    data = value if isinstance(value, Mapping) else {}
+    raw_used = data.get("utilization")
+    used_percent = (
+        float(raw_used)
+        if isinstance(raw_used, (int, float)) and not isinstance(raw_used, bool)
+        else None
+    )
+    resets_at = _timestamp(data.get("resets_at"))
+    if used_percent is None and resets_at is None:
+        return None
+    return QuotaWindow(
+        limit_id=limit_id,
+        name=name,
+        used_percent=used_percent,
+        window_minutes=minutes,
+        resets_at=resets_at,
+    )
+
+
+def _http_get_json(
+    url: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> tuple[int, Any]:
+    """GET 一个 JSON 接口；所有网络错误都收敛为 ``(0, None)``。"""
+
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, _read_json_body(response)
+    except urllib.error.HTTPError as error:
+        return error.code, _read_json_body(error)
+    except OSError:
+        return 0, None
+
+
+def _read_json_body(response: Any) -> Any:
+    try:
+        body = response.read(_CLAUDE_MAX_RESPONSE_BYTES + 1)
+    except OSError:
+        return None
+    if len(body) > _CLAUDE_MAX_RESPONSE_BYTES:
+        return None
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None

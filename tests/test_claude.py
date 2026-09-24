@@ -6,9 +6,13 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
+from unittest import mock
 
 from _platform_support import requires_symlinks
+import a_token_monitor.claude as claude_module
 from a_token_monitor.claude import (
     claude_home_for,
     claude_has_inline_sidechains,
@@ -19,6 +23,7 @@ from a_token_monitor.claude import (
     main_transcripts,
     parse_claude_chunk,
     read_claude_account,
+    read_claude_quota,
     resolve_claude_homes,
     resolve_sidechain_policy,
     subagent_transcripts,
@@ -729,3 +734,216 @@ def _timestamp(value: str) -> float:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeQuotaTest(unittest.TestCase):
+    """Claude Code OAuth usage 接口的额度读取（网络与 Keychain 全部注入/打桩）。"""
+
+    def setUp(self) -> None:
+        claude_module._clear_quota_cache()
+
+    def tearDown(self) -> None:
+        claude_module._clear_quota_cache()
+
+    def _home_with_credentials(self, root: Path) -> Path:
+        home = root / ".claude"
+        home.mkdir()
+        (home / ".credentials.json").write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "test-token-abc",
+                        "refreshToken": "test-refresh",
+                        "expiresAt": 1_900_000_000_000,
+                        "subscriptionType": "max",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return home
+
+    def test_parses_all_windows_and_plan(self) -> None:
+        """完整返回应解析出 5 小时、周与 Claude Design 三个窗口及套餐名。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = self._home_with_credentials(Path(temporary_directory))
+            calls: list[tuple[str, dict[str, str]]] = []
+
+            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+                calls.append((url, dict(headers)))
+                return 200, {
+                    "five_hour": {
+                        "utilization": 21.0,
+                        "resets_at": "2026-09-24T15:00:00Z",
+                    },
+                    "seven_day": {
+                        "utilization": 74,
+                        "resets_at": "2026-09-28T00:00:00Z",
+                    },
+                    "seven_day_omelette": {"utilization": 7.0},
+                }
+
+            snapshot = read_claude_quota(home, now=1000.0, http_get_json=fake_get)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.plan_type, "max")
+        self.assertEqual(snapshot.source, "claude-oauth")
+        self.assertEqual(len(snapshot.windows), 3)
+        five_hour, weekly, design = snapshot.windows
+        self.assertEqual((five_hour.name, five_hour.window_minutes), ("5-hour", 300.0))
+        self.assertEqual(five_hour.used_percent, 21.0)
+        self.assertEqual(
+            five_hour.resets_at,
+            datetime(2026, 9, 24, 15, 0, tzinfo=timezone.utc).timestamp(),
+        )
+        self.assertEqual((weekly.name, weekly.window_minutes), ("Weekly", 10080.0))
+        self.assertEqual(weekly.used_percent, 74.0)
+        self.assertEqual(design.limit_id, "claude-design")
+        self.assertEqual(design.used_percent, 7.0)
+        # token 只能出现在 Authorization 头里，且带了正确的 beta 标记。
+        self.assertEqual(len(calls), 1)
+        url, headers = calls[0]
+        self.assertIn("/api/oauth/usage", url)
+        self.assertEqual(headers["Authorization"], "Bearer test-token-abc")
+        self.assertEqual(headers["anthropic-beta"], "oauth-2025-04-20")
+        self.assertNotIn("test-token-abc", repr(snapshot))
+
+    def test_partial_payload_returns_available_windows(self) -> None:
+        """只有 five_hour 时也能返回单窗口快照。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = self._home_with_credentials(Path(temporary_directory))
+
+            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+                return 200, {"five_hour": {"utilization": 55.5}}
+
+            snapshot = read_claude_quota(home, now=1000.0, http_get_json=fake_get)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(len(snapshot.windows), 1)
+        self.assertEqual(snapshot.windows[0].used_percent, 55.5)
+
+    def test_missing_credentials_returns_none_without_http(self) -> None:
+        """没有凭据文件时直接返回 None，不发起请求。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".claude"
+            home.mkdir()
+            called = False
+
+            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+                nonlocal called
+                called = True
+                return 200, {}
+
+            snapshot = read_claude_quota(
+                home,
+                now=1000.0,
+                http_get_json=fake_get,
+                keychain_reader=lambda: None,
+            )
+
+        self.assertIsNone(snapshot)
+        self.assertFalse(called)
+
+    def test_http_error_returns_none(self) -> None:
+        """429 / 401 等非 200 状态一律按额度暂不可读处理。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = self._home_with_credentials(Path(temporary_directory))
+            for status in (401, 403, 429, 500):
+                with self.subTest(status=status):
+                    snapshot = read_claude_quota(
+                        home,
+                        now=1000.0,
+                        http_get_json=lambda url, headers, timeout: (status, {}),
+                    )
+                    self.assertIsNone(snapshot)
+
+    def test_keychain_fallback_when_credentials_file_missing(self) -> None:
+        """macOS 上没有凭据文件时用注入的 Keychain 读取器拿 token。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".claude"
+            home.mkdir()
+            keychain_calls = 0
+
+            def fake_keychain() -> Mapping[str, object]:
+                nonlocal keychain_calls
+                keychain_calls += 1
+                return {
+                    "claudeAiOauth": {
+                        "accessToken": "keychain-token",
+                        "subscriptionType": "pro",
+                    }
+                }
+
+            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+                assert headers["Authorization"] == "Bearer keychain-token"
+                return 200, {"five_hour": {"utilization": 10.0}}
+
+            snapshot = read_claude_quota(
+                home,
+                now=1000.0,
+                http_get_json=fake_get,
+                keychain_reader=fake_keychain,
+            )
+
+        self.assertEqual(keychain_calls, 1)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.plan_type, "pro")
+
+    def test_real_path_caches_success_and_failure(self) -> None:
+        """真实 HTTP 路径走缓存：成功 5 分钟、失败 1 分钟内不重复请求。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = self._home_with_credentials(Path(temporary_directory))
+            responses = iter(
+                [
+                    (200, {"five_hour": {"utilization": 30.0}}),
+                    (200, {"five_hour": {"utilization": 99.0}}),
+                    (429, {}),
+                    (429, {}),
+                ]
+            )
+            http_calls = 0
+
+            def fake_http(url: str, headers: Mapping[str, str], timeout: float):
+                nonlocal http_calls
+                http_calls += 1
+                return next(responses)
+
+            with mock.patch.object(
+                claude_module, "_http_get_json", side_effect=fake_http
+            ), mock.patch.object(
+                claude_module, "_read_macos_keychain", return_value=None
+            ):
+                first = read_claude_quota(home, now=1000.0)
+                second = read_claude_quota(home, now=1000.0 + 299.0)
+                third = read_claude_quota(home, now=1000.0 + 301.0)
+
+                self.assertEqual(http_calls, 2)
+                assert first is not None and second is not None and third is not None
+                self.assertEqual(first.windows[0].used_percent, 30.0)
+                self.assertEqual(second.windows[0].used_percent, 30.0)
+                self.assertEqual(third.windows[0].used_percent, 99.0)
+
+                # 第三次成功缓存到 1301+300=1601 才过期，之后才会重新请求并失败。
+                still_cached = read_claude_quota(home, now=1000.0 + 400.0)
+                assert still_cached is not None
+                self.assertEqual(still_cached.windows[0].used_percent, 99.0)
+                self.assertEqual(http_calls, 2)
+
+                failed = read_claude_quota(home, now=1000.0 + 602.0)
+                self.assertIsNone(failed)
+                self.assertEqual(http_calls, 3)
+                cached_failure = read_claude_quota(home, now=1000.0 + 661.0)
+                self.assertIsNone(cached_failure)
+                self.assertEqual(http_calls, 3)
+                retried = read_claude_quota(home, now=1000.0 + 663.0)
+                self.assertIsNone(retried)
+                self.assertEqual(http_calls, 4)

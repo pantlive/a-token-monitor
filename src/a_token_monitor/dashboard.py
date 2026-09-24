@@ -34,6 +34,7 @@ from .housekeeping import (
 from .claude import (
     list_claude_active_sessions,
     read_claude_account,
+    read_claude_quota,
     resolve_claude_homes,
 )
 from .commandcode import (
@@ -4705,12 +4706,13 @@ def build_multi_dashboard_state(
                 provider_key='dsh',
                 error=error,
             )
-    # Claude Code 本地没有订阅额度接口，只展示身份和本地用量归属。
+    # Claude Code 订阅额度经 OAuth usage 接口读取（带缓存）；失败时只展示账号身份。
     for claude_home in claude_homes or ():
         if not claude_home.is_dir():
             continue
         try:
             claude_account = read_claude_account(claude_home)
+            claude_quota = read_claude_quota(claude_home)
             account_key = claude_account.account_key
             account = accounts_by_key.setdefault(
                 account_key,
@@ -4730,6 +4732,19 @@ def build_multi_dashboard_state(
             }
             if profile not in account["profiles"]:
                 account["profiles"].append(profile)
+            if claude_quota is not None:
+                quota_with_account = _quota_summary(claude_quota)
+                if quota_with_account is not None:
+                    quota_with_account["account"] = claude_account.display_name
+                    quota_with_account["account_id"] = claude_account.account_id
+                    quota_with_account["profile_name"] = (
+                        claude_account.profile_name
+                    )
+                    quota_with_account["codex_home"] = str(claude_home)
+                    quota_with_account["product"] = "claude"
+                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
+                        quota_with_account
+                    )
             for session in list_claude_active_sessions(claude_home):
                 sessions.append(
                     session_view(

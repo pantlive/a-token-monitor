@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .accounts import CodexAccount, build_account_specs
-from .claude import list_claude_active_sessions, read_claude_account
+from .claude import (
+    list_claude_active_sessions,
+    read_claude_account,
+    read_claude_quota,
+)
 from .i18n import (
     active_language,
     localize_payload,
@@ -1198,6 +1202,37 @@ def _show_quota(args: argparse.Namespace) -> int:
 
         except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
             _guard_provider('Command Code', commandcode_home)
+    # Claude Code 订阅额度走 OAuth usage 接口；读取失败时只输出账号与登录状态。
+    for claude_home in effective_dirs.homes("claude"):
+        if not claude_home.is_dir():
+            continue
+        try:
+            claude_account = read_claude_account(claude_home)
+            claude_snapshot = read_claude_quota(claude_home)
+            if claude_snapshot is None:
+                results.append(
+                    {
+                        "account": claude_account.display_name,
+                        "account_id": claude_account.account_id,
+                        "profile_name": claude_account.profile_name,
+                        "codex_home": str(claude_home),
+                        "product": "claude",
+                        "has_credentials": claude_account.has_credentials,
+                        "windows": [],
+                    }
+                )
+                continue
+            summary = _quota_summary(claude_snapshot)
+            summary["account"] = claude_account.display_name
+            summary["account_id"] = claude_account.account_id
+            summary["profile_name"] = claude_account.profile_name
+            summary["codex_home"] = str(claude_home)
+            summary["product"] = "claude"
+            summary["has_credentials"] = claude_account.has_credentials
+            results.append(summary)
+
+        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+            _guard_provider('Claude Code', claude_home)
     if args.json:
         if len(results) == 1 and not errors:
             output: object = results[0]
@@ -1314,6 +1349,32 @@ def _show_quota(args: argparse.Namespace) -> int:
             sys.stdout.write(
                 "配额暂不可读（网络或登录状态问题），可在 command-code CLI 中"
                 "用 /usage 查看\n"
+            )
+        printed += 1
+    for summary in results:
+        if summary.get("product") != "claude":
+            continue
+        if printed:
+            sys.stdout.write("\n")
+        sys.stdout.write(f"账号: {summary.get('account') or '未识别'}\n")
+        sys.stdout.write(f"账号 ID: {summary.get('account_id') or '未识别'}\n")
+        sys.stdout.write(f"CLAUDE_CONFIG_DIR: {summary.get('codex_home')}\n")
+        sys.stdout.write(f"套餐: {summary.get('plan_type') or '未知'}\n")
+        logged_in = "已登录" if summary.get("has_credentials") else "未找到登录凭据"
+        sys.stdout.write(f"登录状态: {logged_in}\n")
+        claude_windows = summary.get("windows")
+        if isinstance(claude_windows, list) and claude_windows:
+            sys.stdout.write(
+                f"查询时间: {_format_timestamp(summary.get('observed_at'))}\n"
+            )
+            for window in claude_windows:
+                if not isinstance(window, dict):
+                    continue
+                _write_quota_windows((window,))
+        else:
+            sys.stdout.write(
+                "配额暂不可读（网络、限速或登录状态问题），可在 claude CLI 中"
+                "用 /usage 查看；本地用量与成本统计不受影响\n"
             )
         printed += 1
     for error in errors:
