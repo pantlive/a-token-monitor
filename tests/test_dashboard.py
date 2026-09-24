@@ -1628,6 +1628,56 @@ class StylesheetIntegrityTests(unittest.TestCase):
                     )
                     self.assertGreater(len(body), 10)
 
+    def test_api_switches_language_by_request(self) -> None:
+        """同一个接口：带 Accept-Language: en 时负载全英文，默认仍是中文。"""
+
+        from a_token_monitor import i18n
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_dir = Path(temporary_directory) / "state"
+            server = DashboardServer(
+                registries={"codex": MultiSessionRegistry(state_dir)},
+                config=DashboardConfig(port=0),
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+            server.start()
+            base = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base}/api/state", timeout=5) as response:
+                    chinese_payload = json.load(response)
+                english_request = Request(
+                    f"{base}/api/state",
+                    headers={"Accept-Language": "en-US,en;q=0.9"},
+                )
+                with urlopen(english_request, timeout=5) as response:
+                    english_payload = json.load(response)
+            finally:
+                server.close()
+
+        def chinese_strings(value: object, path: str = "") -> list[tuple[str, str]]:
+            found: list[tuple[str, str]] = []
+            if isinstance(value, str):
+                if i18n.contains_cjk(value):
+                    found.append((path, value))
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    found.extend(chinese_strings(item, f"{path}.{key}"))
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    found.extend(chinese_strings(item, f"{path}[{index}]"))
+            return found
+
+        # 中文请求保持中文（定价说明是固定中文文案）。
+        self.assertTrue(
+            any("pricing.note" in path for path, _ in chinese_strings(chinese_payload))
+        )
+        # 英文请求不允许再出现中文。
+        self.assertEqual(chinese_strings(english_payload), [])
+
     def test_shell_can_shrink_and_topbar_wraps(self) -> None:
         """主区域必须可收缩、顶栏允许换行，否则新增按钮会挤出视口。"""
 

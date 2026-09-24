@@ -175,7 +175,16 @@
     `EN_COMPLETE` 作为总开关，最后一轮打开并让 `test_english_pages_have_no_cjk` 生效。
   - [x] 主页与设置页模板目录表完成：606 条，替换后 **0 条未翻译、0 处中英混杂**；
     棘轮钉在 0，新增文案没补目录会直接测试失败。
-  - [ ] API 文案（画像/建议/额度周期名/产品名等约 300 条）与 CLI（约 347 条）待补。
+  - [x] API 文案：所有 JSON 响应统一在 `_send_json` 里按请求语言本地化
+    （`?lang=` 优先、其次 `Accept-Language`，默认中文）；目录表补了额度周期名、
+    产品名、健康组件名、定价说明等静态条目，并新增 **25 条正则模式**处理带插值的
+    句子（「会话 X 已进行 N 轮」「Codex (codex) 占用 9.27 GiB」这类拼出来的文案，
+    模式可反复套用，最多 4 层）。
+  - [x] 实测真实负载（/api/state、/api/usage、/api/insights、/api/alerts、
+    /api/housekeeping、/api/usage/search）：英文请求下**非路径类中文 0 处**，
+    带中文的**用户数据（项目路径）原样保留**；新增 4 条测试钉住这两点。
+  - [ ] CLI（约 347 条 + `--lang` + `LANG` 判断 + stdout 翻译代理）待做。
+  - [ ] 页面按语言下发（`Accept-Language` / `?lang=`）+ 顶栏「中/EN」开关待做。
   - [ ] 路由按 `Accept-Language` / `?lang=` 出英文页面与英文负载；顶栏加「中/EN」手动
     切换（localStorage 记忆，与主题开关一致）；CLI 支持 `--lang` 并按 `LANG` 自动判断。
   - [ ] 收尾：打开 `EN_COMPLETE`，浏览器断言英文页面渲染文本里没有中日韩字符。
