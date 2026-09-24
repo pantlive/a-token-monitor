@@ -216,6 +216,30 @@ class CliLocalizationTests(unittest.TestCase):
         self.assertEqual(leftover, [])
 
 
+    def test_quota_lines_are_english(self) -> None:
+        """quota 输出的标签与取值：英文下不能留下中文（值也必须是英文）。"""
+
+        lines = [
+            "账号 ID: 未识别",
+            "套餐: 未知",
+            "套餐: Pro",
+            "登录状态: 已登录",
+            "登录状态: 未找到登录凭据",
+            "查询时间: 2026-09-24 12:00",
+            "配额暂不可读（网络或登录状态问题），可在 kimi CLI 中用 /usage 查看；"
+            "本地用量与成本统计不受影响",
+            "配额暂不可读（网络或登录状态问题），可在 command-code CLI 中用 /usage 查看",
+            "配额暂不可读（网络、限速或登录状态问题），可在 claude CLI 中用 /usage 查看；"
+            "本地用量与成本统计不受影响",
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                english = i18n.localize_line(line, "en")
+                self.assertFalse(i18n.contains_cjk(english), english)
+                # 中文是源语言，必须原样返回。
+                self.assertEqual(i18n.localize_line(line, "zh"), line)
+
+
 class PayloadLocalizationTests(unittest.TestCase):
     """API 负载本地化：拼出来的句子要翻到，用户数据不能被动。"""
 
