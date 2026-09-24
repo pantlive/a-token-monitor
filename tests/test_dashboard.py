@@ -32,7 +32,9 @@ from token_monitor.dashboard import (
     _favicon_ico,
     _favicon_png,
     _favicon_svg,
+    _favicon_token,
     build_multi_dashboard_state,
+    favicon_response,
 )
 from token_monitor.health import HealthTracker
 from token_monitor.retention import RetentionController, RetentionError
@@ -1557,12 +1559,17 @@ def _decode_favicon_png(
 class FaviconTests(unittest.TestCase):
     """验证浏览器标签图标：两个页面都注入，且 SVG / ICO 两种路由都能取到。"""
     def test_both_pages_link_the_favicon_once(self) -> None:
+        token = _favicon_token()
+        self.assertRegex(token, r"^[0-9a-f]{10}$")
+        self.assertEqual(token, _favicon_token())
         for html in (_DASHBOARD_HTML, _SETTINGS_HTML):
             self.assertNotIn("__FAVICON__", html)
             self.assertEqual(html.count('rel="icon"'), 2)
-            self.assertEqual(html.count('href="/favicon.ico"'), 1)
-            self.assertEqual(html.count('href="/favicon.svg"'), 1)
+            self.assertEqual(html.count(f'href="/favicon.ico?v={token}"'), 1)
+            self.assertEqual(html.count(f'href="/favicon.svg?v={token}"'), 1)
             self.assertEqual(html.count('type="image/svg+xml"'), 1)
+            # 版本参数让浏览器把它当成新图标，旧缓存不会一直顶着空白标签。
+            self.assertEqual(html.count("?v="), 2)
 
     def test_svg_icon_is_valid_and_uses_shared_geometry(self) -> None:
         svg = _favicon_svg()
@@ -1633,6 +1640,11 @@ class FaviconTests(unittest.TestCase):
         self.assertGreater(top_left[2], bottom_right[2])
         self.assertGreater(bottom_right[1], bottom_right[0])
 
+    def test_icon_routes_accept_version_parameters(self) -> None:
+        self.assertIsNotNone(favicon_response("/favicon.svg?v=abc123"))
+        self.assertIsNotNone(favicon_response("/favicon.ico?v=abc123"))
+        self.assertIsNone(favicon_response("/favicon.svg/extra"))
+
     def test_routes_serve_icons_with_the_right_mime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1648,12 +1660,19 @@ class FaviconTests(unittest.TestCase):
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
             try:
-                with urlopen(f"{base_url}/favicon.svg", timeout=5) as response:
+                with urlopen(
+                    f"{base_url}/favicon.svg?v={_favicon_token()}",
+                    timeout=5,
+                ) as response:
                     svg_type = response.headers["Content-Type"]
+                    svg_cache = response.headers["Cache-Control"]
                     svg_body = response.read()
                 with urlopen(f"{base_url}/favicon.ico", timeout=5) as response:
                     ico_type = response.headers["Content-Type"]
+                    ico_cache = response.headers["Cache-Control"]
                     ico_body = response.read()
+                with urlopen(f"{base_url}/", timeout=5) as response:
+                    page_cache = response.headers["Cache-Control"]
             finally:
                 server.close()
 
@@ -1661,6 +1680,11 @@ class FaviconTests(unittest.TestCase):
         self.assertEqual(ico_type, "image/x-icon")
         self.assertEqual(svg_body.decode("utf-8"), _favicon_svg())
         self.assertEqual(ico_body, _favicon_ico())
+        # 图标按内容寻址，可以长期缓存；页面与监控状态仍然必须 no-store。
+        self.assertEqual(svg_cache, ico_cache)
+        self.assertIn("max-age=", svg_cache)
+        self.assertNotIn("no-store", svg_cache)
+        self.assertEqual(page_cache, "no-store")
 
 
 class UsageSearchDashboardTests(unittest.TestCase):
