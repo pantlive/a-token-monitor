@@ -75,6 +75,7 @@ _GROK_API_PRICING_SOURCE = "https://docs.x.ai/docs/models"
 _KIMI_API_PRICING_SOURCE = "https://platform.kimi.com/docs/pricing/chat"
 _DSH_API_PRICING_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing"
 _CLAUDE_API_PRICING_SOURCE = "https://docs.claude.com/en/docs/about-claude/pricing"
+_MIMO_API_PRICING_SOURCE = "https://mimo.mi.com/"
 # 中文注释：解析规则变化时必须升版本，避免沿用错误的历史增量。
 _USAGE_INDEX_VERSION = 6
 _USAGE_LINE_HINTS = (
@@ -173,6 +174,20 @@ _MODEL_PRICING: dict[str, ModelPricing] = {
         input_usd=10,
         cached_input_usd=1,
         output_usd=50,
+        long_context_threshold=272_000,
+    ),
+    # 官方文档：$2 / $0.2 / $10，>272K 输入按 2x 输入与缓存、1.5x 输出计费。
+    "gpt-6-sol": ModelPricing(
+        input_usd=2,
+        cached_input_usd=0.2,
+        output_usd=10,
+        long_context_threshold=272_000,
+    ),
+    # 官方文档：$0.1 / $0.01 / $0.5，长上下文加价规则同上。
+    "gpt-6-luna": ModelPricing(
+        input_usd=0.1,
+        cached_input_usd=0.01,
+        output_usd=0.5,
         long_context_threshold=272_000,
     ),
     "gpt-5.6-sol": ModelPricing(
@@ -281,6 +296,18 @@ _MODEL_PRICING: dict[str, ModelPricing] = {
         input_usd=0.3,
         cached_input_usd=0.006,
         output_usd=1.2,
+        long_input_multiplier=1.0,
+        long_cached_multiplier=1.0,
+        long_output_multiplier=1.0,
+    ),
+    # 小米 MiMo 开放平台：国际站 $0.14 / $0.0028（缓存命中）/ $0.28 每百万 token
+    # （国内站为 ¥1 / ¥0.02 / ¥2）。官方没有长上下文加价，因此显式把三个乘数设为
+    # 1.0，避免套用默认的 272K 加价规则。缓存写入官方未单独定价，沿用全局 1.25x 规则。
+    "mimo-v2.6-flash": ModelPricing(
+        input_usd=0.14,
+        cached_input_usd=0.0028,
+        output_usd=0.28,
+        long_context_threshold=_LONG_CONTEXT_INPUT_THRESHOLD,
         long_input_multiplier=1.0,
         long_cached_multiplier=1.0,
         long_output_multiplier=1.0,
@@ -4594,6 +4621,7 @@ def pricing_metadata() -> dict[str, str]:
         "kimi_api_source": _KIMI_API_PRICING_SOURCE,
         "dsh_api_source": _DSH_API_PRICING_SOURCE,
         "claude_api_source": _CLAUDE_API_PRICING_SOURCE,
+        "mimo_api_source": _MIMO_API_PRICING_SOURCE,
         "cost_kind": "api_equivalent_estimate",
         "credits_kind": "not_available_from_plus_jsonl",
         "note": (
@@ -4603,7 +4631,8 @@ def pricing_metadata() -> dict[str, str]:
             "金额按 K3 公开 API 单价等价换算，不代表会员扣费；DeepSeek Harness "
             "用量来自本地 projcache 合计，金额按 DeepSeek 官方峰时 API 单价估算，"
             "不代表 Command Code 等转发账单；Claude Code 用量来自本地会话 JSONL，"
-            "金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价。"
+            "金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价；"
+            "小米 MiMo 按开放平台国际站单价估算（官方未公布长上下文加价）。"
             "未定价模型只展示 token，不计入 API 等价值。"
         ),
     }
