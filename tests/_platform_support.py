@@ -32,7 +32,7 @@ def symlinks_supported() -> bool:
     返回 ``False``。无论结果如何都会清理临时目录。
     """
 
-    temporary_directory = tempfile.mkdtemp(prefix="token-monitor-symlink-")
+    temporary_directory = tempfile.mkdtemp(prefix="a-token-monitor-symlink-")
     try:
         root = Path(temporary_directory)
         target_file = root / "target.txt"

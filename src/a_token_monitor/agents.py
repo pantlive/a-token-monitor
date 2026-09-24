@@ -12,7 +12,7 @@ from typing import Sequence
 
 
 # 中文注释：监控器自身命令行里会出现这些标记，不能当成被监控的 Codex。
-_MONITOR_MARKERS = ("token_monitor", "token-monitor")
+_MONITOR_MARKERS = ("a_token_monitor", "a-token-monitor")
 
 # 中文注释：Windows 上 npm 安装的 CLI 是 .cmd/.exe 包装，脚本型 CLI 也会以
 # ``node .../codex.js`` 的形式出现，识别前统一去掉这些后缀。

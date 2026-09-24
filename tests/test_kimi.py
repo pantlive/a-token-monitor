@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 from _platform_support import requires_chmod, requires_symlinks
-from token_monitor import kimi as kimi_module
-from token_monitor.kimi import (
+from a_token_monitor import kimi as kimi_module
+from a_token_monitor.kimi import (
     _clear_quota_cache,
     kimi_wire_session_id,
     list_kimi_active_sessions,
@@ -24,8 +24,8 @@ from token_monitor.kimi import (
     read_kimi_quota,
     resolve_kimi_homes,
 )
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 
 class KimiUsageTests(unittest.TestCase):

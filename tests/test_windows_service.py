@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from token_monitor.service import (
+from a_token_monitor.service import (
     LaunchdServiceManager,
     ServiceConfig,
     ServiceError,
@@ -61,7 +61,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             self.assertTrue(_text(document, "RegistrationInfo/Description"))
             self.assertEqual(
                 _text(document, "RegistrationInfo/URI"),
-                "\\TokenMonitor",
+                "\\ATokenMonitor",
             )
             self.assertEqual(
                 _text(document, "Triggers/LogonTrigger/Enabled"),
@@ -178,10 +178,10 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             root = Path(temporary_directory)
             manager = TaskSchedulerServiceManager(state_dir=root / "state")
 
-            self.assertEqual(manager.task_name, "TokenMonitor")
+            self.assertEqual(manager.task_name, "ATokenMonitor")
             self.assertEqual(
                 manager.task_path,
-                manager.state_dir / "token-monitor-task.xml",
+                manager.state_dir / "a-token-monitor-task.xml",
             )
             self.assertEqual(
                 manager.config_path,
@@ -200,7 +200,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
                 python_executable=root / "python.exe",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.install(config, start=True)
 
@@ -217,9 +217,9 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             self.assertEqual(
                 commands,
                 [
-                    "schtasks /Create /TN TokenMonitor /XML "
+                    "schtasks /Create /TN ATokenMonitor /XML "
                     f"{manager.task_path} /F",
-                    "schtasks /Run /TN TokenMonitor",
+                    "schtasks /Run /TN ATokenMonitor",
                 ],
             )
 
@@ -234,7 +234,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
                 python_executable=root / "python.exe",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.install(config, start=False)
 
@@ -271,7 +271,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
                 python_executable=root / "python.exe",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.install(config, start=False)
 
@@ -291,7 +291,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
                 python_executable=root / "python.exe",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 with self.assertRaises(ServiceError):
                     manager.install(config)
@@ -303,14 +303,14 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             root = Path(temporary_directory)
             manager = TaskSchedulerServiceManager(state_dir=root / "state")
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=1)
 
                 manager.stop()
 
             self.assertEqual(
                 run.call_args_list[0].args[0],
-                ["schtasks", "/End", "/TN", "TokenMonitor"],
+                ["schtasks", "/End", "/TN", "ATokenMonitor"],
             )
             self.assertEqual(run.call_args_list[0].kwargs, {"check": False})
 
@@ -321,7 +321,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             root = Path(temporary_directory)
             manager = TaskSchedulerServiceManager(state_dir=root / "state")
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
 
                 manager.restart()
@@ -330,8 +330,8 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             self.assertEqual(
                 commands,
                 [
-                    "schtasks /End /TN TokenMonitor",
-                    "schtasks /Run /TN TokenMonitor",
+                    "schtasks /End /TN ATokenMonitor",
+                    "schtasks /Run /TN ATokenMonitor",
                 ],
             )
 
@@ -342,7 +342,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             root = Path(temporary_directory)
             manager = TaskSchedulerServiceManager(state_dir=root / "state")
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=1)
 
                 status = manager.status()
@@ -350,7 +350,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             self.assertEqual(status, 1)
             self.assertEqual(
                 run.call_args_list[0].args[0],
-                ["schtasks", "/Query", "/TN", "TokenMonitor"],
+                ["schtasks", "/Query", "/TN", "ATokenMonitor"],
             )
             self.assertEqual(run.call_args_list[0].kwargs, {"check": False})
 
@@ -370,7 +370,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             )
             manager.config_path.write_text("{}", encoding="utf-8")
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.uninstall()
                 manager.uninstall()
@@ -390,7 +390,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             manager = TaskSchedulerServiceManager(state_dir=root / "state")
 
             with patch(
-                "token_monitor.service.subprocess.run",
+                "a_token_monitor.service.subprocess.run",
                 side_effect=FileNotFoundError("schtasks"),
             ):
                 with self.assertRaisesRegex(ServiceError, "schtasks"):
@@ -476,7 +476,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
                     handle.write("追加行\n")
 
             with patch(
-                "token_monitor.service.time.sleep",
+                "a_token_monitor.service.time.sleep",
                 side_effect=fake_sleep,
             ):
                 with contextlib.redirect_stdout(buffer):
@@ -493,7 +493,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
             manager = TaskSchedulerServiceManager(state_dir=root / "state")
 
             with patch(
-                "token_monitor.service.time.sleep",
+                "a_token_monitor.service.time.sleep",
                 side_effect=KeyboardInterrupt,
             ):
                 buffer = io.StringIO()
@@ -505,7 +505,7 @@ class TaskSchedulerServiceTests(unittest.TestCase):
     def test_current_uid_tolerates_missing_getuid(self) -> None:
         """没有 os.getuid 的 Windows 上调用也不能抛 AttributeError。"""
 
-        with patch("token_monitor.service.os.getuid", None):
+        with patch("a_token_monitor.service.os.getuid", None):
             self.assertEqual(_current_uid(), 0)
 
     def test_create_service_manager_selects_platform(self) -> None:
@@ -544,24 +544,24 @@ class TaskSchedulerServiceTests(unittest.TestCase):
         self.assertIsInstance(windows_manager, TaskSchedulerServiceManager)
         self.assertIsInstance(alias_manager, TaskSchedulerServiceManager)
         self.assertEqual(windows_manager.state_dir, (root / "state").resolve())
-        self.assertEqual(windows_manager.task_name, "TokenMonitor")
+        self.assertEqual(windows_manager.task_name, "ATokenMonitor")
 
     def test_windows_service_available_requires_windows_and_schtasks(
         self,
     ) -> None:
         """只有 Windows 且 PATH 中存在 schtasks 时才认为可用。"""
 
-        with patch("token_monitor.service.sys.platform", "win32"):
+        with patch("a_token_monitor.service.sys.platform", "win32"):
             with patch(
-                "token_monitor.service.shutil.which",
+                "a_token_monitor.service.shutil.which",
                 return_value="C:/Windows/System32/schtasks.exe",
             ):
                 self.assertTrue(windows_service_available())
-            with patch("token_monitor.service.shutil.which", return_value=None):
+            with patch("a_token_monitor.service.shutil.which", return_value=None):
                 self.assertFalse(windows_service_available())
-        with patch("token_monitor.service.sys.platform", "linux"):
+        with patch("a_token_monitor.service.sys.platform", "linux"):
             with patch(
-                "token_monitor.service.shutil.which",
+                "a_token_monitor.service.shutil.which",
                 return_value="/usr/bin/schtasks",
             ):
                 self.assertFalse(windows_service_available())

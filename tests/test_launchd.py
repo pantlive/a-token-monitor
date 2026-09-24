@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from _platform_support import posix_only, requires_chmod
-from token_monitor.service import (
+from a_token_monitor.service import (
     LAUNCHD_LABEL,
     LaunchdServiceManager,
     ServiceConfig,
@@ -43,7 +43,7 @@ class LaunchdServiceTests(unittest.TestCase):
             self.assertEqual(payload["Label"], LAUNCHD_LABEL)
             arguments = payload["ProgramArguments"]
             self.assertEqual(arguments[-2:], ["service", "run"])
-            self.assertEqual(arguments[1:3], ["-m", "token_monitor"])
+            self.assertEqual(arguments[1:3], ["-m", "a_token_monitor"])
             self.assertEqual(arguments[3], "--state-dir")
             self.assertEqual(arguments[0], str(manager.python_executable))
             self.assertIs(payload["RunAtLoad"], True)
@@ -95,7 +95,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 python_executable=root / "python",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.install(config, start=True)
 
@@ -147,7 +147,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 python_executable=root / "python",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.install(config, start=False)
 
@@ -166,7 +166,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 unit_dir=root / "agents",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 with self.assertRaises(ServiceError):
                     manager.install(config)
@@ -181,7 +181,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 unit_dir=root / "agents",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.start()
 
@@ -205,7 +205,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 unit_dir=root / "agents",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=3)
                 manager.stop()
 
@@ -224,7 +224,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 unit_dir=root / "agents",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=113)
 
                 status = manager.status()
@@ -253,7 +253,7 @@ class LaunchdServiceTests(unittest.TestCase):
             manager.config_path.parent.mkdir(parents=True, exist_ok=True)
             manager.config_path.write_text("{}", encoding="utf-8")
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=0)
                 manager.uninstall()
                 manager.uninstall()
@@ -276,7 +276,7 @@ class LaunchdServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "token_monitor.service.subprocess.run",
+                "a_token_monitor.service.subprocess.run",
                 side_effect=FileNotFoundError("launchctl"),
             ):
                 with self.assertRaisesRegex(ServiceError, "launchctl"):
@@ -328,7 +328,7 @@ class LaunchdServiceTests(unittest.TestCase):
                 unit_dir=root / "agents",
             )
 
-            with patch("token_monitor.service.subprocess.run") as run:
+            with patch("a_token_monitor.service.subprocess.run") as run:
                 run.return_value = Mock(returncode=7)
 
                 status = manager.logs(lines=5, follow=True)
@@ -378,17 +378,17 @@ class LaunchdServiceTests(unittest.TestCase):
     def test_launchd_available_requires_macos_and_launchctl(self) -> None:
         """只有 macOS 且 PATH 中存在 launchctl 时才认为可用。"""
 
-        with patch("token_monitor.service.sys.platform", "darwin"):
+        with patch("a_token_monitor.service.sys.platform", "darwin"):
             with patch(
-                "token_monitor.service.shutil.which",
+                "a_token_monitor.service.shutil.which",
                 return_value="/bin/launchctl",
             ):
                 self.assertTrue(launchd_available())
-            with patch("token_monitor.service.shutil.which", return_value=None):
+            with patch("a_token_monitor.service.shutil.which", return_value=None):
                 self.assertFalse(launchd_available())
-        with patch("token_monitor.service.sys.platform", "linux"):
+        with patch("a_token_monitor.service.sys.platform", "linux"):
             with patch(
-                "token_monitor.service.shutil.which",
+                "a_token_monitor.service.shutil.which",
                 return_value="/bin/launchctl",
             ):
                 self.assertFalse(launchd_available())

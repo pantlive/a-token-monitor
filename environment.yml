@@ -1,4 +1,4 @@
-name: token-monitor
+name: a-token-monitor
 channels:
   - conda-forge
 dependencies:

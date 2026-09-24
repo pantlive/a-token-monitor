@@ -1,4 +1,4 @@
-# token-monitor
+# a-token-monitor
 
 本地 code agent 监控器。它读取 Codex / Grok / Kimi / Command Code 账号额度、
 扫描正在运行的 Codex session JSONL，并在网页中展示账号、额度窗口、活动会话、
@@ -9,83 +9,93 @@ Command Code、Claude Code、OpenCode 等进程的异常流量。超出阈值的
 当前版本只负责观察和统计，不会因为额度状态启动新的 Codex 任务，也不提供
 额度中断后的自动处理入口。
 
-## 从 codex-reset-monitor 改名
+## 改名历史
 
-项目原名 `codex-reset-monitor`，现改名为 `token-monitor`：仓库目录、Python 包
-（`token_monitor`）、命令行程序、conda 环境和 systemd 单元都使用新名字。升级时：
+项目经历过两次改名：`codex-reset-monitor` → `token-monitor` → `a-token-monitor`
+（PyPI 上 `token-monitor` 名字已被占用）。当前仓库目录、Python 包
+（`a_token_monitor`）、命令行程序、conda 环境和 systemd 单元都使用新名字。升级时：
 
-- 后台服务需要重新安装一次，单元名才会换成 `token-monitor.service`：
-  `token-monitor --state-dir "$HOME/.token-monitor" service install ...`。
+- 后台服务需要重新安装一次，单元名才会换成 `a-token-monitor.service`：
+  `a-token-monitor --state-dir "$HOME/.a-token-monitor" service install ...`。
   在重新安装之前，`service status` / `service logs` / `service uninstall`
-  仍会自动识别并操作旧的 `codex-reset-monitor.service`。
-- 状态目录默认使用 `~/.token-monitor`；如果该目录还不存在而旧的
-  `~/.codex-reset-monitor` 存在，会继续使用旧目录，额度快照、会话记录和用量
-  索引都不会丢失。想迁移时把旧目录改名或复制为 `~/.token-monitor` 即可。
-- 旧的可执行文件 `codex-reset-monitor` 会被移除，改用 `token-monitor`。
+  仍会自动识别并操作旧的 `token-monitor.service` 和 `codex-reset-monitor.service`。
+- 状态目录默认使用 `~/.a-token-monitor`；如果该目录还不存在，会依次回退到旧的
+  `~/.token-monitor` 和 `~/.codex-reset-monitor`，额度快照、会话记录和用量
+  索引都不会丢失。想迁移时把旧目录改名或复制为 `~/.a-token-monitor` 即可。
+- 旧的可执行文件 `token-monitor` / `codex-reset-monitor` 会被移除，改用
+  `a-token-monitor`。
 
 ## 安装
 
-需要已经安装并登录 Codex CLI。项目只使用 Python 标准库，依赖环境按 conda 管理：
+需要 Python ≥ 3.10；项目只使用标准库，没有第三方运行时依赖。从 PyPI 安装：
+
+```bash
+pip install a-token-monitor
+# 或用 pipx 隔离安装
+pipx install a-token-monitor
+```
+
+也可以从源码安装，依赖环境按 conda 管理：
 
 ```bash
 conda env create -f environment.yml
-conda activate token-monitor
+conda activate a-token-monitor
 ```
 
-也可以直接使用当前 Python：
+或者使用当前 Python：
 
 ```bash
-conda run -n token-monitor python -m pip install -e .
+conda run -n a-token-monitor python -m pip install -e .
 ```
 
 ## 使用
 
-全局参数放在子命令之前。默认状态目录是 `~/.token-monitor`，默认账号是
+全局参数放在子命令之前。默认状态目录是 `~/.a-token-monitor`，默认账号是
 `~/.codex`。`--codex-home` 可以重复传入多个账号。
 
 ```bash
 # 查看当前账号额度
-token-monitor \
-  --state-dir "$HOME/.token-monitor" \
+a-token-monitor \
+  --state-dir "$HOME/.a-token-monitor" \
   quota --json
 
 # 单次发现活动会话
-token-monitor \
-  --state-dir "$HOME/.token-monitor" \
+a-token-monitor \
+  --state-dir "$HOME/.a-token-monitor" \
   sessions --json
 
 # 扫描本机 code agent 异常流量（两次采样之间默认隔 1 秒）
-token-monitor traffic --json
+a-token-monitor traffic --json
 
 # 查询已落盘的历史异常流量告警（默认最近 7 天、未读、最多 50 条）
-token-monitor --state-dir "$HOME/.token-monitor" alerts --days 7 --unread
+a-token-monitor --state-dir "$HOME/.a-token-monitor" alerts --days 7 --unread
 
 # 历史告警的已读与清理
-token-monitor --state-dir "$HOME/.token-monitor" alerts --ack-all
-token-monitor --state-dir "$HOME/.token-monitor" alerts --clear-before 30 --dry-run
-token-monitor --state-dir "$HOME/.token-monitor" alerts --prune
+a-token-monitor --state-dir "$HOME/.a-token-monitor" alerts --ack-all
+a-token-monitor --state-dir "$HOME/.a-token-monitor" alerts --clear-before 30 --dry-run
+a-token-monitor --state-dir "$HOME/.a-token-monitor" alerts --prune
 
 # 检索 token 用量历史（按日期、模型、会话）
-token-monitor --state-dir "$HOME/.token-monitor" usage --days 30 --limit 20
-token-monitor --state-dir "$HOME/.token-monitor" usage --days 0 --session 01a0c7ed --json
-token-monitor --state-dir "$HOME/.token-monitor" usage --days 90 --group model --sort tokens
-token-monitor --state-dir "$HOME/.token-monitor" usage --days 30 --group account --sort cost
-token-monitor --state-dir "$HOME/.token-monitor" usage --account account-work --group model
+a-token-monitor --state-dir "$HOME/.a-token-monitor" usage --days 30 --limit 20
+a-token-monitor --state-dir "$HOME/.a-token-monitor" usage --days 0 --session 01a0c7ed --json
+a-token-monitor --state-dir "$HOME/.a-token-monitor" usage --days 90 --group model --sort tokens
+a-token-monitor --state-dir "$HOME/.a-token-monitor" usage --days 30 --group account --sort cost
+a-token-monitor --state-dir "$HOME/.a-token-monitor" usage --account account-work --group model
 
 # 查看 agent 数据目录占用、磁盘提醒和可归档会话
-token-monitor --state-dir "$HOME/.token-monitor" disk --days 30
+a-token-monitor --state-dir "$HOME/.a-token-monitor" disk --days 30
 
 # 会话归档（先预览，加 --yes 才执行）与恢复
-token-monitor --state-dir "$HOME/.token-monitor" --codex-home "$HOME/.codex" \
+a-token-monitor --state-dir "$HOME/.a-token-monitor" --codex-home "$HOME/.codex" \
   sessions --archive --older-than 30
-token-monitor --state-dir "$HOME/.token-monitor" --codex-home "$HOME/.codex" \
+a-token-monitor --state-dir "$HOME/.a-token-monitor" --codex-home "$HOME/.codex" \
   sessions --archive --older-than 30 --yes
-token-monitor --state-dir "$HOME/.token-monitor" \
-  sessions --restore "$HOME/.token-monitor/archives/codex-sessions-20260922-170000.tar.gz"
+a-token-monitor --state-dir "$HOME/.a-token-monitor" \
+  sessions --restore "$HOME/.a-token-monitor/archives/codex-sessions-20260922-170000.tar.gz"
 
 # 持续监控两个账号并启动网页 Dashboard
-token-monitor \
-  --state-dir "$HOME/.token-monitor" \
+a-token-monitor \
+  --state-dir "$HOME/.a-token-monitor" \
   --codex-home "$HOME/.codex" \
   --codex-home "$HOME/.codex-work" \
   --commandcode-home "$HOME/.commandcode" \
@@ -134,7 +144,7 @@ Kimi Code / DeepSeek Harness / Command Code / Claude Code）的数据目录，
 修改立即热重载生效，无需重启 daemon，也不丢失用量索引检查点。
 
 目录来源的优先级为：Web 配置 > 命令行参数（`--codex-home` 等）> 自动探测默认目录。
-Web 配置持久化在状态目录的 `scan-dirs.json`（默认 `~/.token-monitor/scan-dirs.json`）；
+Web 配置持久化在状态目录的 `scan-dirs.json`（默认 `~/.a-token-monitor/scan-dirs.json`）；
 把某个 provider 的目录清空表示显式禁用该 provider，在面板中「重置」则回退到
 命令行参数或自动探测。
 
@@ -187,7 +197,7 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   只监控已启用的其他 provider（Grok / Kimi / DeepSeek Harness / Claude Code /
   Command Code）或仅监控流量与磁盘占用。每个 provider 目录独立初始化：目录不存在直接跳过，
   读取失败只记一条日志并跳过该目录，不影响其他 provider 和 Dashboard；`service install`
-  同样允许 `codex_homes: []`，此时不再解析 Codex 可执行文件。`token-monitor quota`
+  同样允许 `codex_homes: []`，此时不再解析 Codex 可执行文件。`a-token-monitor quota`
   在没有任何账号时给出可读提示并返回退出码 2。
 - 额度查询使用 Codex App Server 的 `account/rateLimits/read`，不会发送模型提示词。
 - 每个 `CODEX_HOME` 使用独立的登录状态、session 范围和额度快照。
@@ -274,7 +284,7 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   级别、触发规则、已读状态和关键词检索历史告警，可逐条或一键标记已读，
   并按当前时间范围删除历史告警（删除前会提示影响条数）。「近 15 秒外发」卡片
   显示未读告警数。历史页面只展示进程、目录、对端和字节数等元数据。
-- `token-monitor alerts` 在命令行查询同一份历史：`--days` / `--since` /
+- `a-token-monitor alerts` 在命令行查询同一份历史：`--days` / `--since` /
   `--until` 控制时间范围，`--level`、`--kind`、`--product`、`--query` 筛选，
   `--unread` / `--read` 过滤已读状态，`--json` 输出机器可读结果，`--stats`
   只看统计，`--quiet` 只用一个退出码表示「是否存在未读告警」（有未读时为 1）。
@@ -292,7 +302,7 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   `--session-context-warn-tokens`（默认 200000）时，Dashboard 顶部提示、
   「账号与额度」的会话表标出「建议开新会话」，daemon 日志也会提醒。
   超长会话每一轮都按全量上下文重新计费，任务收尾后让模型总结再开新会话更省 token。
-- `token-monitor disk` 统计 Codex / Grok / Kimi / DeepSeek Harness / Command Code
+- `a-token-monitor disk` 统计 Codex / Grok / Kimi / DeepSeek Harness / Command Code
   数据目录和监控状态目录的占用（含一级子目录排行与会话文件占比）：单个目录超过
   `--disk-warn-gb`（默认 5 GiB）或合计超过 `--disk-total-warn-gb`（默认 10 GiB）
   时提醒；daemon 每 60 秒复查一次，并按 30 分钟冷却写日志，Dashboard 顶部同步提示。
@@ -325,7 +335,7 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
   支持断点续扫与日志轮转（文件被替换或截断时自动从零重扫）。
   可用 `--claude-home` 指定目录，默认在存在时使用 `~/.claude` 或 `CLAUDE_CONFIG_DIR`。
   金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价估算。
-- `token-monitor usage` 在命令行检索同一份索引：`--days`（0 表示全部历史）或
+- `a-token-monitor usage` 在命令行检索同一份索引：`--days`（0 表示全部历史）或
   `--from` / `--to` 指定日期，`--model`（可重复）、`--session`、`--project`、
   `--account`（匹配账号 ID、profile 名或产品，例如 `codex` / `grok`）、
   `--query` 筛选，`--group` 选择分组（`session` / `date` / `model` / `account`），
@@ -368,8 +378,8 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 在已启用 systemd 的 Linux / WSL2 中，可以把监控器安装为当前用户的后台服务：
 
 ```bash
-token-monitor \
-  --state-dir "$HOME/.token-monitor" \
+a-token-monitor \
+  --state-dir "$HOME/.a-token-monitor" \
   --codex-home "$HOME/.codex" \
   service install \
   --dashboard \
@@ -380,15 +390,15 @@ token-monitor \
 WSL2 需要先在 `/etc/wsl.conf` 里启用 `systemd=true` 并重启发行版。常用管理命令：
 
 ```bash
-token-monitor --state-dir "$HOME/.token-monitor" service status
-token-monitor --state-dir "$HOME/.token-monitor" service logs --lines 100
-token-monitor --state-dir "$HOME/.token-monitor" service restart
-token-monitor --state-dir "$HOME/.token-monitor" service stop
-token-monitor --state-dir "$HOME/.token-monitor" service start
-token-monitor --state-dir "$HOME/.token-monitor" service uninstall
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service status
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service logs --lines 100
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service restart
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service stop
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service start
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service uninstall
 ```
 
-systemd 单元保存在 `~/.config/systemd/user/token-monitor.service`。
+systemd 单元保存在 `~/.config/systemd/user/a-token-monitor.service`。
 
 ## macOS 后台服务
 
@@ -396,23 +406,23 @@ systemd 单元保存在 `~/.config/systemd/user/token-monitor.service`。
 管理，参数与 Linux 完全一致：
 
 ```bash
-token-monitor \
-  --state-dir "$HOME/.token-monitor" \
+a-token-monitor \
+  --state-dir "$HOME/.a-token-monitor" \
   service install \
   --dashboard \
   --dashboard-host 127.0.0.1 \
   --dashboard-port 8765
 
-token-monitor --state-dir "$HOME/.token-monitor" service status
-token-monitor --state-dir "$HOME/.token-monitor" service logs --lines 100
-token-monitor --state-dir "$HOME/.token-monitor" service uninstall
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service status
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service logs --lines 100
+a-token-monitor --state-dir "$HOME/.a-token-monitor" service uninstall
 ```
 
-- LaunchAgent 位于 `~/Library/LaunchAgents/com.token-monitor.daemon.plist`，
-  日志写入 `~/.token-monitor/launchd.log`；卸载会一并移除 plist 与 `service.json`。
+- LaunchAgent 位于 `~/Library/LaunchAgents/com.a-token-monitor.daemon.plist`，
+  日志写入 `~/.a-token-monitor/launchd.log`；卸载会一并移除 plist 与 `service.json`。
 - 想手工安装或审查服务定义时，用 `service plist` 打印当前平台的服务定义
   （Linux 输出 systemd 单元，macOS 输出 plist），例如：
-  `token-monitor --state-dir "$HOME/.token-monitor" service plist > ~/Library/LaunchAgents/com.token-monitor.daemon.plist`。
+  `a-token-monitor --state-dir "$HOME/.a-token-monitor" service plist > ~/Library/LaunchAgents/com.a-token-monitor.daemon.plist`。
 - macOS 上没有 netlink，异常流量面板与 `traffic` 命令会明确提示「只显示进程与远端
   连接」，不会报错；字节级告警只在 Linux 生效。
 - 活动会话依赖系统自带的 `ps` 与 `lsof`（macOS 默认都有）。若 `lsof` 被裁剪，
@@ -424,20 +434,20 @@ token-monitor --state-dir "$HOME/.token-monitor" service uninstall
 
 ```powershell
 python -m pip install -e .
-token-monitor --state-dir "$env:USERPROFILE\.token-monitor" sessions
+a-token-monitor --state-dir "$env:USERPROFILE\.a-token-monitor" sessions
 ```
 
 后台服务用 Windows 计划任务实现，`service` 子命令会自动选择：
 
 ```powershell
-token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service install --dashboard
-token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service status
-token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service logs --lines 100
-token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service uninstall
+a-token-monitor --state-dir "$env:USERPROFILE\.a-token-monitor" service install --dashboard
+a-token-monitor --state-dir "$env:USERPROFILE\.a-token-monitor" service status
+a-token-monitor --state-dir "$env:USERPROFILE\.a-token-monitor" service logs --lines 100
+a-token-monitor --state-dir "$env:USERPROFILE\.a-token-monitor" service uninstall
 ```
 
-- 计划任务名 `TokenMonitor`，配置写回 `<state_dir>\service.json`，任务定义备份在
-  `<state_dir>\token-monitor-task.xml`（`service plist` 可打印同一份 XML）；
+- 计划任务名 `ATokenMonitor`，配置写回 `<state_dir>\service.json`，任务定义备份在
+  `<state_dir>\a-token-monitor-task.xml`（`service plist` 可打印同一份 XML）；
   触发方式是**登录时启动**，运行级别 `LeastPrivilege`，**不需要管理员权限**。
 - 日志写到 `<state_dir>\daemon.log`（计划任务的 stdout/stderr 重定向），
   `service logs --follow` 用 Python 轮询该文件，不依赖 `tail`。
@@ -462,21 +472,21 @@ token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service uninstall
     等后缀与 `node .../cli.js` 形式的包装。
   - 正在被 agent 打开着的会话文件在 Windows 上无法删除：归档/清理会跳过该文件并在
     结果里给出原因，而不是中断整批操作。
-  - 容器/无计划任务场景可以直接前台运行：`token-monitor ... daemon`。
+  - 容器/无计划任务场景可以直接前台运行：`a-token-monitor ... daemon`。
 
 ## 容器部署
 
 - 监控其他 agent 进程需要看到宿主机的 PID 命名空间：`docker run --pid=host ...`；
   否则用量索引（纯文件解析）照常工作，但活动会话、进程证据和流量归属都为空。
-- 状态目录挂载到容器内并保持可写，例如 `-v "$HOME/.token-monitor:/state"`，
+- 状态目录挂载到容器内并保持可写，例如 `-v "$HOME/.a-token-monitor:/state"`，
   再配 `--state-dir /state`；agent 数据目录（`~/.codex`、`~/.claude`、`~/.grok` 等）
   按需只读挂载。
 - Dashboard 端口用 `-p 8765:8765` 暴露，容器内需要 `--dashboard-host 0.0.0.0`。
-- 容器里没有 systemd/launchd 时，直接用 `token-monitor ... daemon` 前台运行
+- 容器里没有 systemd/launchd 时，直接用 `a-token-monitor ... daemon` 前台运行
   （进程管理器负责重启）；`service` 子命令会提示无法执行 `systemctl`/`launchctl`。
 - `/healthz`（存活）与 `/readyz`（就绪）可用于容器与反向代理探测。
 
-服务配置保存在 `~/.token-monitor/service.json`（两个平台一致）。卸载服务不会删除
+服务配置保存在 `~/.a-token-monitor/service.json`（两个平台一致）。卸载服务不会删除
 监控数据库或用量索引。状态目录内各文件的用途：
 
 | 文件 | 内容 |
@@ -503,9 +513,9 @@ Dashboard 除页面和只读接口（`/api/state`、`/api/usage`、`/api/usage/s
 DevDeck 可以将本项目配置为一个后端服务。工作目录填写项目根目录，启动命令使用：
 
 ```bash
-PYTHONPATH=/path/to/token-monitor/src \
-python -u -m token_monitor \
-  --state-dir "$HOME/.token-monitor" \
+PYTHONPATH=/path/to/a-token-monitor/src \
+python -u -m a_token_monitor \
+  --state-dir "$HOME/.a-token-monitor" \
   --codex-home "$HOME/.codex" \
   daemon \
   --codex /home/yourname/.local/bin/codex \

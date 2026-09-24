@@ -14,9 +14,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from token_monitor import process_backend
-from token_monitor.agents import RunningAgent, scan_running_agents
-from token_monitor.process_backend import ObservedConnection, ObservedProcess
+from a_token_monitor import process_backend
+from a_token_monitor.agents import RunningAgent, scan_running_agents
+from a_token_monitor.process_backend import ObservedConnection, ObservedProcess
 
 
 def _process_row(
@@ -239,7 +239,7 @@ class WindowsDiscoveryTests(unittest.TestCase):
     """验证 Codex 的 ProcessScanner 在 Windows 上也走平台后端。"""
 
     def test_process_scanner_uses_restart_manager_owners(self) -> None:
-        from token_monitor.discovery import ProcessScanner
+        from a_token_monitor.discovery import ProcessScanner
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from _platform_support import requires_symlinks
-from token_monitor.discovery import JsonlSessionReader, ProcessScanner
+from a_token_monitor.discovery import JsonlSessionReader, ProcessScanner
 
 
 class DiscoveryTests(unittest.TestCase):

@@ -14,9 +14,9 @@ from pathlib import Path
 from unittest import mock
 
 from _platform_support import requires_proc
-from token_monitor.accounts import build_account_specs
-from token_monitor.alerts import TrafficAlertStore
-from token_monitor.cli import (
+from a_token_monitor.accounts import build_account_specs
+from a_token_monitor.alerts import TrafficAlertStore
+from a_token_monitor.cli import (
     _monitor,
     _service_config,
     _session_usage_note,
@@ -24,20 +24,20 @@ from token_monitor.cli import (
     default_state_dir,
     main,
 )
-from token_monitor.retention import (
+from a_token_monitor.retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
 )
-from token_monitor.scan_dirs import ScanDirsConfig, ScanDirsController
-from token_monitor.service import ServiceConfig
-from token_monitor.housekeeping import DEFAULT_TOTAL_WARN_GIB
-from token_monitor.usage import (
+from a_token_monitor.scan_dirs import ScanDirsConfig, ScanDirsController
+from a_token_monitor.service import ServiceConfig
+from a_token_monitor.housekeeping import DEFAULT_TOTAL_WARN_GIB
+from a_token_monitor.usage import (
     DEFAULT_SESSION_TURN_WARN,
 )
-from token_monitor.quota import QuotaSnapshot, QuotaWindow
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.traffic import TrafficAlert
-from token_monitor.usage import UsageAggregator
+from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.traffic import TrafficAlert
+from a_token_monitor.usage import UsageAggregator
 
 
 def _sample_alert(observed_at: float | None = None) -> TrafficAlert:
@@ -160,7 +160,7 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(
             [
                 "--state-dir",
-                "~/.token-monitor",
+                "~/.a-token-monitor",
                 "--codex-home",
                 "~/.codex",
                 "--codex-home",
@@ -307,27 +307,45 @@ class CliTests(unittest.TestCase):
             home = Path(temporary_directory)
             legacy = home / ".codex-reset-monitor"
             legacy.mkdir()
-            with mock.patch("token_monitor.cli.Path.home", return_value=home):
+            with mock.patch("a_token_monitor.cli.Path.home", return_value=home):
                 reused = default_state_dir()
 
             self.assertEqual(reused, legacy)
 
             # 新建目录后自动切换到新位置。
-            (home / ".token-monitor").mkdir()
-            with mock.patch("token_monitor.cli.Path.home", return_value=home):
+            (home / ".a-token-monitor").mkdir()
+            with mock.patch("a_token_monitor.cli.Path.home", return_value=home):
                 switched = default_state_dir()
 
-            self.assertEqual(switched, home / ".token-monitor")
+            self.assertEqual(switched, home / ".a-token-monitor")
 
-    def test_default_state_dir_uses_new_name_by_default(self) -> None:
-        """没有任何历史目录时使用新的 ~/.token-monitor。"""
+    def test_default_state_dir_reuses_intermediate_directory(self) -> None:
+        """上一代 ~/.token-monitor 同样回退，且优先于更早的 codex-reset-monitor。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = Path(temporary_directory)
-            with mock.patch("token_monitor.cli.Path.home", return_value=home):
+            intermediate = home / ".token-monitor"
+            intermediate.mkdir()
+            with mock.patch("a_token_monitor.cli.Path.home", return_value=home):
+                reused = default_state_dir()
+
+            self.assertEqual(reused, intermediate)
+
+            (home / ".codex-reset-monitor").mkdir()
+            with mock.patch("a_token_monitor.cli.Path.home", return_value=home):
+                still_intermediate = default_state_dir()
+
+            self.assertEqual(still_intermediate, intermediate)
+
+    def test_default_state_dir_uses_new_name_by_default(self) -> None:
+        """没有任何历史目录时使用新的 ~/.a-token-monitor。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            with mock.patch("a_token_monitor.cli.Path.home", return_value=home):
                 resolved = default_state_dir()
 
-            self.assertEqual(resolved, home / ".token-monitor")
+            self.assertEqual(resolved, home / ".a-token-monitor")
 
     def test_quota_command_prints_kimi_windows(self) -> None:
         """quota 子命令应展示 Kimi /usages 返回的窗口。"""
@@ -357,9 +375,9 @@ class CliTests(unittest.TestCase):
             )
             with (
                 mock.patch.dict(os.environ, _missing_provider_env(root)),
-                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch("a_token_monitor.cli._accounts", return_value=()),
                 mock.patch(
-                    "token_monitor.cli.read_kimi_quota",
+                    "a_token_monitor.cli.read_kimi_quota",
                     return_value=snapshot,
                 ),
             ):
@@ -396,9 +414,9 @@ class CliTests(unittest.TestCase):
             )
             with (
                 mock.patch.dict(os.environ, _missing_provider_env(root)),
-                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch("a_token_monitor.cli._accounts", return_value=()),
                 mock.patch(
-                    "token_monitor.cli.read_kimi_quota",
+                    "a_token_monitor.cli.read_kimi_quota",
                     return_value=None,
                 ),
             ):
@@ -475,9 +493,9 @@ class CliTests(unittest.TestCase):
             )
             with (
                 mock.patch.dict(os.environ, _missing_provider_env(root)),
-                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch("a_token_monitor.cli._accounts", return_value=()),
                 mock.patch(
-                    "token_monitor.cli.read_commandcode_quota",
+                    "a_token_monitor.cli.read_commandcode_quota",
                     return_value=snapshot,
                 ),
             ):
@@ -515,9 +533,9 @@ class CliTests(unittest.TestCase):
             )
             with (
                 mock.patch.dict(os.environ, _missing_provider_env(root)),
-                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch("a_token_monitor.cli._accounts", return_value=()),
                 mock.patch(
-                    "token_monitor.cli.read_commandcode_quota",
+                    "a_token_monitor.cli.read_commandcode_quota",
                     return_value=None,
                 ),
             ):
@@ -1166,7 +1184,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary_directory)
             buffer = io.StringIO()
             with (
-                mock.patch("token_monitor.service.sys.platform", "darwin"),
+                mock.patch("a_token_monitor.service.sys.platform", "darwin"),
                 contextlib.redirect_stdout(buffer),
             ):
                 code = main(
@@ -1176,7 +1194,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         output = buffer.getvalue()
         self.assertIn("<key>Label</key>", output)
-        self.assertIn("com.token-monitor.daemon", output)
+        self.assertIn("com.a-token-monitor.daemon", output)
         self.assertIn("<key>RunAtLoad</key>", output)
         self.assertIn("<string>service</string>", output)
         self.assertIn("<string>run</string>", output)
@@ -1193,8 +1211,8 @@ class CliTests(unittest.TestCase):
             del socket.AF_NETLINK
             try:
                 with (
-                    mock.patch("token_monitor.cli.time.sleep"),
-                    mock.patch("token_monitor.traffic.time.sleep"),
+                    mock.patch("a_token_monitor.cli.time.sleep"),
+                    mock.patch("a_token_monitor.traffic.time.sleep"),
                     contextlib.redirect_stdout(buffer),
                 ):
                     code = main(
@@ -1295,7 +1313,7 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, _missing_provider_env(root)),
                 mock.patch(
-                    "token_monitor.cli.MultiAccountMonitor"
+                    "a_token_monitor.cli.MultiAccountMonitor"
                 ) as monitor_class,
             ):
                 monitor = _monitor(args)
@@ -1339,7 +1357,7 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch(
-                    "token_monitor.cli.MultiAccountMonitor"
+                    "a_token_monitor.cli.MultiAccountMonitor"
                 ) as monitor_class,
             ):
                 _monitor(args)
@@ -1365,7 +1383,7 @@ class CliTests(unittest.TestCase):
             buffer = io.StringIO()
             with (
                 mock.patch.dict(os.environ, _missing_provider_env(root)),
-                mock.patch("token_monitor.cli._accounts", return_value=()),
+                mock.patch("a_token_monitor.cli._accounts", return_value=()),
                 contextlib.redirect_stdout(buffer),
             ):
                 code = main(["--state-dir", str(state_dir), "quota"])

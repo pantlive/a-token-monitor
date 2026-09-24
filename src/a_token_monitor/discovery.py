@@ -129,7 +129,7 @@ class ProcessScanner:
         """macOS / Windows：用平台后端找到持有 session JSONL 的 agent 进程。
 
         macOS 走 ``ps`` + ``lsof``，Windows 走 Toolhelp32 + Restart Manager；
-        两者都返回统一的 :class:`~token_monitor.agents.RunningAgent`。
+        两者都返回统一的 :class:`~a_token_monitor.agents.RunningAgent`。
         """
 
         from .agents import scan_running_agents

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from token_monitor.agents import identify_agent, product_label
+from a_token_monitor.agents import identify_agent, product_label
 
 
 class AgentIdentificationTests(unittest.TestCase):
@@ -38,12 +38,12 @@ class AgentIdentificationTests(unittest.TestCase):
     def test_ignores_the_monitor_process_itself(self) -> None:
         self.assertIsNone(
             identify_agent(
-                ("python", "-m", "token_monitor", "daemon"),
+                ("python", "-m", "a_token_monitor", "daemon"),
                 "python",
             )
         )
         self.assertIsNone(
-            identify_agent(("token-monitor", "daemon"), "token-monitor")
+            identify_agent(("a-token-monitor", "daemon"), "a-token-monitor")
         )
 
     def test_product_labels_cover_requested_agents(self) -> None:

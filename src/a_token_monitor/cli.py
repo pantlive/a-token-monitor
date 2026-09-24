@@ -99,17 +99,20 @@ from .usage import (
 def default_state_dir() -> Path:
     """返回默认的本地状态目录。
 
-    改名前的旧目录 ``~/.codex-reset-monitor`` 里可能已经有额度快照、会话记录和
-    用量索引。新目录尚未建立而旧目录存在时继续使用旧目录，避免升级后丢失历史；
-    建立 ``~/.token-monitor`` 后即自动切换。
+    两次改名的旧目录 ``~/.token-monitor`` 和 ``~/.codex-reset-monitor`` 里可能已经
+    有额度快照、会话记录和用量索引。新目录尚未建立而旧目录存在时继续使用旧目录，
+    避免升级后丢失历史；建立 ``~/.a-token-monitor`` 后即自动切换。
     """
 
-    new_dir = Path.home() / ".token-monitor"
+    new_dir = Path.home() / ".a-token-monitor"
     if new_dir.is_dir():
         return new_dir
-    legacy_dir = Path.home() / ".codex-reset-monitor"
-    if legacy_dir.is_dir():
-        return legacy_dir
+    for legacy_dir in (
+        Path.home() / ".token-monitor",
+        Path.home() / ".codex-reset-monitor",
+    ):
+        if legacy_dir.is_dir():
+            return legacy_dir
     return new_dir
 
 
@@ -159,14 +162,14 @@ def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
 
     parser = argparse.ArgumentParser(
-        prog="token-monitor",
+        prog="a-token-monitor",
         description="监控 Codex / Grok / Kimi / Command Code / DeepSeek Harness 等 code agent 的额度、会话、用量和异常流量。",
     )
     parser.add_argument(
         "--state-dir",
         type=Path,
         default=default_state_dir(),
-        help="状态和日志目录（默认: ~/.token-monitor）",
+        help="状态和日志目录（默认: ~/.a-token-monitor）",
     )
     parser.add_argument(
         "--codex-home",
@@ -1953,7 +1956,7 @@ def _show_disk(args: argparse.Namespace) -> int:
         f"{preview['skipped_recent']} 个）。\n"
     )
     sys.stdout.write(
-        "执行：token-monitor sessions --archive --older-than "
+        "执行：a-token-monitor sessions --archive --older-than "
         f"{args.days} --yes 或 sessions --clean --older-than {args.days} --yes\n"
     )
     return 0
@@ -2022,7 +2025,7 @@ def _session_housekeeping(args: argparse.Namespace) -> int:
             f"manifest {result['manifest']}。\n"
         )
         sys.stdout.write(
-            f"恢复：token-monitor sessions --restore {result['archive']}\n"
+            f"恢复：a-token-monitor sessions --restore {result['archive']}\n"
         )
     else:
         sys.stdout.write(
@@ -2056,7 +2059,7 @@ def _resolve_session_paths(
         match = available.get(text) or available.get(Path(text).stem)
         if match is None:
             raise HousekeepingError(
-                f"找不到会话 {text}；可用 token-monitor sessions --all 查看会话 ID"
+                f"找不到会话 {text}；可用 a-token-monitor sessions --all 查看会话 ID"
             )
         resolved.append(match)
     return tuple(resolved)

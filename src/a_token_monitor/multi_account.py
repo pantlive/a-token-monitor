@@ -304,7 +304,7 @@ class MultiAccountMonitor:
 
         thread = threading.Thread(
             target=run,
-            name="token-monitor-usage-index",
+            name="a-token-monitor-usage-index",
             daemon=True,
         )
         self._index_thread = thread

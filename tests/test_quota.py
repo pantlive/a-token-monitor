@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from token_monitor.quota import (
+from a_token_monitor.quota import (
     merge_sparse_update,
     parse_rate_limits_result,
 )

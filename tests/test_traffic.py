@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 from _platform_support import requires_proc, requires_symlinks
-from token_monitor.process_backend import ObservedConnection, reset_cache
-from token_monitor.traffic import (
+from a_token_monitor.process_backend import ObservedConnection, reset_cache
+from a_token_monitor.traffic import (
     SocketCounters,
     TrafficAlert,
     TrafficMonitor,
@@ -168,7 +168,7 @@ class TrafficMonitorTests(unittest.TestCase):
                 root,
                 pid=30,
                 comm="python",
-                command=("python", "-m", "token_monitor", "daemon"),
+                command=("python", "-m", "a_token_monitor", "daemon"),
             )
             _write_process(
                 root,
@@ -382,7 +382,7 @@ class TrafficMonitorTests(unittest.TestCase):
             )
             monitor.poll(now=1_000.0)
             counters[9010] = _external_socket(9010, bytes_sent=10 + 9 * _MIB)
-            with self.assertLogs("token_monitor.traffic", level="ERROR"):
+            with self.assertLogs("a_token_monitor.traffic", level="ERROR"):
                 snapshot = monitor.poll(now=1_002.0)
 
         self.assertEqual(snapshot.processes[0].alert_level, "warn")
@@ -416,15 +416,15 @@ class PlatformDegradationTests(unittest.TestCase):
             )
             with (
                 mock.patch(
-                    "token_monitor.traffic.netlink_reason",
+                    "a_token_monitor.traffic.netlink_reason",
                     return_value="macOS 没有 netlink（INET_DIAG）",
                 ),
                 mock.patch(
-                    "token_monitor.traffic.scan_process_connections",
+                    "a_token_monitor.traffic.scan_process_connections",
                     return_value={10: (connection,)},
                 ),
                 mock.patch(
-                    "token_monitor.traffic.process_root",
+                    "a_token_monitor.traffic.process_root",
                     return_value=Path("/nonexistent-proc"),
                 ),
             ):

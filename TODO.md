@@ -132,13 +132,13 @@
 
 - [x] 会话卫生：长会话提醒、磁盘占用提醒、归档与清理
   - 活动会话轮数 ≥ 100 或最近一次上下文 ≥ 200k token 时提醒切换新会话，
-    Dashboard 告警区与活动会话表、`token-monitor sessions` 和 daemon 日志同步提示；
+    Dashboard 告警区与活动会话表、`a-token-monitor sessions` 和 daemon 日志同步提示；
     阈值可用 `--session-turn-warn` / `--session-context-warn-tokens` 调整。
   - 统计 Codex / Grok / Kimi / DeepSeek Harness / Command Code 数据目录和状态目录
     占用（含一级子目录排行），单目录 5 GiB / 合计 10 GiB 阈值提醒并可配置。
   - 会话归档打包 tar.gz + manifest（含 sha256 与用量摘要）后删除原文件，可恢复；
     也支持直接清理；两者都先预览、显式确认，并跳过活动会话与过新文件。
-  - Dashboard「磁盘与会话管理」区、`token-monitor disk` 与
+  - Dashboard「磁盘与会话管理」区、`a-token-monitor disk` 与
     `sessions --archive/--clean/--restore` 提供同样的能力。
   - v1 只归档/清理 Codex session JSONL；其他 agent 目录只统计和提醒。
 
@@ -147,7 +147,7 @@
   - Dashboard 新增「用量检索」区：会话明细 / 按日期汇总 / 按模型汇总 / 按账号汇总
     四种视图，支持最近活动、token 用量、估算金额排序与翻页，可点击会话 ID 下钻。
   - `GET /api/usage/search` 提供同等的查询能力，单次扫描上限 20 万条并返回截断标记。
-  - `token-monitor usage` 命令行支持 `--days` / `--from` / `--to` / `--model` /
+  - `a-token-monitor usage` 命令行支持 `--days` / `--from` / `--to` / `--model` /
     `--session` / `--project` / `--account` / `--query` / `--group` / `--sort` / `--json`。
   - 只读取 token 元数据，不读取提示词或工具输出等对话内容。
 
@@ -199,7 +199,7 @@
   - Dashboard 新增「告警历史」区，展示实时通知与历史告警，KPI 卡片显示未读数。
   - 支持已读状态、时间段 / 级别 / 规则 / 关键词筛选、单条与批量清理，以及
     5 分钟合并窗口内的重复告警合并；`--alert-retention-days` 控制保留天数。
-  - `token-monitor alerts` 提供同等的命令行查询、已读和清理能力。
+  - `a-token-monitor alerts` 提供同等的命令行查询、已读和清理能力。
   - 暂不接入邮件、Telegram、企业微信等外部通知渠道。
 
 - [x] Command Code 订阅额度与账号管理

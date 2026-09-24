@@ -1,4 +1,4 @@
-# token-monitor 跨平台 CI：在 Linux / macOS / Windows 上跑同一套 unittest 用例。
+# a-token-monitor 跨平台 CI：在 Linux / macOS / Windows 上跑同一套 unittest 用例。
 #
 # 三个平台跑完全相同的两步检查：`ruff check src tests` 与 `python -m pytest -q`
 # （Windows 的 job 也一样跑这两步，不做任何裁剪），差异只体现在 pytest 的跳过项上。
@@ -47,7 +47,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # 中文注释：项目零运行时依赖，按 PEP 517 可编辑安装，让 src 布局与
-      # token-monitor 控制台脚本在三个平台都能被导入。
+      # a-token-monitor 控制台脚本在三个平台都能被导入。
       - name: 安装项目（零依赖）
         run: python -m pip install -e .
 

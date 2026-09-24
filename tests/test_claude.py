@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from _platform_support import requires_symlinks
-from token_monitor.claude import (
+from a_token_monitor.claude import (
     claude_home_for,
     claude_has_inline_sidechains,
     claude_session_id,
@@ -23,8 +23,8 @@ from token_monitor.claude import (
     resolve_sidechain_policy,
     subagent_transcripts,
 )
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.usage import UsageAggregator, _lookup_pricing
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage import UsageAggregator, _lookup_pricing
 
 
 def _assistant_line(

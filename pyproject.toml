@@ -1,23 +1,37 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "token-monitor"
+name = "a-token-monitor"
 version = "0.9.0"
 description = "Monitor Codex, Grok, Kimi, DeepSeek Harness and other code agents"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "pantlive", email = "clickly@163.com" },
+]
+keywords = ["codex", "claude", "kimi", "grok", "token", "usage", "monitor"]
 dependencies = []
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
 ]
 
+[project.urls]
+Homepage = "https://github.com/pantlive/a-token-monitor"
+Repository = "https://github.com/pantlive/a-token-monitor"
+Issues = "https://github.com/pantlive/a-token-monitor/issues"
+
 [project.scripts]
-token-monitor = "token_monitor.cli:main"
+a-token-monitor = "a_token_monitor.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -25,4 +39,4 @@ where = ["src"]
 [tool.ruff.lint.per-file-ignores]
 # Dashboard 内嵌的 HTML/CSS/JavaScript 使用长行保持浏览器模板可读；Python 代码仍按
 # 默认 Ruff 规则检查。
-"src/token_monitor/dashboard.py" = ["E501"]
+"src/a_token_monitor/dashboard.py" = ["E501"]

@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.usage import (
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage import (
     SessionSwitchThresholds,
     TokenUsage,
     UsageAggregator,

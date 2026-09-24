@@ -9,20 +9,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from token_monitor.app_server import AppServerError
-from token_monitor.discovery import JsonlSessionReader, ProcessObservation
-from token_monitor.monitor import (
+from a_token_monitor.app_server import AppServerError
+from a_token_monitor.discovery import JsonlSessionReader, ProcessObservation
+from a_token_monitor.monitor import (
     AppServerThread,
     MonitorConfig,
     MultiSessionMonitor,
 )
-from token_monitor.multi_models import (
+from a_token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
     TrackedSession,
 )
-from token_monitor.quota import QuotaSnapshot, QuotaWindow
-from token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.registry import MultiSessionRegistry
 
 
 class _FakeAppServer:
@@ -482,7 +482,7 @@ class MonitorTests(unittest.TestCase):
             monitor.scan_processes(now=100)
             monitor.finalize_sessions(now=100)
             with patch(
-                "token_monitor.monitor.subprocess.Popen",
+                "a_token_monitor.monitor.subprocess.Popen",
                 _FakeResumeProcess,
             ):
                 started = monitor.resume_due(now=100)

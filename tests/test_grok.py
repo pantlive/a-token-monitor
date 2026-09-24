@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from _platform_support import requires_symlinks
-from token_monitor.grok import (
+from a_token_monitor.grok import (
     decode_grok_project,
     list_grok_active_sessions,
     parse_grok_log_chunk,
@@ -16,8 +16,8 @@ from token_monitor.grok import (
     read_grok_quota,
     resolve_grok_homes,
 )
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 
 class GrokUsageTests(unittest.TestCase):

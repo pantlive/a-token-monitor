@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from _platform_support import requires_chmod
-from token_monitor.scan_dirs import (
+from a_token_monitor.scan_dirs import (
     PROVIDER_SPECS,
     EffectiveScanDirs,
     ProviderSpec,
@@ -122,7 +122,7 @@ class ValidateDirectoryTests(unittest.TestCase):
             root = Path(temporary_directory)
             home = root / "home"
             home.mkdir()
-            state_dir = home / ".token-monitor"
+            state_dir = home / ".a-token-monitor"
             state_dir.mkdir()
 
             result = validate_directory(

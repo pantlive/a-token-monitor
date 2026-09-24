@@ -8,15 +8,15 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from token_monitor.multi_models import (
+from a_token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
     TrackedSession,
     display_session_error,
     session_view,
 )
-from token_monitor.registry import MultiSessionRegistry
-from token_monitor.usage import (
+from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage import (
     SessionSwitchThresholds,
     UsageAggregator,
     enrich_session_views,
