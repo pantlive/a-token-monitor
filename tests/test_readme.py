@@ -56,6 +56,31 @@ def _command_blocks(text: str) -> list[str]:
     return blocks
 
 
+def _table_rows(text: str) -> list[list[str]]:
+    """按行拆出 Markdown 表格单元格，用于对齐两版的表格规模。"""
+
+    rows: list[list[str]] = []
+    for line in text.splitlines():
+        if line.startswith("|"):
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
+
+
+def _provider_column(text: str) -> list[str]:
+    """provider 表的首列（表头为 ``Provider``，两版同名所以可以直接比对）。"""
+
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("| Provider |"):
+            names: list[str] = []
+            for row in lines[index + 2:]:
+                if not row.startswith("|"):
+                    break
+                names.append(row.strip().strip("|").split("|")[0].strip())
+            return names
+    return []
+
+
 class ReadmeBilingualTest(unittest.TestCase):
     def setUp(self) -> None:
         self.chinese = CHINESE_README.read_text(encoding="utf-8")
@@ -94,6 +119,29 @@ class ReadmeBilingualTest(unittest.TestCase):
             _command_blocks(self.chinese),
             _command_blocks(self.english),
             "中英两版的命令行示例已经不一致：请让英文版逐字保留同一条命令",
+        )
+
+    def test_tables_stay_in_step(self):
+        """表格最容易一边改了另一边忘记：行数要一致，provider 表首列要逐一对齐。"""
+
+        self.assertEqual(
+            len(_table_rows(self.chinese)),
+            len(_table_rows(self.english)),
+            "两版表格行数不一致，请同步表格内容",
+        )
+        providers = _provider_column(self.chinese)
+        self.assertEqual(providers, _provider_column(self.english))
+        self.assertEqual(
+            providers,
+            [
+                "Codex",
+                "Grok",
+                "Kimi Code",
+                "DeepSeek Harness",
+                "Command Code",
+                "Claude Code",
+            ],
+            "provider 表首列与支持列表不一致",
         )
 
     def test_english_readme_has_no_chinese_prose(self):

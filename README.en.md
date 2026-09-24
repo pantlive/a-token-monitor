@@ -149,7 +149,8 @@ All of these work on both `daemon` and `service install`.
   ID and profile move to a secondary line. Codex plan names are read from the
   `chatgpt_plan_type` claim of `id_token` in the local `auth.json` (the token content
   itself is not parsed); Grok and Command Code use the plan names returned by their own
-  quota endpoints.
+  quota endpoints, and Claude Code uses the subscription type (Pro / Max, …) stored in
+  its local credentials.
 - **Usage & cost estimation**: switch between the account / model / project dimensions
   with one set of aggregation rules; filters stack, the table ends with a total row and
   share percentages, and the Top 5 accounts and projects by cost are always shown.
@@ -208,7 +209,7 @@ endpoints; click it for details about the failing components.
 | Kimi Code | `GET {base}/usages` (including booster-wallet reconciliation) | Open `state.json` / `wire.jsonl` | wire logs |
 | DeepSeek Harness | No local quota window | Open `session.lock` | projcache |
 | Command Code | `/alpha/whoami`, `/alpha/billing/*`, `/alpha/usage/summary` | Open session JSONL, falling back to a working-directory lookup | Session JSONL |
-| Claude Code | None | Open session JSONL (only the file header is read) | `message.usage` in session JSONL |
+| Claude Code | OAuth usage endpoint (5-hour / week / Design windows) | Open session JSONL (only the file header is read) | `message.usage` in session JSONL |
 
 Shared rules:
 
@@ -221,6 +222,13 @@ Shared rules:
 - When a Kimi access token expires it is refreshed with the same directory-lock protocol
   as the official CLI and written back atomically; every quota endpoint is cached
   (60 seconds on success, 15 seconds on failure) so that polling does not repeat requests.
+- Claude Code quotas are read from `/api/oauth/usage` (the same undisclosed endpoint the
+  Claude Code `/usage` command uses, so it may change upstream): Linux / Windows read
+  `~/.claude/.credentials.json`, macOS reads the “Claude Code-credentials” Keychain entry.
+  An expired access token is not refreshed here (Claude Code refreshes it itself), and the
+  endpoint rate-limits aggressively, so successful results are cached for 5 minutes and
+  failures for 1 minute; when it is rate-limited or unreadable, only the account identity
+  is shown and local usage statistics are unaffected.
 
 Built-in unit prices cover the GPT-6 family (`gpt-6-astra/sol/luna`), Xiaomi MiMo, Zhipu
 GLM (the `glm-5.3` family) and StepFun (`step-5-preview`); aggregator prefixes, letter
