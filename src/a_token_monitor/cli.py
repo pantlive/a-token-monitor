@@ -13,7 +13,13 @@ from typing import Callable, Mapping, Sequence
 
 from .accounts import CodexAccount, build_account_specs
 from .claude import list_claude_active_sessions, read_claude_account
-from .i18n import active_language, resolve_language, translate, use_language
+from .i18n import (
+    active_language,
+    localize_payload,
+    resolve_language,
+    translate,
+    use_language,
+)
 from .agents import product_label
 from .housekeeping import (
     DEFAULT_SINGLE_WARN_GIB,
@@ -933,7 +939,7 @@ def _show_status(store: StateStore, as_json: bool) -> int:
 
     summary = _state_summary(state)
     if as_json:
-        sys.stdout.write(f"{json.dumps(summary, ensure_ascii=False, indent=2)}\n")
+        sys.stdout.write(f"{_dump_json(summary)}\n")
         return 0
 
     sys.stdout.write(f"任务: {state.job_id}\n")
@@ -1197,7 +1203,7 @@ def _show_quota(args: argparse.Namespace) -> int:
             output: object = results[0]
         else:
             output = {"accounts": results, "errors": errors}
-        sys.stdout.write(f"{json.dumps(output, ensure_ascii=False, indent=2)}\n")
+        sys.stdout.write(f"{_dump_json(output)}\n")
         return 0 if results else 2
 
     if not results and not errors:
@@ -1514,7 +1520,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
         if item.get("jsonl_path")
     }
     if args.json:
-        sys.stdout.write(f"{json.dumps(summaries, ensure_ascii=False, indent=2)}\n")
+        sys.stdout.write(f"{_dump_json(summaries)}\n")
         return 0
     if not sessions and not extra_sessions:
         sys.stdout.write("没有发现活动会话。\n")
@@ -1602,7 +1608,7 @@ def _show_traffic(args: argparse.Namespace) -> int:
     snapshot = monitor.poll()
     payload = snapshot.to_dict()
     if args.json:
-        sys.stdout.write(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
+        sys.stdout.write(f"{_dump_json(payload)}\n")
         return 1 if snapshot.alerts else 0
     process_only = snapshot.source == "process-only"
     if snapshot.source == "unavailable":
@@ -1729,7 +1735,7 @@ def _show_alerts(args: argparse.Namespace) -> int:
         return 1 if stats["unread"] else 0
     if args.json:
         sys.stdout.write(
-            f"{json.dumps({'stats': stats, 'alerts': [item.to_dict() for item in alerts], 'has_more': has_more}, ensure_ascii=False, indent=2)}\n"
+            f"{_dump_json({'stats': stats, 'alerts': [item.to_dict() for item in alerts], 'has_more': has_more})}\n"
         )
         return 1 if stats["unread"] else 0
     sys.stdout.write(
@@ -1833,7 +1839,7 @@ def _show_usage_search(args: argparse.Namespace) -> int:
     facets = aggregator.usage_facets()
     if args.json:
         sys.stdout.write(
-            f"{json.dumps({'facets': facets, 'search': search}, ensure_ascii=False, indent=2)}\n"
+            f"{_dump_json({'facets': facets, 'search': search})}\n"
         )
         return 0
     if not facets.get("available"):
@@ -1963,7 +1969,7 @@ def _show_disk(args: argparse.Namespace) -> int:
     )
     if args.json:
         sys.stdout.write(
-            f"{json.dumps({'report': report, 'preview': preview}, ensure_ascii=False, indent=2)}\n"
+            f"{_dump_json({'report': report, 'preview': preview})}\n"
         )
         return 0
     totals = report["totals"]
@@ -2014,7 +2020,7 @@ def _session_housekeeping(args: argparse.Namespace) -> int:
         result = monitor.restore(args.restore, destination=args.to)
         if args.json:
             sys.stdout.write(
-                f"{json.dumps(result, ensure_ascii=False, indent=2)}\n"
+                f"{_dump_json(result)}\n"
             )
         else:
             sys.stdout.write(
@@ -2056,7 +2062,7 @@ def _session_housekeeping(args: argparse.Namespace) -> int:
     else:
         result = monitor.clean(criteria, confirm=True)
     if args.json:
-        sys.stdout.write(f"{json.dumps(result, ensure_ascii=False, indent=2)}\n")
+        sys.stdout.write(f"{_dump_json(result)}\n")
         return 0
     if result["count"] == 0:
         sys.stdout.write("没有符合条件的会话文件，未做任何改动。\n")
@@ -2352,6 +2358,16 @@ def _configure_output_encoding() -> None:
             reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):  # pragma: no cover - 特殊流不支持时忽略
             continue
+
+
+def _dump_json(payload: object) -> str:
+    """输出 JSON：英文环境下按目录表翻译字符串值，和 /api/* 的处理一致。"""
+
+    return json.dumps(
+        localize_payload(payload, active_language()),
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def _localize_parser(parser: argparse.ArgumentParser) -> None:
