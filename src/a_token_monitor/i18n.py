@@ -205,6 +205,12 @@ class TranslatedStream:
             self._buffer = ""
         self._stream.flush()
 
+    def detach(self) -> None:
+        """把缓冲里剩下的内容写出去，并返回被包装的原始流。"""
+
+        self.flush()
+        return self._stream
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
 
@@ -224,6 +230,11 @@ def use_language(lang: str) -> None:
     global _ACTIVE_LANGUAGE
     _ACTIVE_LANGUAGE = lang
     if lang != "en":
+        # 回到源语言：之前包过翻译代理就拆掉（同进程内反复切换时不留残留）。
+        if isinstance(sys.stdout, TranslatedStream):
+            sys.stdout = sys.stdout.detach()
+        if isinstance(sys.stderr, TranslatedStream):
+            sys.stderr = sys.stderr.detach()
         return
     stdout = sys.stdout
     stderr = sys.stderr
