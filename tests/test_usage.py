@@ -27,6 +27,8 @@ class UsageAggregatorTests(unittest.TestCase):
     """验证 token 增量、模型归属、时间窗口和账号归组。"""
 
     def test_reads_cumulative_usage_and_updates_after_append(self) -> None:
+        # 中文注释：这条用例需要一个「没有公开单价」的模型来验证未定价分支，
+        # 因此用不会进价目表的占位 ID；不要换成真实模型名（例如 glm-5.3）。
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             session_path = root / ".codex" / "sessions" / "session.jsonl"
@@ -191,7 +193,9 @@ class UsageAggregatorTests(unittest.TestCase):
                                 "timestamp": "2026-08-27T11:30:00Z",
                                 "type": "event_msg",
                                 "payload": {
-                                    "thread_settings": {"model": "glm-5.3"},
+                                    "thread_settings": {
+                                        "model": "local-experimental-model-xyz"
+                                    },
                                 },
                             },
                             {
@@ -222,7 +226,10 @@ class UsageAggregatorTests(unittest.TestCase):
             self.assertEqual(mixed_account["total_tokens"], 700)
             self.assertEqual(mixed_account["estimated_credits"], known_credits)
             self.assertEqual(mixed_account["estimated_cost_usd"], known_cost)
-            self.assertEqual(mixed_account["unpriced_models"], ["glm-5.3"])
+            self.assertEqual(
+                mixed_account["unpriced_models"],
+                ["local-experimental-model-xyz"],
+            )
             self.assertFalse(mixed_account["pricing_complete"])
 
     def test_never_exposes_partial_totals_as_final_usage(self) -> None:
@@ -429,6 +436,61 @@ class UsageAggregatorTests(unittest.TestCase):
         self.assertIsNotNone(_lookup_pricing("MiMo-V2.6-Flash-RL"))
         self.assertIsNotNone(_lookup_pricing("gpt-6-sol-2026-09-22"))
         self.assertIsNotNone(_lookup_pricing("GPT-6-Luna"))
+
+    def test_applies_glm_and_step_api_pricing(self) -> None:
+        """GLM-5.3 系列与阶跃 Step-5-Preview 也要能算出 API 等价金额。"""
+
+        small = TokenUsage(
+            input_tokens=100_000,
+            cached_input_tokens=20_000,
+            output_tokens=5_000,
+            total_tokens=105_000,
+        )
+        # Z.ai 官方美元价目（每百万 token）：glm-5.3 $1.4/$0.26/$4.4、
+        # glm-5.3-flash $0.15/$0.03/$0.5、glm-5.3-flashx $0.37/$0.075/$1.25。
+        # uncached 80k×单价 + cached 20k×缓存价 + output 5k×输出价。
+        self.assertAlmostEqual(
+            _estimate_usage(small, "glm-5.3")["estimated_cost_usd"],
+            0.1392,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(small, "glm-5.3-flash")["estimated_cost_usd"],
+            0.0151,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(small, "glm-5.3-flashx")["estimated_cost_usd"],
+            0.03735,
+        )
+        # 阶跃官方价目 ¥7 / ¥0.35 / ¥20，按 7.0 折算：$1 / $0.05 / $2.86。
+        self.assertAlmostEqual(
+            _estimate_usage(small, "step-5-preview")["estimated_cost_usd"],
+            0.0953,
+        )
+        # 官方都没有长上下文加价：300K 输入就是单价的线性放大。
+        long_usage = TokenUsage(input_tokens=300_000, total_tokens=300_000)
+        self.assertAlmostEqual(
+            _estimate_usage(long_usage, "glm-5.3")["estimated_cost_usd"],
+            0.42,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(long_usage, "step-5-preview")["estimated_cost_usd"],
+            0.3,
+        )
+        # 聚合商前缀、大小写与官方快照后缀都要命中同一份价格。
+        for model in (
+            "z-ai/glm-5.3-flash",
+            "GLM-5.3",
+            "glm-5.3-flash-2601",
+            "stepfun/step-5-preview",
+        ):
+            with self.subTest(model=model):
+                self.assertIsNotNone(_lookup_pricing(model))
+        # flash 与 flashx 不能互相抢：各自命中自己的价目。
+        flash = _lookup_pricing("glm-5.3-flash")
+        flashx = _lookup_pricing("glm-5.3-flashx")
+        assert flash is not None and flashx is not None
+        self.assertEqual(flash.input_usd, 0.15)
+        self.assertEqual(flashx.input_usd, 0.37)
 
     def test_indexes_history_with_a_bounded_read_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

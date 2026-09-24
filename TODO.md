@@ -169,6 +169,16 @@
   - 产品展示名抽成公用函数 `accountProductLabel()`，卡片与排行不再各写一套映射；
     排行渲染改为接收「标签 HTML」函数，项目排行仍显示「项目 · 账号」。
 
+- [x] 补充 GLM 与阶跃的定价
+  - `glm-5.3`（$1.4/$0.26/$4.4）、`glm-5.3-flash`（$0.15/$0.03/$0.5）、
+    `glm-5.3-flashx`（$0.37/$0.075/$1.25）取 Z.ai 官方美元价目；
+    `step-5-preview` 官方为人民币 ¥7/¥0.35/¥20，按 7.0 折算为 $1/$0.05/$2.86。
+    官方都没有长上下文分段计费，三个倍率显式设为 1.0。
+  - 面板定价来源新增 `zai_api_source` / `stepfun_api_source`。
+  - 顺手修掉一条会过期的用例：`test_reads_cumulative_usage_and_updates_after_append`
+    原来拿 `glm-5.3` 当「未定价模型」，价格入库后前提失效，改用占位 ID
+    `local-experimental-model-xyz` 并注明原因。
+
 - [x] Command Code 活动会话读取
   - 原来只认 `/proc/<pid>/fd` 里的会话句柄，而官方 CLI 只在写入瞬间打开文件，
     所以多数时间识别不到活动会话（卡片一直显示 0 个活动）。
