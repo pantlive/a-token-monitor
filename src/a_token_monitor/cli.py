@@ -61,7 +61,13 @@ from .multi_models import (
 )
 from .models import JobState
 from .registry import MultiSessionRegistry, RegistryError
-from .quota import QuotaSnapshot
+from .quota import (
+    QuotaSnapshot,
+    QuotaWindow,
+    quota_period,
+    quota_period_label,
+    quota_window_duration,
+)
 from .quota_fallback import read_jsonl_quota, recent_session_paths
 from .retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
@@ -918,12 +924,22 @@ def _show_status(store: StateStore, as_json: bool) -> int:
         sys.stdout.write("已观察额度窗口:\n")
         for name, window in state.rate_limits.items():
             used_percent = window.get("used_percent")
-            window_minutes = window.get("window_minutes")
+            policy = QuotaWindow(
+                limit_id="codex",
+                name=str(name),
+                used_percent=used_percent if isinstance(used_percent, (int, float)) else None,
+                window_minutes=(
+                    float(window["window_minutes"])
+                    if isinstance(window.get("window_minutes"), (int, float))
+                    else None
+                ),
+                resets_at=None,
+            )
             sys.stdout.write(
                 "  "
-                f"{name}: 使用 {used_percent if used_percent is not None else '未知'}%"
-                f"，窗口 {window_minutes if window_minutes is not None else '未知'}"
-                " 分钟\n"
+                f"{quota_period_label(quota_period(policy))}窗口（{name}）: "
+                f"使用 {used_percent if used_percent is not None else '未知'}%，"
+                f"窗口 {quota_window_duration(policy)}\n"
             )
     sys.stdout.write(f"日志: {state.log_file}\n")
     if state.last_error:
@@ -1185,15 +1201,13 @@ def _show_quota(args: argparse.Namespace) -> int:
                 if window.used_percent is not None
                 else "未知"
             )
-            duration = (
-                f"{window.window_minutes:g} 分钟"
-                if window.window_minutes is not None
-                else "未知"
-            )
+            duration = quota_window_duration(window)
+            period = quota_period_label(quota_period(window))
             reached = window.reached_type or "未命中"
             sys.stdout.write(
-                f"{window.limit_id}/{window.name}: 使用 {used}，窗口 {duration}，"
-                f"重置 {_format_timestamp(window.resets_at)}，状态 {reached}\n"
+                f"{period}窗口（{window.limit_id}/{window.name}）: 使用 {used}，"
+                f"窗口 {duration}，重置 {_format_timestamp(window.resets_at)}，"
+                f"状态 {reached}\n"
             )
         printed += 1
     for summary in results:
@@ -1213,16 +1227,7 @@ def _show_quota(args: argparse.Namespace) -> int:
             for window in windows:
                 if not isinstance(window, dict):
                     continue
-                used_percent = window.get("used_percent")
-                used = (
-                    f"{used_percent:g}%"
-                    if isinstance(used_percent, (int, float))
-                    else "未知"
-                )
-                sys.stdout.write(
-                    f"{window.get('limit_id')}/{window.get('name')}: 使用 {used}，"
-                    f"重置 {_format_timestamp(window.get('resets_at'))}\n"
-                )
+                _write_quota_windows((window,))
         printed += 1
     for summary in results:
         if summary.get("product") != "kimi":
@@ -1241,16 +1246,7 @@ def _show_quota(args: argparse.Namespace) -> int:
             for window in kimi_windows:
                 if not isinstance(window, dict):
                     continue
-                used_percent = window.get("used_percent")
-                used = (
-                    f"{used_percent:g}%"
-                    if isinstance(used_percent, (int, float))
-                    else "未知"
-                )
-                sys.stdout.write(
-                    f"{window.get('limit_id')}/{window.get('name')}: 使用 {used}，"
-                    f"重置 {_format_timestamp(window.get('resets_at'))}\n"
-                )
+                _write_quota_windows((window,))
         else:
             sys.stdout.write(
                 "配额暂不可读（网络或登录状态问题），可在 kimi CLI 中用 /usage "
@@ -1286,16 +1282,7 @@ def _show_quota(args: argparse.Namespace) -> int:
             for window in commandcode_windows:
                 if not isinstance(window, dict):
                     continue
-                used_percent = window.get("used_percent")
-                used = (
-                    f"{used_percent:g}%"
-                    if isinstance(used_percent, (int, float))
-                    else "未知"
-                )
-                sys.stdout.write(
-                    f"{window.get('limit_id')}/{window.get('name')}: 使用 {used}，"
-                    f"重置 {_format_timestamp(window.get('resets_at'))}\n"
-                )
+                _write_quota_windows((window,))
         else:
             sys.stdout.write(
                 "配额暂不可读（网络或登录状态问题），可在 command-code CLI 中"
@@ -1305,6 +1292,41 @@ def _show_quota(args: argparse.Namespace) -> int:
     for error in errors:
         sys.stdout.write(f"账号 {error['account']} 查询失败: {error['error']}\n")
     return 0 if printed else 2
+
+
+def _write_quota_windows(windows: Sequence[object], indent: str = "") -> None:
+    """按统一周期口径打印额度窗口。
+
+    各 provider 的返回格式不一样（limit_id / name / window_minutes 的字典），
+    这里先转成 ``QuotaWindow`` 再用 ``quota_period`` 归类，命令行就不会再出现
+    ``codex/primary`` 这种看不出周期的标题。
+    """
+
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        used_percent = window.get("used_percent")
+        minutes = window.get("window_minutes")
+        policy = QuotaWindow(
+            limit_id=str(window.get("limit_id") or "codex"),
+            name=str(window.get("name") or "unknown"),
+            used_percent=(
+                used_percent if isinstance(used_percent, (int, float)) else None
+            ),
+            window_minutes=(
+                float(minutes) if isinstance(minutes, (int, float)) else None
+            ),
+            resets_at=None,
+        )
+        used = (
+            f"{used_percent:g}%" if isinstance(used_percent, (int, float)) else "未知"
+        )
+        sys.stdout.write(
+            f"{indent}{quota_period_label(quota_period(policy))}窗口"
+            f"（{policy.limit_id}/{policy.name}）: 使用 {used}，"
+            f"窗口 {quota_window_duration(policy)}，"
+            f"重置 {_format_timestamp(window.get('resets_at'))}\n"
+        )
 
 
 def _show_sessions(args: argparse.Namespace) -> int:

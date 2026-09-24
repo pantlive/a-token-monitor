@@ -61,7 +61,12 @@ from .kimi import (
     resolve_kimi_homes,
 )
 from .multi_models import TrackedSession, session_view
-from .quota import QuotaSnapshot
+from .quota import (
+    QuotaSnapshot,
+    quota_period,
+    quota_period_label,
+    quota_window_duration,
+)
 from .registry import MultiSessionRegistry, RegistryError
 from .retention import HistoryDataManager, RetentionController, RetentionError
 from .scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
@@ -283,11 +288,7 @@ _BASE_CSS = r"""
     .card { padding: 16px; }
     .card-label { color: var(--muted); font-size: 12px; }
     .card-value { margin-top: 5px; font-size: 24px; font-weight: 700; }
-    .quota-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 12px;
-    }
+    .quota-rows { display: grid; gap: 8px; }
     .account-list { display: grid; gap: 16px; }
     .account-block {
       padding: 16px;
@@ -312,18 +313,13 @@ _BASE_CSS = r"""
       letter-spacing: .04em;
     }
     .account-block .account-subtitle:first-of-type { margin-top: 0; }
-    .account-block .quota-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
     .account-block .table-wrap { margin: 0 -8px -8px; }
-    .quota-card { padding: 16px; }
-    .quota-title { display: flex; justify-content: space-between; gap: 8px; }
-    .quota-name { font-weight: 700; }
-    .quota-percent { font-size: 20px; font-weight: 700; }
+    .quota-row { display: grid; align-items: center; column-gap: 10px; }
+    .quota-row-label { display: flex; align-items: center; gap: 6px; }
     .bar { height: 8px; margin: 12px 0; border-radius: 99px; background: var(--panel-soft); overflow: hidden; }
     .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
     .bar > span.warn { background: var(--yellow); }
     .bar > span.danger { background: var(--red); }
-    .quota-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; color: var(--muted); font-size: 12px; }
-    .quota-meta dd { margin: 0; color: var(--text); text-align: right; }
     .panel { margin-top: 24px; padding: 18px; overflow: hidden; }
     .panel-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 19px; }
@@ -595,18 +591,36 @@ _DASHBOARD_CSS = r"""
     .plan-badge { padding: 4px 8px; border: 1px solid var(--cyan-border); border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
     .account-activity { color: var(--muted); font-size: 11px; }
     .account-block .account-subtitle:first-of-type { margin-top: 17px; }
-    .quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 11px; }
-    .quota-card { padding: 15px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
-    .quota-title { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
-    .quota-name { color: var(--muted-strong); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
-    .quota-percent { color: var(--text); font-size: 20px; font-weight: 750; letter-spacing: -.04em; }
+    /* 中文注释：额度行固定四列（周期 / 进度条 / 百分比 / 重置与时长）、固定行高，
+       缺的周期也占位，所以不同订阅的卡片同构、同名行对齐。 */
+    .quota-row {
+      /* 两行布局：第一行「周期 / 进度条 / 百分比」，第二行把重置时间放在进度条下方。
+         卡片并排时宽度会变，固定四列会把右侧文案挤出卡片，所以让重置换行。 */
+      grid-template-columns: 92px minmax(90px, 1fr) auto;
+      grid-template-areas: "label bar percent" "label meta meta";
+      row-gap: 3px;
+      min-height: 52px;
+      padding: 8px 11px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface-raised);
+    }
+    .quota-row-label { grid-area: label; color: var(--muted-strong); font-size: 12px; font-weight: 650; }
+    .quota-bar { grid-area: bar; }
+    .quota-row-percent { grid-area: percent; color: var(--text); font-size: 15px; font-weight: 700; letter-spacing: -.02em; white-space: nowrap; }
+    .quota-row-percent.warn { color: var(--yellow-text); }
+    .quota-row-percent.danger { color: var(--red-text); }
+    .quota-row-percent.absent { color: var(--muted-dim); font-size: 12px; font-weight: 600; }
+    .quota-row-meta { grid-area: meta; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .quota-row.absent { border-style: dashed; background: transparent; }
+    .quota-row.absent .quota-bar > span { width: 0 !important; }
+    .quota-bar { margin: 0; }
+    .quota-badge { padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 10px; font-weight: 600; white-space: nowrap; }
+    .quota-note { padding: 12px 13px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
     .bar { height: 6px; margin: 13px 0 12px; border-radius: 99px; background: var(--track); overflow: hidden; }
     .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
     .bar > span.warn { background: var(--yellow); }
     .bar > span.danger { background: var(--red); }
-    .quota-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; color: var(--muted); font-size: 11px; }
-    .quota-meta dt, .quota-meta dd { margin: 0; }
-    .quota-meta dd { color: var(--muted-strong); text-align: right; overflow-wrap: anywhere; }
     .session-table table { min-width: 1020px; }
     .session-id { color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
     .cwd, .event, .error-text { max-width: 340px; overflow-wrap: anywhere; }
@@ -1708,20 +1722,93 @@ __THEME_TOGGLE__
     return raw.charAt(0).toUpperCase() + raw.slice(1);
   };
   const statusClass = (status) => ['running', 'limit_blocked', 'waiting_for_approval', 'failed', 'orphaned'].includes(status) ? status : 'other';
-  const renderQuotaCards = (quotas) => {
-    if (!Array.isArray(quotas) || quotas.length === 0) {
-      return '<div class="muted">暂无有效额度窗口</div>';
+  // 额度窗口统一成固定行：5 小时 / 周 / 月永远都在、顺序固定，缺的周期显示「不适用」，
+  // 这样不同订阅的卡片同构、同名行横向对齐；完全没有额度窗口的订阅只给一行说明。
+  const QUOTA_PERIOD_LABELS = { five_hours: '5 小时', day: '日', week: '周', month: '月', other: '其它' };
+  const QUOTA_PERIOD_ORDER = ['five_hours', 'day', 'week', 'month', 'other'];
+  const QUOTA_FIXED_PERIODS = ['five_hours', 'week', 'month'];
+  // 兜底：万一后端没带 period，就按和后端一致的规则现场判一次（时长优先、名字兜底）。
+  const quotaPeriod = (window) => {
+    if (window && window.period) return window.period;
+    const minutes = Number(window && window.window_minutes);
+    if (Number.isFinite(minutes) && minutes > 0) {
+      if (minutes <= 360) return 'five_hours';
+      if (minutes <= 2160) return 'day';
+      if (minutes <= 14400) return 'week';
+      return 'month';
     }
-    return quotas.flatMap((quota) => (quota.windows || []).map((window) => {
-      const percent = window.used_percent === null || window.used_percent === undefined ? 0 : Math.max(0, Math.min(100, Number(window.used_percent)));
-      const level = window.is_exhausted ? 'danger' : percent >= 80 ? 'warn' : '';
-      const state = window.is_exhausted ? '已耗尽' : '可用';
-      return `<article class="card quota-card">
-        <div class="quota-title"><span class="quota-name">${escapeHtml(window.limit_id)}/${escapeHtml(window.name)}</span><span class="quota-percent">${escapeHtml(formatPercent(window.used_percent))}</span></div>
-        <div class="bar"><span class="${level}" style="width:${percent}%"></span></div>
-        <dl class="quota-meta"><dt>状态</dt><dd>${state}</dd><dt>窗口</dt><dd>${window.window_minutes !== null && window.window_minutes !== undefined ? escapeHtml(String(window.window_minutes)) + ' 分钟' : '—'}</dd><dt>重置</dt><dd>${escapeHtml(formatReset(window.resets_at))}</dd></dl>
-      </article>`;
-    })).join('');
+    const name = `${(window && window.name) || ''} ${(window && window.limit_id) || ''}`.toLowerCase();
+    if (name.includes('hour') || name.includes('5h')) return 'five_hours';
+    if (name.includes('day')) return 'day';
+    if (name.includes('week')) return 'week';
+    if (name.includes('month')) return 'month';
+    return 'other';
+  };
+  const quotaPeriodLabel = (period) => QUOTA_PERIOD_LABELS[period] || QUOTA_PERIOD_LABELS.other;
+  const quotaDuration = (window) => {
+    if (window && window.duration_label) return window.duration_label;
+    const minutes = Number(window && window.window_minutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) return '周期未知';
+    if (minutes < 60) return `${Math.round(minutes)} 分钟`;
+    if (minutes < 1440) return `${Math.round(minutes / 60)} 小时`;
+    if (minutes < 14400) return `${Math.round(minutes / 1440)} 天`;
+    return `${Math.round(minutes / 43200)} 个月`;
+  };
+  const quotaPercentText = (window) => (window.used_percent === null || window.used_percent === undefined
+    ? '待采集'
+    : formatPercent(window.used_percent));
+  const quotaWindowTitle = (window) => `${window.limit_id}/${window.name} · ${quotaPercentText(window)} · ${quotaDuration(window)}`;
+  const renderQuotaRow = (period, label, windows) => {
+    if (!windows.length) {
+      return `<div class="quota-row absent">
+        <span class="quota-row-label">${escapeHtml(label)}</span>
+        <div class="bar quota-bar"><span style="width:0"></span></div>
+        <span class="quota-row-percent absent">不适用</span>
+        <span class="quota-row-meta">该订阅没有${escapeHtml(label)}额度</span>
+      </div>`;
+    }
+    // 同一周期有多条窗口（例如 Kimi 的 limit_month_total / limit_month_code）时取最紧的
+    // 一条做主行，其余用角标提示，保证「一行一个周期」。
+    const ordered = [...windows].sort((left, right) => (
+      Number(right.used_percent === null || right.used_percent === undefined ? -1 : right.used_percent)
+      - Number(left.used_percent === null || left.used_percent === undefined ? -1 : left.used_percent)
+    ));
+    const main = ordered[0];
+    const rest = ordered.slice(1);
+    const unknown = main.used_percent === null || main.used_percent === undefined;
+    const percent = unknown ? 0 : Math.max(0, Math.min(100, Number(main.used_percent)));
+    const level = main.is_exhausted ? 'danger' : percent >= 80 ? 'warn' : '';
+    const stateText = main.is_exhausted ? '已耗尽' : unknown ? '未返回已用比例' : '可用';
+    const badge = rest.length
+      ? `<span class="quota-badge" title="${escapeHtml(ordered.map((window) => quotaWindowTitle(window)).join('\n'))}">另有 ${rest.length} 条</span>`
+      : '';
+    const meta = unknown
+      ? `${escapeHtml(stateText)} · ${escapeHtml(quotaDuration(main))}`
+      : `重置 ${escapeHtml(formatReset(main.resets_at))} · ${escapeHtml(quotaDuration(main))}`;
+    return `<div class="quota-row ${level || 'ok'}">
+      <span class="quota-row-label" title="${escapeHtml(quotaWindowTitle(main))}">${escapeHtml(label)}${badge}</span>
+      <div class="bar quota-bar"><span class="${level}" style="width:${percent}%"></span></div>
+      <span class="quota-row-percent ${level}">${escapeHtml(quotaPercentText(main))}</span>
+      <span class="quota-row-meta">${meta}</span>
+    </div>`;
+  };
+  const renderQuotaRows = (quotas) => {
+    const windows = (Array.isArray(quotas) ? quotas : []).flatMap((quota) => quota.windows || []);
+    if (!windows.length) {
+      return '<div class="quota-note">该订阅不提供额度窗口，这里只统计用量</div>';
+    }
+    const buckets = new Map();
+    windows.forEach((window) => {
+      const period = quotaPeriod(window);
+      if (!buckets.has(period)) buckets.set(period, []);
+      buckets.get(period).push(window);
+    });
+    // 固定三段永远渲染；额外的周期（如「日」或判不出的「其它」）按规范顺序插进去，
+    // 宁可多一行也不丢信息。
+    const rows = QUOTA_PERIOD_ORDER
+      .filter((period) => QUOTA_FIXED_PERIODS.includes(period) || buckets.has(period))
+      .map((period) => renderQuotaRow(period, quotaPeriodLabel(period), buckets.get(period) || []));
+    return `<div class="quota-rows">${rows.join('')}</div>`;
   };
   // 活动会话整块默认折叠，点击按钮再展开；折叠状态在 5 秒自动刷新之间保持。
   const expandedSessionTables = new Set();
@@ -3178,7 +3265,7 @@ __THEME_TOGGLE__
           <div class="account-side"><span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
         </div>
         <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
-        <div class="quota-grid">${renderQuotaCards(accountQuotas)}</div>
+        <div class="quota-rows-block">${renderQuotaRows(accountQuotas)}</div>
         <div class="account-subtitle"><span>活动会话</span><span class="muted">${activeCount} 个活动</span></div>
         ${renderSessionTable(accountSessions, name)}
       </article>`;
@@ -4606,6 +4693,11 @@ def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
                 "window_minutes": window.window_minutes,
                 "resets_at": window.resets_at,
                 "is_exhausted": window.is_exhausted,
+                # 中文注释：统一周期口径在这里定死，面板只按 period 画固定行，
+                # 不再依赖上游五花八门的窗口名（primary / limit_month_total / 5-hour…）。
+                "period": quota_period(window),
+                "period_label": quota_period_label(quota_period(window)),
+                "duration_label": quota_window_duration(window),
             }
             for window in snapshot.windows
         ],

@@ -74,6 +74,90 @@ class QuotaWindow:
         return self.used_percent is not None and self.used_percent >= 100.0
 
 
+# 中文注释：额度周期统一口径。上游的名字五花八门（primary / secondary / weekly /
+# limit_month_total / 5-hour / monthly），面板要用同一套行渲染不同订阅，所以统一按
+# 「窗口时长优先、名字兜底」归类成有限几种周期。
+QUOTA_PERIOD_ORDER = ("five_hours", "day", "week", "month", "other")
+QUOTA_PERIOD_LABELS = {
+    "five_hours": "5 小时",
+    "day": "日",
+    "week": "周",
+    "month": "月",
+    "other": "其它",
+}
+# 面板固定展示的行与顺序：5 小时 → 周 → 月；缺的周期显示「不适用」。
+QUOTA_DISPLAY_PERIODS = ("five_hours", "week", "month")
+_QUOTA_PERIOD_BY_MINUTES = (
+    (6 * 60.0, "five_hours"),
+    (36 * 60.0, "day"),
+    (10 * 1440.0, "week"),
+)
+_QUOTA_PERIOD_NAME_HINTS = (
+    ("5-hour", "five_hours"),
+    ("5_hour", "five_hours"),
+    ("5h", "five_hours"),
+    ("hour", "five_hours"),
+    ("daily", "day"),
+    ("day", "day"),
+    ("week", "week"),
+    ("month", "month"),
+)
+
+
+def quota_period(window: QuotaWindow) -> str:
+    """把一个额度窗口归到统一周期（``QUOTA_PERIOD_ORDER`` 之一）。
+
+    时长可读时按分钟归类（≤6 小时算 5 小时窗口、≤36 小时算日、≤10 天算周、
+    更长算月）；上游没给时长时退回窗口名字里的关键词（``monthly``、
+    ``limit_month_total``、``Weekly``、``5-hour`` 等），都判不出来才落到 ``other``。
+    """
+
+    minutes = window.window_minutes
+    if isinstance(minutes, (int, float)) and minutes > 0:
+        for limit, period in _QUOTA_PERIOD_BY_MINUTES:
+            if minutes <= limit:
+                return period
+        return "month"
+    name = f"{window.name} {window.limit_id}".lower()
+    for hint, period in _QUOTA_PERIOD_NAME_HINTS:
+        if hint in name:
+            return period
+    return "other"
+
+
+def quota_period_label(period: str) -> str:
+    """返回周期的中文展示名。"""
+
+    return QUOTA_PERIOD_LABELS.get(period, QUOTA_PERIOD_LABELS["other"])
+
+
+_QUOTA_PERIOD_DURATION_TEXT = {
+    "five_hours": "5 小时",
+    "day": "1 天",
+    "week": "7 天",
+    "month": "1 个月",
+    "other": "周期未知",
+}
+
+
+def quota_window_duration(window: QuotaWindow) -> str:
+    """返回窗口时长的人话描述；上游没给时长时按周期给个默认说法。"""
+
+    minutes = window.window_minutes
+    if isinstance(minutes, (int, float)) and minutes > 0:
+        if minutes < 60:
+            return f"{minutes:g} 分钟"
+        if minutes < 1440:
+            return f"{minutes / 60:g} 小时"
+        if minutes < 10 * 1440:
+            return f"{minutes / 1440:g} 天"
+        return f"{minutes / 43200:g} 个月"
+    return _QUOTA_PERIOD_DURATION_TEXT.get(
+        quota_period(window),
+        _QUOTA_PERIOD_DURATION_TEXT["other"],
+    )
+
+
 @dataclass(frozen=True)
 class QuotaSnapshot:
     """一次完整的账户额度快照。"""

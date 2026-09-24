@@ -398,7 +398,60 @@ class CliTests(unittest.TestCase):
             self.assertIn("kimi/limit_5h", output)
             self.assertIn("25%", output)
             self.assertIn("已登录", output)
+            # 命令行也用统一周期口径，不再吐上游原始窗口名当标题。
+            self.assertIn("5 小时窗口（kimi/limit_5h）", output)
             self.assertNotIn("SECRET-TOKEN", output)
+
+    def test_quota_command_labels_month_windows_without_duration(self) -> None:
+        """上游没给时长的月窗口也要显示成「月窗口」而不是未知。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            kimi_home = root / ".kimi-code"
+            credentials = kimi_home / "credentials"
+            credentials.mkdir(parents=True)
+            (credentials / "kimi-code.json").write_text(
+                json.dumps({"access_token": "SECRET-TOKEN"}),
+                encoding="utf-8",
+            )
+            snapshot = QuotaSnapshot(
+                observed_at=1_789_700_000.0,
+                windows=(
+                    QuotaWindow(
+                        limit_id="kimi",
+                        name="limit_month_total",
+                        used_percent=17.9,
+                        window_minutes=None,
+                        resets_at=None,
+                    ),
+                ),
+                source="kimi-api",
+                raw_limit_ids=("kimi",),
+            )
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                mock.patch("a_token_monitor.cli._accounts", return_value=()),
+                mock.patch(
+                    "a_token_monitor.cli.read_kimi_quota",
+                    return_value=snapshot,
+                ),
+            ):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    exit_code = main(
+                        [
+                            "--state-dir",
+                            str(root / "state"),
+                            "--kimi-home",
+                            str(kimi_home),
+                            "quota",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        output = buffer.getvalue()
+        self.assertIn("月窗口（kimi/limit_month_total）", output)
+        self.assertIn("1 个月", output)
 
     def test_quota_command_notes_kimi_quota_failure(self) -> None:
         """Kimi 配额读取失败时应提示但不影响退出码。"""

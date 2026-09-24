@@ -30,6 +30,7 @@ from a_token_monitor.dashboard import (
     _DASHBOARD_HTML,
     _FAVICON_GLYPHS,
     _SETTINGS_HTML,
+    _quota_summary,
     _brand_mark_svg,
     DashboardConfig,
     DashboardServer,
@@ -1484,7 +1485,9 @@ class StylesheetIntegrityTests(unittest.TestCase):
         ".usage-tabs",
         ".usage-filter select",
         ".account-block",
-        ".quota-card",
+        ".quota-rows",
+        ".quota-row",
+        ".quota-row-label",
         ".bar",
         ".pill",
         ".session-id",
@@ -2143,6 +2146,42 @@ class FaviconTests(unittest.TestCase):
         self.assertIn('aria-label="Token Monitor"', favicon)
         self.assertIn('aria-hidden="true"', mark)
         self.assertNotIn("receipt", mark)
+
+    def test_quota_payload_carries_the_unified_period(self) -> None:
+        """窗口必须带 period / 展示名 / 时长文案，面板不再自己猜周期。"""
+
+        summary = _quota_summary(
+            QuotaSnapshot(
+                observed_at=1.0,
+                windows=(
+                    QuotaWindow("codex", "primary", 2.0, 300.0, 10.0),
+                    QuotaWindow("kimi", "limit_month_total", 17.9, None, None),
+                ),
+            )
+        )
+        self.assertIsNotNone(summary)
+        windows = summary["windows"]
+        self.assertEqual(windows[0]["period"], "five_hours")
+        self.assertEqual(windows[0]["period_label"], "5 小时")
+        self.assertEqual(windows[0]["duration_label"], "5 小时")
+        self.assertEqual(windows[1]["period"], "month")
+        self.assertEqual(windows[1]["period_label"], "月")
+        self.assertEqual(windows[1]["duration_label"], "1 个月")
+
+    def test_quota_rows_are_fixed_and_show_three_states(self) -> None:
+        """每个订阅都渲染固定的 5 小时 / 周 / 月三行，缺的周期显示「不适用」。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const QUOTA_FIXED_PERIODS = ['five_hours', 'week', 'month'];", page)
+        self.assertIn("const QUOTA_PERIOD_ORDER = ['five_hours', 'day', 'week', 'month', 'other'];", page)
+        self.assertIn("const renderQuotaRows = (quotas) => {", page)
+        self.assertIn("该订阅没有${escapeHtml(label)}额度", page)
+        self.assertIn("该订阅不提供额度窗口，这里只统计用量", page)
+        self.assertIn("待采集", page)
+        self.assertIn("另有 ${rest.length} 条", page)
+        # 旧的「一个窗口一张卡片」渲染不应该留下任何残骸。
+        for stale in ("renderQuotaCards", "quota-card", "quota-grid", "quota-meta"):
+            self.assertNotIn(stale, page)
 
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
