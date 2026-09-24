@@ -641,10 +641,12 @@ _DASHBOARD_CSS = r"""
     .usage-tabs-divider { width: 1px; align-self: stretch; min-height: 26px; margin: 0 3px; background: var(--line); }
     .session-toggle { margin: 10px 0 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--surface-raised); cursor: pointer; font-size: 12px; }
     .session-toggle:hover { border-color: var(--violet-border-strong); background: var(--surface-hover); }
-    .usage-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
-    .usage-filter { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
-    .usage-filter select { min-width: 220px; padding: 8px 30px 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); cursor: pointer; }
-    .usage-summary { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    /* 中文注释：三个筛选字段等宽排列（auto-fit 会退化成 2+1 的参差换行），
+       窄屏由响应式规则切成一列；汇总卡按 170px 自适应列数，尽量一行放完。 */
+    .usage-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
+    .usage-filter { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 11px; }
+    .usage-filter select { width: 100%; min-width: 0; padding: 8px 30px 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); cursor: pointer; }
+    .usage-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
     .usage-summary-item { padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); }
     .usage-summary-label { color: var(--muted); font-size: 11px; }
     .usage-summary-value { margin-top: 3px; color: var(--text); font-size: 17px; font-weight: 700; }
@@ -751,6 +753,15 @@ _RESPONSIVE_CSS = r"""
       main { max-width: none; padding-top: 0; }
       .topbar { margin-bottom: 28px; }
     }
+    @media (max-width: 760px) {
+      /* 中文注释：窄屏两列；张数为奇数时让最后一张占满整行，
+         避免出现一张孤零零的卡片挂在第二行。 */
+      .usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .usage-summary-item:last-child:nth-child(odd) { grid-column: 1 / -1; }
+    }
+    @media (max-width: 700px) {
+      .usage-filters { grid-template-columns: minmax(0, 1fr); }
+    }
     @media (max-width: 640px) {
       main { padding: 0 16px 40px; }
       .topbar { min-height: 60px; }
@@ -765,7 +776,8 @@ _RESPONSIVE_CSS = r"""
       .panel-heading { align-items: flex-start; flex-direction: column; gap: 9px; }
       .account-heading { flex-direction: column; }
       .account-side { justify-items: start; text-align: left; }
-      .usage-summary { grid-template-columns: 1fr; }
+      .usage-summary,
+      .usage-filters { grid-template-columns: minmax(0, 1fr); }
       .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .toolbar { align-items: stretch; }
       .field, .field select, .field input, .field.wide select, .field.wide input { width: 100%; min-width: 0; }
@@ -1715,6 +1727,13 @@ __THEME_TOGGLE__
   };
   const formatCredits = (value) => value === null || value === undefined ? '不可反推' : `${Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 4 })} credits`;
   const formatUsd = (value) => value === null || value === undefined ? '未知' : `$${Number(value).toFixed(6)}`;
+  // 中文注释：汇总卡用同一套金额格式——≥$1 保留 2 位、小额保留 4 位，
+  // 避免「$7.117772」这种六位小数和旁边「$113.97」两种风格并排。
+  const formatUsdSummary = (value) => {
+    if (value === null || value === undefined) return '未知';
+    const number = Number(value);
+    return `$${number.toFixed(Math.abs(number) >= 1 ? 2 : 4)}`;
+  };
   const formatUsdCompact = (value) => value === null || value === undefined ? '未计价' : `$${Number(value).toFixed(2)}`;
   // 中文注释：头像显示订阅缩写，而不是账号 ID 的前两位（"3" / "5" 这种看不出含义）。
   // 规则：产品与套餐各取单词首字母，最多 3 个字符——Codex · Plus → CP、
@@ -2378,7 +2397,7 @@ __THEME_TOGGLE__
     const totalUsd = sumNullable(statsList, 'estimated_cost_usd');
     const totalCacheSavings = sumNullable(statsList, 'cache_savings_usd');
     const savingsItem = totalCacheSavings !== null && totalCacheSavings > 0
-      ? `<div class="usage-summary-item"><div class="usage-summary-label">缓存节省（等价）</div><div class="usage-summary-value">≈ ${escapeHtml(formatUsdCompact(totalCacheSavings))}</div></div>`
+      ? `<div class="usage-summary-item"><div class="usage-summary-label">缓存节省（等价）</div><div class="usage-summary-value" title="${escapeHtml(formatUsd(totalCacheSavings))}">≈ ${escapeHtml(formatUsdSummary(totalCacheSavings))}</div></div>`
       : '';
     const budget = budgetUsd();
     let budgetItem = '';
@@ -2390,8 +2409,8 @@ __THEME_TOGGLE__
     }
     const summary = `<div class="usage-summary">
       <div class="usage-summary-item"><div class="usage-summary-label">匹配账号</div><div class="usage-summary-value">${formatNumber(filteredAccounts.length)}</div></div>
-      <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value">${formatNumber(totalTokens)}</div></div>
-      <div class="usage-summary-item"><div class="usage-summary-label">API 等价金额</div><div class="usage-summary-value">${escapeHtml(formatUsd(totalUsd))}</div></div>
+      <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value" title="${escapeHtml(formatNumber(totalTokens))}">${formatNumber(totalTokens)}</div></div>
+      <div class="usage-summary-item"><div class="usage-summary-label">API 等价金额</div><div class="usage-summary-value" title="${escapeHtml(formatUsd(totalUsd))}">${escapeHtml(formatUsdSummary(totalUsd))}</div></div>
       ${savingsItem}${budgetItem}
     </div>`;
     const dimensionHeaders = {

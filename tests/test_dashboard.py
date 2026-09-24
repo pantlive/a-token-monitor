@@ -29,6 +29,7 @@ from a_token_monitor.dashboard import (
     _BASE_CSS,
     _DASHBOARD_CSS,
     _DASHBOARD_HTML,
+    _RESPONSIVE_CSS,
     _FAVICON_GLYPHS,
     _SETTINGS_HTML,
     _quota_summary,
@@ -1550,6 +1551,43 @@ class StylesheetIntegrityTests(unittest.TestCase):
             ".account-block .quota-rows-block + .account-subtitle { margin-top: auto; }",
             css,
         )
+
+    def test_usage_filters_and_summary_are_even_grids(self) -> None:
+        """筛选区等宽排列、汇总卡自适应一行，避免参差换行与孤立的卡片。"""
+
+        css = _DASHBOARD_CSS + _RESPONSIVE_CSS
+        self.assertIn(
+            ".usage-filters { display: grid; "
+            "grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));",
+            css,
+        )
+        self.assertIn(
+            ".usage-summary { display: grid; "
+            "grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));",
+            css,
+        )
+        # 窄屏两列时，张数为奇数就让最后一张占满整行。
+        self.assertIn(
+            ".usage-summary-item:last-child:nth-child(odd) { grid-column: 1 / -1; }",
+            css,
+        )
+        self.assertIn("@media (max-width: 760px) {", css)
+        self.assertIn("@media (max-width: 700px) {", css)
+        # 旧的固定三列与固定 220px 宽（会退化成 2+1 换行）不应再出现。
+        self.assertNotIn("repeat(3, minmax(130px, 1fr))", css)
+        self.assertNotIn(".usage-filter select { min-width: 220px", css)
+
+    def test_summary_amounts_share_one_format(self) -> None:
+        """汇总卡金额统一为「大额 2 位、小额 4 位」，精确值放 tooltip。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const formatUsdSummary = (value) => {", page)
+        self.assertIn(
+            "`$${number.toFixed(Math.abs(number) >= 1 ? 2 : 4)}`",
+            page,
+        )
+        self.assertIn('title="${escapeHtml(formatUsd(totalUsd))}"', page)
+        self.assertIn('title="${escapeHtml(formatUsd(totalCacheSavings))}"', page)
 
     def test_shell_can_shrink_and_topbar_wraps(self) -> None:
         """主区域必须可收缩、顶栏允许换行，否则新增按钮会挤出视口。"""
