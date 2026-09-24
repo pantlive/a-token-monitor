@@ -183,7 +183,15 @@
   - [x] 实测真实负载（/api/state、/api/usage、/api/insights、/api/alerts、
     /api/housekeeping、/api/usage/search）：英文请求下**非路径类中文 0 处**，
     带中文的**用户数据（项目路径）原样保留**；新增 4 条测试钉住这两点。
-  - [ ] CLI（约 347 条 + `--lang` + `LANG` 判断 + stdout 翻译代理）待做。
+  - [x] CLI：`--lang auto|zh|en`（子命令前后都能用）、按 `LANG` / `LC_ALL` / `LC_MESSAGES`
+    自动判断、`sys.stdout`/`stderr` 包一层**按行缓冲**的翻译代理（CLI 会把一句话分多次
+    write，逐段翻会把句子切断）。`--help` 文案在 argparse 排版前翻译，保证按英文换行；
+    补齐了 argparse 全部 95 条帮助文案与命令输出的运行时片段 + 12 条 CLI 模式规则。
+  - [x] 实测：`--help`、`status`、`alerts`、`sessions`、`disk`、`usage`、`traffic`、
+    `service status` 在 `--lang en` 与 `LANG=en_US.UTF-8` 下**均无中文残留**；
+    默认（中文环境）仍是中文。新增 4 条 CLI 测试。
+  - [ ] CLI 的 `--json` 输出仍是原样数据（脚本友好），如需英文可复用
+    `localize_payload`；页面按语言下发 + 顶栏「中/EN」开关待做。
   - [ ] 页面按语言下发（`Accept-Language` / `?lang=`）+ 顶栏「中/EN」开关待做。
   - [ ] 路由按 `Accept-Language` / `?lang=` 出英文页面与英文负载；顶栏加「中/EN」手动
     切换（localStorage 记忆，与主题开关一致）；CLI 支持 `--lang` 并按 `LANG` 自动判断。
