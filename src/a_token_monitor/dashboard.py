@@ -24,6 +24,7 @@ from .alerts import (
     AlertStoreError,
     TrafficAlertStore,
 )
+from .i18n import localize_payload, resolve_language
 from .housekeeping import (
     CleanupCriteria,
     HousekeepingError,
@@ -6248,16 +6249,37 @@ def _make_handler(
 
             logger.debug("Dashboard HTTP " + format, *args)
 
+        def _request_language(self) -> str:
+            """当前请求的语言：显式 ?lang= 优先，其次 Accept-Language，最后中文。"""
+
+            try:
+                query = parse_qs(urlsplit(self.path).query)
+            except ValueError:
+                query = {}
+            override = (query.get("lang") or [None])[0]
+            header = (
+                self.headers.get("Accept-Language")
+                if hasattr(self, "headers")
+                else None
+            )
+            return resolve_language(accept_language=header, override=override)
+
+        def _localized(self, payload: object) -> object:
+            """按请求语言本地化负载里的字符串值（字典键与结构不动）。"""
+
+            language = self._request_language()
+            return localize_payload(payload, language)
+
         def _send_json(
             self,
             status: int,
             payload: object,
             include_body: bool = True,
         ) -> None:
-            """发送 JSON 响应。"""
+            """发送 JSON 响应（英文请求会把负载里的文案换成英文）。"""
 
             body = json.dumps(
-                payload,
+                self._localized(payload),
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")

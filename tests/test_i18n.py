@@ -6,6 +6,7 @@ import re
 import unittest
 
 from a_token_monitor import i18n
+from a_token_monitor.usage import pricing_metadata
 
 
 class LanguageResolutionTests(unittest.TestCase):
@@ -160,6 +161,140 @@ class SourceStringScanTests(unittest.TestCase):
         missing = i18n.missing_entries("<h2>这是一条没有条目的文案</h2>")
         self.assertEqual(missing, ("这是一条没有条目的文案",))
         self.assertEqual(i18n.missing_entries("<h2>Dashboard</h2>"), ())
+
+
+class PayloadLocalizationTests(unittest.TestCase):
+    """API 负载本地化：拼出来的句子要翻到，用户数据不能被动。"""
+
+    def test_pattern_rules_translate_composed_sentences(self) -> None:
+        # 提醒消息是「标题 + ，超过 X 提醒阈值」拼出来的，模式要能套两层。
+        message = "Codex (codex) 占用 9.27 GiB，超过 5.00 GiB 提醒阈值"
+        self.assertEqual(
+            i18n.translate(message, "en"),
+            "Codex (codex) uses 9.27 GiB, above the 5.00 GiB threshold",
+        )
+        self.assertEqual(
+            i18n.translate("会话 01a06a2f 建议切换新会话", "en"),
+            "Session 01a06a2f: consider starting a new one",
+        )
+        self.assertEqual(
+            i18n.translate(
+                "DeepSeek Harness (pid 2286183) 在 15 秒内向外发送 9.14 MiB，"
+                "目录 /home/lsl/tmp，主要对端 172.17.176.1:108",
+                "en",
+            ),
+            "DeepSeek Harness (pid 2286183) sent 9.14 MiB outbound in 15s from "
+            "/home/lsl/tmp to 172.17.176.1:108",
+        )
+
+    def test_payload_localization_leaves_user_data_alone(self) -> None:
+        """带中文的路径、会话标题是用户数据，不能因为「看着像中文」被翻译。"""
+
+        payload = {
+            "project": "/mnt/d/data/眼底",
+            "cwd": "/mnt/glass_patent/基于结构光分层神经场的瞳距瞳高测量",
+            "label": "今天",
+        }
+        localized = i18n.localize_payload(payload, "en")
+        self.assertEqual(localized["project"], "/mnt/d/data/眼底")
+        self.assertEqual(
+            localized["cwd"],
+            "/mnt/glass_patent/基于结构光分层神经场的瞳距瞳高测量",
+        )
+        self.assertEqual(localized["label"], "Today")
+
+    def test_api_shapes_localize_without_chinese(self) -> None:
+        """后端真实会发出的各种句子形状，本地化后不允许再有中文。"""
+
+        payload = {
+            "usage": {
+                "pricing": {"note": pricing_metadata()["note"]},
+                "periods": [{"label": "今天"}, {"label": "近 7 天"}],
+            },
+            "accounts": [
+                {
+                    "quota": {
+                        "windows": [
+                            {"period_label": "5 小时", "duration_label": "5 小时"},
+                            {"period_label": "周", "duration_label": "7 天"},
+                            {"period_label": "月", "duration_label": "1 个月"},
+                        ]
+                    }
+                }
+            ],
+            "sessions": [
+                {
+                    "last_error": "额度限制事件",
+                    "archive": {"reason": "会话仍在运行"},
+                    "usage": {
+                        "reminder": {
+                            "title": "会话 019fdb08-980b-7113-9d24-937f5c787c82 建议切换新会话",
+                            "detail": (
+                                "gpt-6-sol · 已进行 1425 轮。超长会话每一轮都按全量上下文"
+                                "重新计费；任务做到阶段收尾后让模型总结要点，再开新会话更省 token。"
+                            ),
+                            "message": (
+                                "会话 019fdb08-980b-7113-9d24-937f5c787c82（gpt-6-sol）"
+                                "已进行 1425 轮，建议收尾并开启新会话"
+                            ),
+                            "reasons": ["已进行 1425 轮", "最近一次上下文 218,162 token"],
+                        }
+                    },
+                }
+            ],
+            "insights": {
+                "size_buckets": [{"label": "1–2 轮"}, {"label": "31 轮以上"}],
+                "observations": [
+                    "平均每个对话 210.5 轮、29,417,143 tokens",
+                    "最活跃时段是 16:00–17:00，占全部 token 的 10.0%",
+                    "gpt-5.6-sol 贡献了 46.7% 的 API 等价成本",
+                    "对话最多的是项目 /home/dev/demo（38 个对话，3,490,680,833 tokens）",
+                    "用量最高的一天是 2026-08-25，共 931,284,320 tokens",
+                    "周末 token 占 8.8%",
+                    "缓存命中已累计节省约 $16095.9137",
+                ],
+                "suggestions": [
+                    {
+                        "title": "239 个对话累计超过 20 万 token",
+                        "detail": (
+                            "上下文越长，每轮重计的输入越多。完成阶段性任务后让模型总结要点，"
+                            "再开新会话继续，能避免旧上下文反复计费。"
+                        ),
+                    },
+                    {"title": "缓存命中率 96.7%，前缀复用做得很好"},
+                ],
+            },
+            "health": {
+                "components": [
+                    {"label": "监控主循环"},
+                    {"label": "Codex 账号 codex"},
+                ]
+            },
+            "alerts": [
+                {
+                    "message": (
+                        "DeepSeek Harness (pid 2286183) 在 15 秒内向外发送 9.88 MiB，"
+                        "目录 /home/lsl/tmp，主要对端 172.17.176.1:108"
+                    )
+                }
+            ],
+        }
+        localized = i18n.localize_payload(payload, "en")
+        chinese: list[str] = []
+
+        def walk(value: object) -> None:
+            if isinstance(value, str):
+                if i18n.contains_cjk(value):
+                    chinese.append(value)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(localized)
+        self.assertEqual(chinese, [])
 
 
 class PageSubstitutionTests(unittest.TestCase):

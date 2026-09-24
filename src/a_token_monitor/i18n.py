@@ -20,6 +20,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from .i18n_catalog import EN as _CATALOG
+from .i18n_catalog import PATTERNS as _CATALOG_PATTERNS
 
 # 支持的语言；zh 是源语言，不需要目录表。
 SUPPORTED_LANGUAGES: tuple[str, ...] = ("zh", "en")
@@ -45,6 +46,10 @@ _EN.setdefault("English", "English")
 # 兼容旧名字：工具与测试里两种叫法都出现过。
 _EN_PAGE = _EN
 _EN_VALUE = _EN
+# 带插值的句子（「会话 X 已进行 N 轮」这类）没法精确匹配，用正则模式翻译。
+_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(source), target) for source, target in _CATALOG_PATTERNS
+)
 
 
 def contains_cjk(text: str) -> bool:
@@ -103,11 +108,29 @@ def resolve_language(
 
 
 def translate(text: str, lang: str = DEFAULT_LANGUAGE) -> str:
-    """翻译一整条文案；没有条目时原样返回。"""
+    """翻译一整条文案：先精确匹配，再套模式规则，都没有就原样返回。
+
+    模式规则用于带插值的句子（``会话 <id> 已进行 12 轮``），它们在负载里是拼好的
+    字符串，精确目录表不可能覆盖。
+    """
 
     if lang != "en" or not text:
         return text
-    return _EN.get(text, text)
+    # 负载里的句子可能是「拼出来的」：先由模板拼标题，再拼进更长的说明。
+    # 所以这里反复套用（最多 4 轮），让外层模式套完后内层残余也能翻到。
+    for _ in range(4):
+        exact = _EN.get(text)
+        if exact is not None:
+            return exact
+        updated = text
+        for pattern, replacement in _PATTERNS:
+            if pattern.match(updated):
+                updated = pattern.sub(replacement, updated)
+                break
+        if updated == text:
+            return text
+        text = updated
+    return text
 
 
 def substitute(text: str, lang: str = DEFAULT_LANGUAGE) -> str:

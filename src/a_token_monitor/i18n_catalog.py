@@ -623,4 +623,94 @@ EN: dict[str, str] = {
     '（': ' (',
     '，': ', ',
     '；': '; ',
+    '额度限制事件': 'Quota-limit event',
+    '历史会话状态': 'Historical session state',
+    '会话仍在运行': 'Session is still running',
+    '不在可归档的 Codex 会话目录内': 'Outside the archivable Codex session directories',
+    '监控状态目录': 'Monitor state directory',
+    '1 个月': '1 month',
+    '7 天': '7 days',
+    '近 365 天': 'Last 365 days',
+    '1–2 轮': '1–2 turns',
+    '3–10 轮': '3–10 turns',
+    '11–30 轮': '11–30 turns',
+    '31 轮以上': '31+ turns',
+    '监控主循环': 'Monitor main loop',
+    '异常流量采集': 'Traffic sampling',
+    '磁盘与长会话巡检': 'Disk & long-session patrol',
+    '用量索引': 'Usage index',
+    '历史数据清理': 'History cleanup',
+    '上下文越长，每轮重计的输入越多。完成阶段性任务后让模型总结要点，再开新会话继续，能避免旧上下文反复计费。': 'The longer the context, the more input is re-billed every turn. After finishing a stage, have the model summarise and continue in a new session so old context is not billed over and over.',
+    '超长对话每一轮都按全量上下文重新计费。任务做到阶段收尾就让模型总结、再开新会话，比无限续聊更省 token。': 'Very long conversations re-bill the whole context every turn. Summarise at each stage and start a new session instead of chatting endlessly — it saves tokens.',
+    '保持当前用法：在同一项目里延续原会话，避免频繁清空上下文或新开会话。': 'Keep doing what you are doing: continue existing sessions within a project instead of frequently clearing context or starting over.',
+    'Plus/OAuth 和 SuperGrok 实际订阅账单不会出现在本地日志；本页美元是按官方 API 单价换算的等价值，不是订阅扣款；Codex credits 无法从 JSONL反推；Grok 周额度百分比来自本地 billing 日志；Kimi Code 为订阅制，金额按 K3 公开 API 单价等价换算，不代表会员扣费；DeepSeek Harness 用量来自本地 projcache 合计，金额按 DeepSeek 官方峰时 API 单价估算，不代表 Command Code 等转发账单；Claude Code 用量来自本地会话 JSONL，金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价；小米 MiMo 按开放平台国际站单价估算（官方未公布长上下文加价）；智谱 GLM 按 Z.ai 官方美元价目估算；阶跃星辰 Step 按开放平台人民币价目按 7.0 折算（官方未公布长上下文分段）。未定价模型只展示 token，不计入 API 等价值。': "Actual subscription bills for Plus/OAuth and SuperGrok never appear in local logs; the dollar figures here are equivalents converted from official API list prices, not subscription charges. Codex credits cannot be derived from JSONL; Grok weekly quota percentages come from local billing logs; Kimi Code is subscription-based, with amounts converted from public K3 API prices rather than membership charges; DeepSeek Harness usage comes from local projcache totals with amounts estimated from DeepSeek's official peak-hour API prices, not relay bills such as Command Code; Claude Code usage comes from local session JSONL with amounts converted from Anthropic's public API prices, and cache writes are uniformly priced at 1.25× the input rate. Xiaomi MiMo is estimated from the open platform's international list price (no long-context surcharge is published); Zhipu GLM uses Z.ai's official USD list; StepFun Step is converted from the open platform's CNY list at 7.0 (no long-context tiers published). Unpriced models only show tokens and are excluded from the API-equivalent total.",
 }
+
+# 带插值的句子（后端拼好的负载字符串），按正则匹配后替换。
+PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^(?P<name>.+) 占用 (?P<size>[\d.]+ \w+)$", r"\g<name> uses \g<size>"),
+    (r"^agent 数据目录合计 (?P<size>.+)$", r"Agent data directories total \g<size>"),
+    (
+        r"^超过单目录 (?P<limit>.+?) 提醒阈值。其中会话文件 (?P<bytes>.+?)（(?P<files>\d+) 个）；"
+        r"可归档或清理旧会话，或检查最大的子目录。$",
+        r"Above the per-directory threshold of \g<limit>. Session files use \g<bytes> "
+        r"(\g<files> files); archive or clean up old sessions, or check the largest subdirectory.",
+    ),
+    (
+        r"^超过合计 (?P<limit>.+?) 提醒阈值。建议归档或清理不再需要的历史会话。$",
+        r"Above the total threshold of \g<limit>. Consider archiving or cleaning up "
+        r"historical sessions you no longer need.",
+    ),
+    (
+        r"^(?P<name>.+?) 占用 (?P<size>[\d.]+ \w+)，超过 (?P<limit>.+?) 提醒阈值$",
+        r"\g<name> uses \g<size>, above the \g<limit> threshold",
+    ),
+    (r"^(?P<name>.+?)，超过 (?P<limit>.+?) 提醒阈值$", r"\g<name>, above the \g<limit> threshold"),
+    (r"^Codex 账号 (?P<profile>.+)$", r"Codex account \g<profile>"),
+    (r"^会话 (?P<session>\S+) 建议切换新会话$", r"Session \g<session>: consider starting a new one"),
+    (
+        r"^会话 (?P<session>\S+)（(?P<model>.+?)）已进行 (?P<turns>\d+) 轮"
+        r"；最近一次上下文 (?P<context>.+?) token，建议收尾并开启新会话$",
+        r"Session \g<session> (\g<model>) has run \g<turns> turns; latest context "
+        r"\g<context> tokens. Consider wrapping up and starting a new session.",
+    ),
+    (
+        r"^会话 (?P<session>\S+)（(?P<model>.+?)）已进行 (?P<turns>\d+) 轮，"
+        r"建议收尾并开启新会话$",
+        r"Session \g<session> (\g<model>) has run \g<turns> turns. Consider wrapping "
+        r"up and starting a new session.",
+    ),
+    (
+        r"^(?P<model>.+?) · 已进行 (?P<turns>\d+) 轮"
+        r"；最近一次上下文 (?P<context>.+?) token。"
+        r"超长会话每一轮都按全量上下文重新计费；任务做到阶段收尾后让模型总结要点，再开新会话更省 token。$",
+        r"\g<model> · \g<turns> turns in; latest context \g<context> tokens. Very long "
+        r"sessions re-bill the whole context every turn; once a stage wraps up, have the "
+        r"model summarise and start a new session to save tokens.",
+    ),
+    (
+        r"^(?P<model>.+?) · 已进行 (?P<turns>\d+) 轮。"
+        r"超长会话每一轮都按全量上下文重新计费；任务做到阶段收尾后让模型总结要点，再开新会话更省 token。$",
+        r"\g<model> · \g<turns> turns in. Very long sessions re-bill the whole context "
+        r"every turn; once a stage wraps up, have the model summarise and start a new "
+        r"session to save tokens.",
+    ),
+    (r"^已进行 (?P<turns>\d+) 轮$", r"\g<turns> turns in"),
+    (r"^最近一次上下文 (?P<context>.+?) token$", r"latest context \g<context> tokens"),
+    (
+        r"^(?P<product>.+?) \(pid (?P<pid>\d+)\) 在 (?P<seconds>\d+) 秒内向外发送 "
+        r"(?P<bytes>.+?)，目录 (?P<cwd>.+?)，主要对端 (?P<peer>.+)$",
+        r"\g<product> (pid \g<pid>) sent \g<bytes> outbound in \g<seconds>s from "
+        r"\g<cwd> to \g<peer>",
+    ),
+    (r"^平均每个对话 (?P<turns>.+?) 轮、(?P<tokens>.+?) tokens$", r"Average \g<turns> turns and \g<tokens> tokens per conversation"),
+    (r"^最活跃时段是 (?P<hours>.+?)，占全部 token 的 (?P<share>.+)$", r"Busiest hours: \g<hours>, \g<share> of all tokens"),
+    (r"^(?P<model>.+?) 贡献了 (?P<share>.+?) 的 API 等价成本$", r"\g<model> accounts for \g<share> of API-equivalent cost"),
+    (r"^对话最多的是项目 (?P<project>.+?)（(?P<count>\d+) 个对话，(?P<tokens>.+?) tokens）$", r"Top project: \g<project> (\g<count> conversations, \g<tokens> tokens)"),
+    (r"^用量最高的一天是 (?P<day>.+?)，共 (?P<tokens>.+?) tokens$", r"Highest-usage day: \g<day>, \g<tokens> tokens"),
+    (r"^周末 token 占 (?P<share>.+)$", r"Weekend tokens: \g<share>"),
+    (r"^缓存命中已累计节省约 (?P<usd>.+)$", r"Cache hits saved about \g<usd> so far"),
+    (r"^(?P<count>\d+) 个对话累计超过 20 万 token$", r"\g<count> conversations exceed 200K tokens"),
+    (r"^(?P<count>\d+) 个对话超过 100 轮$", r"\g<count> conversations exceed 100 turns"),
+    (r"^缓存命中率 (?P<rate>.+?)，前缀复用做得很好$", r"Cache hit rate \g<rate> — prefix reuse is working well"),
+)
