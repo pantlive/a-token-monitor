@@ -1749,18 +1749,22 @@ class FaviconTests(unittest.TestCase):
             self.assertLess(min(gradient[:3]), 250, style)
             self.assertGreater(gradient[2], gradient[0], style)
 
-    def test_gradient_runs_from_blue_to_cyan(self) -> None:
-        """底色必须是对角渐变：右下更青（绿升、蓝降），左上更蓝。"""
+    def test_gradient_runs_from_violet_to_cyan(self) -> None:
+        """底色必须是对角渐变：左上偏 violet（红>绿），右下偏 cyan（绿>红）。"""
 
         with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "guard"):
             _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
         top_left = rows[4][4]
         bottom_right = rows[27][27]
         self.assertEqual((top_left[3], bottom_right[3]), (255, 255))
-        self.assertGreater(top_left[2], top_left[0])
-        self.assertLess(top_left[1], bottom_right[1])
-        self.assertGreater(top_left[2], bottom_right[2])
+        # 两端分别是页面主色 violet 与状态色 cyan：色相从紫转到青。
+        self.assertGreater(top_left[0], top_left[1])
         self.assertGreater(bottom_right[1], bottom_right[0])
+        # 两端都保留很高的蓝色通道，整体仍是冷色调。
+        self.assertGreater(top_left[2], 200)
+        self.assertGreater(bottom_right[2], 200)
+        # 绿通道必须明显上升，否则只是同一色的深浅变化。
+        self.assertGreater(bottom_right[1] - top_left[1], 30)
 
     def test_page_logo_is_the_same_artwork_as_the_tab_icon(self) -> None:
         """页面内品牌图形与标签页图标必须出自同一份几何，不能各画一套。"""
