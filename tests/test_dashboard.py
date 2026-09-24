@@ -2265,6 +2265,31 @@ class FaviconTests(unittest.TestCase):
         self.assertIn("group.accountList.slice(0, 3)", page)
         self.assertIn(".usage-models-toggle { justify-self: start;", page)
 
+    def test_cost_rankings_share_one_row(self) -> None:
+        """账号成本排行与项目成本排行并排两列，窄屏堆叠，没数据时整块不渲染。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn(
+            "const rankingBlocks = [accountRanking, projectRanking].filter(Boolean);",
+            page,
+        )
+        self.assertIn(
+            """`<div class="usage-rankings${rankingBlocks.length === 1 ? ' single' : ''}">${rankingBlocks.join('')}</div>`""",
+            page,
+        )
+        self.assertIn(
+            ".usage-rankings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }",
+            page,
+        )
+        self.assertIn(".usage-rankings.single { grid-template-columns: minmax(0, 1fr); }", page)
+        self.assertIn(".usage-rankings .usage-top-projects { margin: 0; min-width: 0; }", page)
+        self.assertIsNotNone(
+            re.search(
+                r"@media \(max-width: 900px\) \{\n      \.usage-rankings \{ grid-template-columns: minmax\(0, 1fr\); \}",
+                page,
+            )
+        )
+
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
 

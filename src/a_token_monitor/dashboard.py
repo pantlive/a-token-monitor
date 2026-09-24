@@ -688,6 +688,10 @@ _DASHBOARD_CSS = r"""
     .observation-list { margin: 0; padding-left: 18px; color: var(--muted-strong); font-size: 12px; }
     .observation-list li { padding: 2px 0; }
     .usage-trend, .usage-top-projects { margin: 0 0 14px; padding: 13px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
+    /* 中文注释：账号 / 项目成本排行并排两列；只有一个有数据时占满整行。 */
+    .usage-rankings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+    .usage-rankings.single { grid-template-columns: minmax(0, 1fr); }
+    .usage-rankings .usage-top-projects { margin: 0; min-width: 0; }
     .usage-trend-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--muted-strong); font-size: 12px; font-weight: 650; }
     .trend-chart { display: flex; align-items: flex-end; gap: 2px; height: 72px; }
     .trend-bar { flex: 1 1 0; min-width: 0; min-height: 2px; border-radius: 3px 3px 0 0; background: var(--violet); opacity: .75; }
@@ -736,6 +740,7 @@ _RESPONSIVE_CSS = r"""
       .kpi-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
     }
     @media (max-width: 900px) {
+      .usage-rankings { grid-template-columns: minmax(0, 1fr); }
       .app-shell { display: block; }
       .sidebar { position: static; width: auto; height: auto; padding: 14px 16px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
       .sidebar-brand { padding: 0 4px 14px; }
@@ -2425,9 +2430,15 @@ __THEME_TOGGLE__
       usageGroups(filteredAccounts, 'project'),
       usageContributorLabel,
     );
+    // 中文注释：两个排行并排两列；只有一个有数据时（例如全是未定价模型）
+    // 让剩下那个占满整行，避免半张空栏。
+    const rankingBlocks = [accountRanking, projectRanking].filter(Boolean);
+    const rankings = rankingBlocks.length
+      ? `<div class="usage-rankings${rankingBlocks.length === 1 ? ' single' : ''}">${rankingBlocks.join('')}</div>`
+      : '';
     container.innerHTML = `${renderTrend(usage.daily)}
       <div class="usage-tabs">${tabs}<span class="usage-tabs-divider" aria-hidden="true"></span>${dimensionTabs}</div>
-      ${filterControls}${summary}${accountRanking}${projectRanking}<div class="usage-note">${indexingNote}${escapeHtml(note)} 统计维度：${escapeHtml(usageDimensionLabels[selectedUsageDimension] || '按账号')} · 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}${renderCommandCodeReconciliation(periods)}
+      ${filterControls}${summary}${rankings}<div class="usage-note">${indexingNote}${escapeHtml(note)} 统计维度：${escapeHtml(usageDimensionLabels[selectedUsageDimension] || '按账号')} · 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}${renderCommandCodeReconciliation(periods)}
       <div class="table-wrap usage-table"><table>
         <thead>${dimensionHeaders[selectedUsageDimension] || dimensionHeaders.account}</thead>
         <tbody>${rows || '<tr><td colspan="11" class="empty-state">这个时间范围没有匹配的账号、模型或项目</td></tr>'}</tbody>
