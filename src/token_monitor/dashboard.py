@@ -873,7 +873,8 @@ _FAVICON_GLYPHS: dict[str, tuple[tuple, ...]] = {
     ),
 }
 # 中文注释：当前上线的方案（改这一个常量即可切换，测试会渲染全部方案）。
-_FAVICON_STYLE = "bars"
+# "guard" 来自 Stitch MCP 设计稿的「成本盾牌 + 脉搏线」：16px 下依然能认出盾牌轮廓。
+_FAVICON_STYLE = "guard"
 
 
 def _favicon_shapes() -> tuple[tuple, ...]:
