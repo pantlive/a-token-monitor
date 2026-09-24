@@ -1522,7 +1522,7 @@ __THEME_TOGGLE__
 
     <section id="traffic" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Traffic anomaly</div><h2>异常流量监控</h2><p class="section-description">按进程统计 Codex / Grok / Kimi / DeepSeek Harness 等 CLI 的 TCP 外发增量，发现异常大数据上传。回环流量不计入告警；不读取连接内容。</p></div>
+        <div><div class="section-kicker">Traffic anomaly</div><h2>异常流量监控</h2><p class="section-description">按进程统计 code agent 的 TCP 外发增量，发现异常大数据上传；回环不计入，不读取连接内容。</p></div>
         <div class="section-meta"><span class="section-count" id="traffic-section-count">等待扫描</span></div>
       </div>
       <div id="traffic-content"><div class="empty-state">正在扫描本机 code agent 异常流量…</div></div>
@@ -1530,7 +1530,7 @@ __THEME_TOGGLE__
 
     <section id="accounts" class="panel section-block">
       <div class="panel-heading">
-        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">看板卡片以「产品 · 订阅类型」为标题（如 Codex · Plus、Grok · SuperGrok），账号 ID 与 profile 退到次要信息行；账号仍按真实账号 ID 分组，profile 混合登录也不会串额。每张卡片固定展示 5 小时 / 周 / 月三行额度，缺的周期标「不适用」；没有任何额度窗口的订阅（如 DeepSeek Harness、Claude Code）本区不显示。活动会话默认折叠，可点击再展开，会话表里可直接归档单个已结束的 Codex 会话。</p></div>
+        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">卡片以「产品 · 套餐」为标题、按真实账号 ID 归并，固定展示 5 小时 / 周 / 月三行额度（缺的标「不适用」）；没有额度窗口的订阅不显示，活动会话默认折叠。</p></div>
         <div class="section-meta"><span class="section-count" id="account-section-count">— 个账号</span></div>
       </div>
       <div id="account-list" class="account-list"><div class="empty-state">正在读取账号状态…</div></div>
@@ -1561,7 +1561,7 @@ __THEME_TOGGLE__
           <span class="section-toggle-text">
             <span class="section-kicker">Alert history</span>
             <span class="section-toggle-title">告警历史</span>
-            <span class="section-description">异常流量告警已落盘到状态目录，daemon 重启后仍可查询；按时间、级别、规则和已读状态筛选，可逐条或一键标记已读。只保存进程、目录、对端和字节数等元数据。</span>
+            <span class="section-description">异常流量告警落盘在状态目录，可按时间、级别、规则和已读状态筛选；只保存进程、对端与字节数等元数据。</span>
             <span class="section-summary" id="alert-history-summary">展开查看详情</span>
           </span>
         </button>
@@ -1607,7 +1607,7 @@ __THEME_TOGGLE__
           <span class="section-toggle-text">
             <span class="section-kicker">Usage search</span>
             <span class="section-toggle-title">用量检索</span>
-            <span class="section-description">按日期、模型、账号和会话检索已索引的 token 历史记录，可切换会话明细、按日期、按模型和按账号四种视图；支持按 token 总量或估算金额排序。只读取 token 元数据，不读取对话内容。</span>
+            <span class="section-description">检索已索引的 token 历史，可切换会话明细 / 按日期 / 按模型 / 按账号四种视图；只读 token 元数据，不读对话内容。</span>
             <span class="section-summary" id="usage-search-summary">展开查看详情</span>
           </span>
         </button>
@@ -1652,7 +1652,7 @@ __THEME_TOGGLE__
           <span class="section-toggle-text">
             <span class="section-kicker">Housekeeping</span>
             <span class="section-toggle-title">磁盘与会话管理</span>
-            <span class="section-description">统计 Codex / Kimi / DeepSeek Harness / Grok / Command Code 等 agent 数据目录的占用，超过阈值时提醒；可按最后修改时间把不再需要的 Codex 会话压缩归档（tar.gz + manifest，可恢复）或直接清理，两者都会跳过仍在运行的会话。</span>
+            <span class="section-description">统计各 agent 数据目录占用，超阈值提醒；可按最后修改时间归档（tar.gz + manifest，可恢复）或清理 Codex 会话，都会跳过运行中的会话。</span>
             <span class="section-summary" id="housekeeping-summary">展开查看详情</span>
           </span>
         </button>
@@ -3722,14 +3722,14 @@ __THEME_TOGGLE__
     <div id="settings-body">
       <section id="scan-dirs" class="panel settings-block">
         <div class="panel-heading">
-          <div><div class="section-kicker">Scan directories</div><h2>扫描目录</h2><p class="section-description">管理各 code agent 的数据扫描目录。优先级：Web 配置 &gt; 命令行参数 &gt; 自动探测；Web 配置保存在状态目录的 scan-dirs.json，重启后仍然生效。新增目录必须已存在、可读且位于当前用户主目录之内，修改后立即生效并触发账号热重载。命令行参数可用卡片上标注的选项覆盖单个 provider，Web 配置则对所有 provider 生效。</p></div>
+          <div><div class="section-kicker">Scan directories</div><h2>扫描目录</h2><p class="section-description">管理各 code agent 的扫描目录，优先级：Web 配置 &gt; 命令行参数 &gt; 自动探测。目录需已存在、可读且在主目录内；保存后立即生效并热重载账号。</p></div>
           <div class="section-meta"><span class="section-count" id="scan-dirs-count">等待加载</span></div>
         </div>
         <div id="scan-dirs-content"><div class="empty-state"><span class="empty-title">正在读取扫描目录…</span></div></div>
       </section>
       <section id="history-settings" class="panel settings-block">
         <div class="panel-heading">
-          <div><div class="section-kicker">History data</div><h2>历史数据</h2><p class="section-description">管理用量索引、会话历史和告警历史的保留期与手动清理。保留天数优先级：Web 配置 &gt; 命令行参数 &gt; 默认值；告警保留天数只读展示，不可在线修改。清理只删除过期的历史行：活动会话和额度恢复记录始终保留，删除后对数据库做压缩。「预计释放」为按行数比例的估算值。</p></div>
+          <div><div class="section-kicker">History data</div><h2>历史数据</h2><p class="section-description">管理用量索引、会话历史与告警历史的保留期和手动清理，优先级：Web 配置 &gt; 命令行参数 &gt; 默认值。清理只删过期历史行，活动会话与额度记录始终保留。</p></div>
           <div class="section-meta"><span class="section-count" id="history-count">等待加载</span></div>
         </div>
         <div id="history-content"><div class="empty-state"><span class="empty-title">正在读取历史数据状态…</span></div></div>

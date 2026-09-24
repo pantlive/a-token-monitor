@@ -1589,6 +1589,23 @@ class StylesheetIntegrityTests(unittest.TestCase):
         self.assertIn('title="${escapeHtml(formatUsd(totalUsd))}"', page)
         self.assertIn('title="${escapeHtml(formatUsd(totalCacheSavings))}"', page)
 
+    def test_section_descriptions_stay_short(self) -> None:
+        """区块说明只留一行摘要：细节放 README，避免标题下堆成长段落。"""
+
+        for name, page in (("dashboard", _DASHBOARD_HTML), ("settings", _SETTINGS_HTML)):
+            # 说明文字有的在静态 HTML（<p>），有的由折叠区块的 JS 模板给出（<span>），
+            # 所以这里按 class 抓全部，而不是只看 <h2> 后面那一段。
+            bodies = re.findall(r'class="section-description">([^<]*)<', page)
+            self.assertTrue(bodies, f"{name} 应该还有区块说明")
+            for body in bodies:
+                with self.subTest(page=name, text=body[:24]):
+                    self.assertLessEqual(
+                        len(body),
+                        90,
+                        f"{name} 的说明太长（{len(body)} 字）：{body}",
+                    )
+                    self.assertGreater(len(body), 10)
+
     def test_shell_can_shrink_and_topbar_wraps(self) -> None:
         """主区域必须可收缩、顶栏允许换行，否则新增按钮会挤出视口。"""
 
