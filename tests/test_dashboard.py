@@ -2183,6 +2183,21 @@ class FaviconTests(unittest.TestCase):
         for stale in ("renderQuotaCards", "quota-card", "quota-grid", "quota-meta"):
             self.assertNotIn(stale, page)
 
+    def test_subscriptions_without_quota_windows_are_hidden(self) -> None:
+        """没有 5 小时 / 周 / 月任一窗口的订阅整张卡片都不显示，计数只算显示出来的。"""
+
+        page = _DASHBOARD_HTML
+        self.assertIn("const accountsWithQuota = new Set(", page)
+        self.assertIn(".filter((name) => accountsWithQuota.has(name));", page)
+        self.assertIn("没有带额度窗口的订阅", page)
+        self.assertIn("不在本区显示", page)
+        # 计数用过滤后的 names，而不是全部账号。
+        self.assertIn(
+            "document.getElementById('account-section-count').textContent = "
+            "names.length ? `${names.length} 个账号` : '暂无额度订阅';",
+            page,
+        )
+
     def test_account_card_leads_with_the_subscription(self) -> None:
         """「账号与额度」卡片必须把订阅类型放最前，账号 ID 降到次要信息。"""
 
