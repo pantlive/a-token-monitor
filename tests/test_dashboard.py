@@ -1714,8 +1714,162 @@ class SubscriptionPlanTests(unittest.TestCase):
         self.assertEqual(state["quotas"][0]["plan_type"], "plus")
         self.assertEqual(state["accounts"][0]["plan_type"], "plus")
 
-    def test_declared_metadata_plan_wins_over_auth_file(self) -> None:
-        """扫描目录元数据里已经写明的订阅类型优先于 auth.json。"""
+    def test_each_account_keeps_its_own_plan(self) -> None:
+        """多账号时每个账号必须用自己的套餐。
+
+        回归用例：套餐曾经在外层循环里算好、在内层循环里被复用，导致两个
+        Codex 账号都显示成最后一个账号的套餐（plus / prolite 全变成 prolite）。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            registries = {
+                "codex": MultiSessionRegistry(root / "personal-state"),
+                "codex-work": MultiSessionRegistry(root / "work-state"),
+            }
+            registries["codex"].save_quota(
+                QuotaSnapshot(observed_at=100, plan_type=None, source="app-server")
+            )
+            registries["codex-work"].save_quota(
+                QuotaSnapshot(observed_at=100, plan_type=None, source="app-server")
+            )
+
+            state = build_multi_dashboard_state(
+                registries,
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-personal",
+                        "profile_name": "codex",
+                        "codex_home": str(root / "missing-personal"),
+                        "plan_type": "plus",
+                    },
+                    "codex-work": {
+                        "account_id": "account-work",
+                        "profile_name": "codex-work",
+                        "codex_home": str(root / "missing-work"),
+                        "plan_type": "prolite",
+                    },
+                },
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+
+        plans = {
+            account["account_id"]: account["plan_type"]
+            for account in state["accounts"]
+        }
+        self.assertEqual(
+            plans,
+            {"account-personal": "plus", "account-work": "prolite"},
+        )
+        quota_plans = {
+            quota["account_id"]: quota["plan_type"] for quota in state["quotas"]
+        }
+        self.assertEqual(
+            quota_plans,
+            {"account-personal": "plus", "account-work": "prolite"},
+        )
+
+    def test_plans_come_from_each_accounts_auth_file(self) -> None:
+        """两个 CODEX_HOME 各自解析自己的 id_token，互不串味。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            homes = {}
+            for name, plan in (("personal", "plus"), ("work", "prolite")):
+                home = root / f".codex-{name}"
+                home.mkdir(parents=True)
+                (home / "auth.json").write_text(
+                    json.dumps(
+                        {
+                            "tokens": {
+                                "account_id": f"account-{name}",
+                                "id_token": self._jwt(
+                                    {
+                                        "https://api.openai.com/auth": {
+                                            "chatgpt_plan_type": plan
+                                        }
+                                    }
+                                ),
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                homes[name] = home
+            registries = {
+                "codex": MultiSessionRegistry(root / "personal-state"),
+                "codex-work": MultiSessionRegistry(root / "work-state"),
+            }
+
+            state = build_multi_dashboard_state(
+                registries,
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-personal",
+                        "profile_name": "codex",
+                        "codex_home": str(homes["personal"]),
+                    },
+                    "codex-work": {
+                        "account_id": "account-work",
+                        "profile_name": "codex-work",
+                        "codex_home": str(homes["work"]),
+                    },
+                },
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+
+        self.assertEqual(
+            {account["account_id"]: account["plan_type"] for account in state["accounts"]},
+            {"account-personal": "plus", "account-work": "prolite"},
+        )
+
+    def test_auth_file_plan_wins_over_the_declared_snapshot(self) -> None:
+        """auth.json 是 Codex 自己写的：续费 / 换号后不必重启 daemon。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps({"tokens": {"chatgpt_plan_type": "plus"}}),
+                encoding="utf-8",
+            )
+            registry = MultiSessionRegistry(root / "state")
+            registry.save_quota(
+                QuotaSnapshot(observed_at=100, plan_type=None, source="app-server")
+            )
+
+            state = build_multi_dashboard_state(
+                {"codex": registry},
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-1",
+                        "profile_name": "codex",
+                        "codex_home": str(home),
+                        # 账号构造时的旧快照，应当被 auth.json 覆盖。
+                        "plan_type": "prolite",
+                    }
+                },
+                grok_homes=(),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(),
+                claude_homes=(),
+            )
+
+        self.assertEqual(state["accounts"][0]["plan_type"], "plus")
+        self.assertEqual(state["quotas"][0]["plan_type"], "plus")
+
+    def test_declared_plan_is_the_fallback_when_auth_file_is_missing(self) -> None:
+        """auth.json 读不到时（未登录 / 目录不存在）退回账号元数据里的值。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
