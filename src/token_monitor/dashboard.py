@@ -79,199 +79,143 @@ _RECENT_FINISHED_SECONDS = 24 * 3600.0
 _BASE_CSS = r"""
     :root {
       color-scheme: dark;
-      --bg: #10141c;
-      --panel: #181f2b;
-      --panel-soft: #202a39;
-      --text: #edf2f7;
-      --muted: #9eabbc;
-      --line: #303d50;
-      --green: #55d187;
-      --yellow: #f5c451;
-      --red: #f47f7f;
-      --blue: #82b7ff;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      padding: 24px;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
-    }
-    .app-shell {
-      display: grid;
-      grid-template-columns: 220px minmax(0, 1fr);
-      gap: 24px;
-      max-width: 1680px;
-      margin: 0 auto;
-    }
-    main { min-width: 0; }
-    .sidebar {
-      position: sticky;
-      top: 24px;
-      align-self: start;
-      min-height: calc(100vh - 48px);
-      padding: 18px 14px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--panel);
-    }
-    .sidebar-brand { padding: 2px 10px 18px; font-weight: 700; }
-    .sidebar-brand small { display: block; margin-top: 3px; color: var(--muted); font-weight: 400; }
-    .sidebar nav { display: grid; gap: 6px; }
-    .sidebar-link {
-      display: block;
-      padding: 9px 10px;
-      border: 1px solid transparent;
-      border-radius: 8px;
-      color: var(--muted);
-      text-decoration: none;
-    }
-    .sidebar-link:hover, .sidebar-link.active { border-color: var(--line); color: var(--text); background: var(--panel-soft); }
-    .sidebar-foot { margin: 24px 10px 0; color: var(--muted); font-size: 12px; }
-    header { display: flex; justify-content: space-between; gap: 16px; align-items: end; }
-    h1 { margin: 0; font-size: 26px; letter-spacing: .01em; }
-    h2 { margin: 0 0 14px; font-size: 17px; }
-    .muted { color: var(--muted); }
-    .error {
-      display: none;
-      margin: 18px 0;
-      padding: 12px 14px;
-      border: 1px solid var(--red);
-      border-radius: 10px;
-      color: var(--red);
-      background: #3a2028;
-    }
-    .cards {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(150px, 1fr));
-      gap: 12px;
-      margin: 24px 0;
-    }
-    .card, .panel {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--panel);
-    }
-    .card { padding: 16px; }
-    .card-label { color: var(--muted); font-size: 12px; }
-    .card-value { margin-top: 5px; font-size: 24px; font-weight: 700; }
-    .quota-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 12px;
-    }
-    .account-list { display: grid; gap: 16px; }
-    .account-block {
-      padding: 16px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--panel-soft);
-    }
-    .account-heading {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 16px;
-    }
-    .account-title { margin: 0; font-size: 18px; }
-    .account-subtitle {
-      margin: 18px 0 10px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: .04em;
-    }
-    .account-block .account-subtitle:first-of-type { margin-top: 0; }
-    .account-block .quota-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-    .account-block .table-wrap { margin: 0 -8px -8px; }
-    .quota-card { padding: 16px; }
-    .quota-title { display: flex; justify-content: space-between; gap: 8px; }
-    .quota-name { font-weight: 700; }
-    .quota-percent { font-size: 20px; font-weight: 700; }
-    .bar { height: 8px; margin: 12px 0; border-radius: 99px; background: var(--panel-soft); overflow: hidden; }
-    .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
-    .bar > span.warn { background: var(--yellow); }
-    .bar > span.danger { background: var(--red); }
-    .quota-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; color: var(--muted); font-size: 12px; }
-    .quota-meta dd { margin: 0; color: var(--text); text-align: right; }
-    .panel { margin-top: 24px; padding: 18px; overflow: hidden; }
-    .panel-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-    .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 19px; }
-    .section-description { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-    .section-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
-    .section-count { padding: 4px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); white-space: nowrap; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; min-width: 900px; }
-    th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-    th { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
-    td { font-size: 13px; }
-    .session-id { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
-    .cwd, .event, .error-text { max-width: 340px; overflow-wrap: anywhere; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; white-space: nowrap; }
-    .pill.running { color: var(--green); background: #163725; }
-    .pill.limit_blocked { color: var(--yellow); background: #3b3218; }
-    .pill.waiting_for_approval { color: var(--blue); background: #1b304c; }
-    .pill.failed, .pill.orphaned { color: var(--red); background: #3a2028; }
-    .pill.other { color: var(--muted); background: var(--panel-soft); }
-    .usage-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
-    .usage-tab {
-      padding: 7px 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      background: var(--panel-soft);
-      cursor: pointer;
-    }
-    .usage-tab.selected { border-color: var(--blue); color: var(--text); background: #1b304c; }
-    .usage-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 12px; }
-    .usage-filter { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
-    .usage-filter select {
-      min-width: 220px;
-      padding: 7px 9px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--text);
-      background: var(--panel-soft);
-    }
-    .usage-note { margin-bottom: 12px; color: var(--muted); font-size: 12px; }
-    .usage-table table { min-width: 1180px; }
-    .usage-models { display: grid; gap: 3px; min-width: 180px; }
-    .usage-model { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
-    .usage-number { white-space: nowrap; }
-
-    /* Stitch 运维控制台视觉：用深色 graphite、violet 主色和 cyan 状态色重排信息层级。 */
-    :root {
       --bg: #0b0f14;
-      --sidebar: #0d131a;
       --panel: #111820;
       --panel-soft: #192532;
-      --surface-raised: #151f2a;
-      --surface-hover: #1d2c3a;
       --text: #edf3f8;
       --muted: #8fa0b4;
-      --muted-strong: #b8c5d3;
       --line: #263849;
-      --line-soft: #1c2a37;
       --green: #34d399;
-      --green-soft: #12372d;
       --yellow: #f59e0b;
-      --yellow-soft: #3b2b11;
       --red: #fb7185;
-      --red-soft: #3d1d29;
       --blue: #60a5fa;
+      --sidebar: #0d131a;
+      --surface-raised: #151f2a;
+      --surface-hover: #1d2c3a;
+      --muted-strong: #b8c5d3;
+      --line-soft: #1c2a37;
+      --green-soft: #12372d;
+      --yellow-soft: #3b2b11;
+      --red-soft: #3d1d29;
       --blue-soft: #152f4d;
       --violet: #8b5cf6;
       --violet-soft: #241c47;
       --cyan: #22d3ee;
       --cyan-soft: #123440;
       --shadow: 0 18px 42px rgba(0, 0, 0, .18);
+      --green-soft-strong: #163725;
+      --green-border: #1f6f52;
+      --green-text: #6ee7b7;
+      --green-glow: rgba(52, 211, 153, .1);
+      --yellow-soft-strong: #3b3218;
+      --yellow-border: #7a5410;
+      --yellow-text: #fcd34d;
+      --red-soft-strong: #3a2028;
+      --red-border: #6c2e43;
+      --red-text: #fda4af;
+      --red-glow: rgba(251, 113, 133, .1);
+      --blue-soft-strong: #1b304c;
+      --blue-border: #2c4a78;
+      --blue-text: #93c5fd;
+      --violet-border: #3d3170;
+      --violet-border-accent: #a78bfa;
+      --violet-border-strong: #5541a0;
+      --violet-border-active: #3b2b69;
+      --violet-border-selected: #654bc0;
+      --violet-text-accent: #c4b5fd;
+      --violet-text: #b9a4ff;
+      --violet-text-soft: #eee9ff;
+      --violet-text-strong: #f4f0ff;
+      --violet-glow: rgba(139, 92, 246, .24);
+      --cyan-border: #345064;
+      --cyan-border-strong: #2a6f86;
+      --cyan-hover: #16404f;
+      --cyan-text: #a5f3fc;
+      --track: #202e3d;
+      --track-strong: #2f4a63;
+      --overlay-hover: rgba(255, 255, 255, .018);
+      --overlay-chip: rgba(255, 255, 255, .045);
+      --muted-dim: #64778b;
+      --muted-faint: #66798d;
+      --muted-separator: #425366;
+      --muted-th: #71859a;
+      --placeholder-text: #6c8098;
+      --border-strong: #3d5670;
+      --focus-ring: rgba(34, 211, 238, .35);
+    }
+
+    /* 中文注释：白天模式复用同一组语义变量，只覆盖取值；JS 在 <html> 上切换
+       data-theme，保证所有组件（含 SVG 图表、健康徽标、告警等级）一起变色。 */
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --sidebar: #ffffff;
+      --panel: #ffffff;
+      --panel-soft: #f2f5f9;
+      --surface-raised: #ffffff;
+      --surface-hover: #eef2f8;
+      --text: #17212b;
+      --muted: #5d6b7a;
+      --muted-strong: #37424e;
+      --line: #d9e1ea;
+      --line-soft: #e8edf3;
+      --green: #0f9d63;
+      --green-soft: #e4f6ed;
+      --green-soft-strong: #d2efdf;
+      --green-border: #a3dcc0;
+      --green-text: #0a7a4b;
+      --green-glow: rgba(15, 157, 99, .14);
+      --yellow: #b45309;
+      --yellow-soft: #fdf2dd;
+      --yellow-soft-strong: #fbe6c4;
+      --yellow-border: #f0c583;
+      --yellow-text: #8a4b06;
+      --red: #d6455d;
+      --red-soft: #fdeaee;
+      --red-soft-strong: #fbdae1;
+      --red-border: #f0b4c0;
+      --red-text: #a52a44;
+      --red-glow: rgba(214, 69, 93, .14);
+      --blue: #2563eb;
+      --blue-soft: #e8efff;
+      --blue-soft-strong: #d8e6ff;
+      --blue-border: #aac8f6;
+      --blue-text: #1d4ed8;
+      --violet: #6d4aff;
+      --violet-soft: #efeaff;
+      --violet-border: #cec2f8;
+      --violet-border-accent: #8b6bff;
+      --violet-border-strong: #b7a6f3;
+      --violet-border-active: #ddd4fc;
+      --violet-border-selected: #b9a8f5;
+      --violet-text-accent: #6d4aff;
+      --violet-text: #5a35d6;
+      --violet-text-soft: #4630a8;
+      --violet-text-strong: #35247f;
+      --violet-glow: rgba(109, 74, 255, .18);
+      --cyan: #0e7490;
+      --cyan-soft: #e3f4f9;
+      --cyan-border: #a9d8e3;
+      --cyan-border-strong: #7cc3d4;
+      --cyan-hover: #d5eef5;
+      --cyan-text: #0b5f75;
+      --track: #e5eaf1;
+      --track-strong: #ccd7e3;
+      --overlay-hover: rgba(16, 32, 48, .035);
+      --overlay-chip: rgba(16, 32, 48, .05);
+      --muted-dim: #7c8a99;
+      --muted-faint: #8694a3;
+      --muted-separator: #b7c1cd;
+      --muted-th: #7c8a99;
+      --placeholder-text: #9aa6b4;
+      --border-strong: #b9c6d4;
+      --focus-ring: rgba(14, 116, 144, .28);
+      --shadow: 0 12px 28px rgba(15, 32, 56, .10);
     }
     html { scroll-behavior: smooth; }
     body {
       padding: 0;
+      color: var(--text);
       background: var(--bg);
       font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       letter-spacing: -.01em;
@@ -317,17 +261,17 @@ _BASE_CSS = r"""
       height: 36px;
       flex: 0 0 auto;
       place-items: center;
-      border: 1px solid #a78bfa;
+      border: 1px solid var(--violet-border-accent);
       border-radius: 10px;
       color: white;
       background: var(--violet);
-      box-shadow: 0 8px 20px rgba(139, 92, 246, .24);
+      box-shadow: 0 8px 20px var(--violet-glow);
     }
     .brand-mark svg { width: 20px; height: 20px; }
     .brand-name { font-size: 15px; font-weight: 750; letter-spacing: -.02em; }
-    .brand-name span { color: #b9a4ff; }
+    .brand-name span { color: var(--violet-text); }
     .sidebar-brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 400; }
-    .sidebar-label { padding: 0 11px 9px; color: #64778b; font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .sidebar-label { padding: 0 11px 9px; color: var(--muted-dim); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
     .sidebar nav { display: grid; gap: 5px; }
     .sidebar-link {
       display: flex;
@@ -343,33 +287,38 @@ _BASE_CSS = r"""
     }
     .sidebar-link svg { width: 17px; height: 17px; flex: 0 0 auto; opacity: .82; }
     .sidebar-link:hover { border-color: var(--line); color: var(--muted-strong); background: var(--panel); }
-    .sidebar-link.active { border-color: #3b2b69; color: #f4f0ff; background: var(--violet-soft); box-shadow: inset 2px 0 0 var(--violet); }
-    .sidebar-link.active svg { color: #b9a4ff; opacity: 1; }
+    .sidebar-link.active { border-color: var(--violet-border-active); color: var(--violet-text-strong); background: var(--violet-soft); box-shadow: inset 2px 0 0 var(--violet); }
+    .sidebar-link.active svg { color: var(--violet-text); opacity: 1; }
     .nav-count { min-width: 22px; margin-left: auto; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); font-size: 11px; text-align: center; }
     .sidebar-bottom { display: grid; gap: 8px; margin-top: auto; padding: 14px 11px 0; border-top: 1px solid var(--line-soft); }
     .service-state, .live-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-strong); font-size: 12px; }
-    .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(52, 211, 153, .1); }
-    .status-dot.error { background: var(--red); box-shadow: 0 0 0 4px rgba(251, 113, 133, .1); }
+    .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px var(--green-glow); }
+    .status-dot.error { background: var(--red); box-shadow: 0 0 0 4px var(--red-glow); }
     .health-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 99px; background: none; color: var(--muted-strong); font-size: 11px; cursor: pointer; }
     .health-badge .health-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-    .health-badge.ok { border-color: #1f6f52; color: #6ee7b7; background: var(--green-soft); }
-    .health-badge.degraded { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
-    .health-badge.failed { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .health-badge.ok { border-color: var(--green-border); color: var(--green-text); background: var(--green-soft); }
+    .health-badge.degraded { border-color: var(--yellow-border); color: var(--yellow-text); background: var(--yellow-soft); }
+    .health-badge.failed { border-color: var(--red-border); color: var(--red-text); background: var(--red-soft); }
     .health-badge.starting { color: var(--muted); }
     .health-detail { margin: -14px 0 20px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted-strong); font-size: 12px; }
     .health-detail ul { margin: 8px 0 0; padding-left: 18px; }
     .health-detail li { margin: 4px 0; }
-    .sidebar-foot { margin: 0; color: #66798d; font-size: 11px; }
+    .sidebar-foot { margin: 0; color: var(--muted-faint); font-size: 11px; }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 72px; margin-bottom: 34px; border-bottom: 1px solid var(--line-soft); }
     .breadcrumb { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
     .breadcrumb strong { color: var(--muted-strong); font-weight: 600; }
-    .breadcrumb-separator { color: #425366; }
+    .breadcrumb-separator { color: var(--muted-separator); }
     .topbar-actions { display: flex; align-items: center; gap: 15px; }
     .refresh-button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
     .refresh-button:hover { border-color: var(--violet); color: var(--text); background: var(--surface-raised); }
     .refresh-button:disabled { cursor: wait; opacity: .7; }
     .refresh-button svg { width: 15px; height: 15px; }
     .refresh-button.is-spinning svg { animation: spin .8s linear infinite; }
+    .theme-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
+    .theme-toggle:hover { border-color: var(--violet); color: var(--text); background: var(--surface-raised); }
+    .theme-toggle svg { width: 15px; height: 15px; display: none; }
+    /* 中文注释：三种模式各用一个图标，用 html 上的 data-theme-mode 决定显示哪个。 */
+    html[data-theme-mode="system"] .theme-icon-system, html[data-theme-mode="light"] .theme-icon-light, html[data-theme-mode="dark"] .theme-icon-dark { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .page-hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 25px; }
     .eyebrow, .section-kicker { margin-bottom: 7px; color: var(--cyan); font-size: 10px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
@@ -379,15 +328,15 @@ _BASE_CSS = r"""
     .hero-description { margin: 8px 0 0; color: var(--muted); }
     .hero-context { display: flex; align-items: center; gap: 10px; padding-bottom: 3px; }
     .muted { color: var(--muted); }
-    .error { display: none; margin: 0 0 20px; padding: 12px 14px; border: 1px solid #6c2e43; border-radius: 9px; color: #fda4af; background: var(--red-soft); }
+    .error { display: none; margin: 0 0 20px; padding: 12px 14px; border: 1px solid var(--red-border); border-radius: 9px; color: var(--red-text); background: var(--red-soft); }
     .card, .panel { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
     .account-subtitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0 10px; color: var(--muted-strong); font-size: 12px; font-weight: 650; }
     .table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); }
     table { width: 100%; min-width: 900px; border-collapse: collapse; }
     th, td { padding: 11px 12px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
     tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: rgba(255, 255, 255, .018); }
-    th { color: #71859a; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+    tbody tr:hover { background: var(--overlay-hover); }
+    th { color: var(--muted-th); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
     td { color: var(--muted-strong); font-size: 12px; }
     .pill { display: inline-block; padding: 3px 8px; border-radius: 99px; font-size: 11px; white-space: nowrap; }
     .pill.running { color: var(--green); background: var(--green-soft); }
@@ -408,20 +357,20 @@ _BASE_CSS = r"""
     .field-label { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
     .field select, .field input { min-width: 128px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-size: 12px; }
     .field select { padding-right: 28px; cursor: pointer; }
-    .field input::placeholder { color: #6c8098; }
+    .field input::placeholder { color: var(--placeholder-text); }
     .field.wide select, .field.wide input { min-width: 208px; }
     .field input[type="date"] { color-scheme: dark; }
-    .field select:focus, .field input:focus { border-color: var(--cyan); outline: 2px solid rgba(34, 211, 238, .35); outline-offset: 1px; }
+    .field select:focus, .field input:focus { border-color: var(--cyan); outline: 2px solid var(--focus-ring); outline-offset: 1px; }
     .toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
     .toolbar-note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
     /* 按钮：一个基础样式加少量语义变体，替换此前到处复用的 .refresh-button。 */
     .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; transition: border-color .15s ease, background .15s ease, color .15s ease; }
-    .btn:hover { border-color: #3d5670; color: var(--text); background: var(--surface-hover); }
-    .btn.primary { border-color: #2a6f86; color: #a5f3fc; background: var(--cyan-soft); }
-    .btn.primary:hover { border-color: var(--cyan); background: #16404f; }
-    .btn.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
+    .btn:hover { border-color: var(--border-strong); color: var(--text); background: var(--surface-hover); }
+    .btn.primary { border-color: var(--cyan-border-strong); color: var(--cyan-text); background: var(--cyan-soft); }
+    .btn.primary:hover { border-color: var(--cyan); background: var(--cyan-hover); }
+    .btn.warn { border-color: var(--yellow-border); color: var(--yellow-text); background: var(--yellow-soft); }
     .btn.warn:hover { border-color: var(--yellow); }
-    .btn.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
+    .btn.danger { border-color: var(--red-border); color: var(--red-text); background: var(--red-soft); }
     .btn.danger:hover { border-color: var(--red); }
     .btn.mini { padding: 6px 10px; font-size: 11px; }
     .btn[disabled] { opacity: .55; cursor: not-allowed; }
@@ -434,9 +383,9 @@ _BASE_CSS = r"""
     .cell-main { color: var(--muted-strong); font-size: 12px; }
     .cell-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }
     .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); background: var(--panel); font-size: 11px; white-space: nowrap; }
-    .chip.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
-    .chip.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
-    .chip.ok { border-color: #1f6f52; color: #6ee7b7; background: var(--green-soft); }
+    .chip.warn { border-color: var(--yellow-border); color: var(--yellow-text); background: var(--yellow-soft); }
+    .chip.danger { border-color: var(--red-border); color: var(--red-text); background: var(--red-soft); }
+    .chip.ok { border-color: var(--green-border); color: var(--green-text); background: var(--green-soft); }
     .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
     .chip-button { padding: 0; border: 0; color: var(--cyan); background: none; cursor: pointer; font: inherit; font-size: 11px; text-align: left; }
     .chip-button:hover { text-decoration: underline; }
@@ -464,7 +413,7 @@ _DASHBOARD_CSS = r"""
     .kpi-card.accent-green { --accent: var(--green); }
     .kpi-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .kpi-label { color: var(--muted); font-size: 12px; }
-    .kpi-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 7px; color: var(--accent); background: rgba(255, 255, 255, .045); }
+    .kpi-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 7px; color: var(--accent); background: var(--overlay-chip); }
     .kpi-icon svg { width: 16px; height: 16px; }
     .kpi-value { margin-top: 8px; font-size: 28px; font-weight: 750; letter-spacing: -.045em; }
     .kpi-foot { display: flex; align-items: center; gap: 5px; margin-top: 9px; color: var(--muted); font-size: 11px; }
@@ -489,12 +438,12 @@ _DASHBOARD_CSS = r"""
     .account-block { padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
     .account-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
     .account-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
-    .account-avatar { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border: 1px solid #3d3170; border-radius: 10px; color: #c4b5fd; background: var(--violet-soft); font-size: 13px; font-weight: 750; }
+    .account-avatar { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border: 1px solid var(--violet-border); border-radius: 10px; color: var(--violet-text-accent); background: var(--violet-soft); font-size: 13px; font-weight: 750; }
     .account-label { color: var(--cyan); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
     .account-title { margin: 2px 0 3px; font-size: 17px; letter-spacing: -.02em; overflow-wrap: anywhere; }
     .account-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .account-side { display: grid; justify-items: end; gap: 7px; text-align: right; }
-    .plan-badge { padding: 4px 8px; border: 1px solid #345064; border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
+    .plan-badge { padding: 4px 8px; border: 1px solid var(--cyan-border); border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
     .account-activity { color: var(--muted); font-size: 11px; }
     .account-block .account-subtitle:first-of-type { margin-top: 17px; }
     .quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 11px; }
@@ -502,7 +451,7 @@ _DASHBOARD_CSS = r"""
     .quota-title { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
     .quota-name { color: var(--muted-strong); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
     .quota-percent { color: var(--text); font-size: 20px; font-weight: 750; letter-spacing: -.04em; }
-    .bar { height: 6px; margin: 13px 0 12px; border-radius: 99px; background: #202e3d; overflow: hidden; }
+    .bar { height: 6px; margin: 13px 0 12px; border-radius: 99px; background: var(--track); overflow: hidden; }
     .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
     .bar > span.warn { background: var(--yellow); }
     .bar > span.danger { background: var(--red); }
@@ -517,10 +466,10 @@ _DASHBOARD_CSS = r"""
     .traffic-remote { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
     .usage-tabs { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 14px; }
     .usage-tab { padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface-raised); cursor: pointer; }
-    .usage-tab:hover { border-color: #5541a0; color: var(--muted-strong); }
-    .usage-tab.selected { border-color: #654bc0; color: #eee9ff; background: var(--violet-soft); }
+    .usage-tab:hover { border-color: var(--violet-border-strong); color: var(--muted-strong); }
+    .usage-tab.selected { border-color: var(--violet-border-selected); color: var(--violet-text-soft); background: var(--violet-soft); }
     .session-toggle { margin: 10px 0 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--surface-raised); cursor: pointer; font-size: 12px; }
-    .session-toggle:hover { border-color: #5541a0; background: var(--surface-hover); }
+    .session-toggle:hover { border-color: var(--violet-border-strong); background: var(--surface-hover); }
     .usage-filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
     .usage-filter { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
     .usage-filter select { min-width: 220px; padding: 8px 30px 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); cursor: pointer; }
@@ -549,9 +498,9 @@ _DASHBOARD_CSS = r"""
     .alert-row .alert-link:hover { text-decoration: underline; }
     .alert-list { display: grid; gap: 8px; }
     .alert-banner { padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted-strong); background: var(--surface-raised); font-size: 12px; }
-    .alert-banner.warn { border-color: #7a5410; color: #fcd34d; background: var(--yellow-soft); }
-    .alert-banner.danger { border-color: #6c2e43; color: #fda4af; background: var(--red-soft); }
-    .alert-banner.tip { border-color: #2c4a78; color: #93c5fd; background: var(--blue-soft); }
+    .alert-banner.warn { border-color: var(--yellow-border); color: var(--yellow-text); background: var(--yellow-soft); }
+    .alert-banner.danger { border-color: var(--red-border); color: var(--red-text); background: var(--red-soft); }
+    .alert-banner.tip { border-color: var(--blue-border); color: var(--blue-text); background: var(--blue-soft); }
     .alert-banner.info { border-color: var(--line); color: var(--muted-strong); background: var(--surface-raised); }
     .alert-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
     .alert-filter { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
@@ -598,10 +547,10 @@ _DASHBOARD_CSS = r"""
     .mini-card-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 13px; }
     .metric-label { color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
     .metric-value { margin-top: 2px; font-size: 14px; font-weight: 700; }
-    .ratio { display: flex; height: 6px; margin-top: 11px; border-radius: 99px; background: #202e3d; overflow: hidden; }
+    .ratio { display: flex; height: 6px; margin-top: 11px; border-radius: 99px; background: var(--track); overflow: hidden; }
     .ratio span { display: block; height: 100%; }
     .ratio .ratio-sessions { background: var(--violet); }
-    .ratio .ratio-other { background: #2f4a63; }
+    .ratio .ratio-other { background: var(--track-strong); }
     .action-result { margin: 0 0 12px; }
 """
 
@@ -662,13 +611,108 @@ _SETTINGS_CSS = r"""
 """
 
 
-_DASHBOARD_HTML = (
+# 中文注释：主题实现由 Dashboard 与设置页共享，避免两个页面各写一份。
+_THEME_BOOT_SCRIPT = r"""  <script>
+    // 主题预置：在样式解析前写入 data-theme / data-theme-mode，避免切换主题时闪白或闪黑。
+    (() => {
+      try {
+        const stored = window.localStorage.getItem('token-monitor-theme');
+        const mode = ['light', 'dark', 'system'].includes(stored) ? stored : 'system';
+        const prefersLight = window.matchMedia
+          ? window.matchMedia('(prefers-color-scheme: light)').matches
+          : false;
+        const light = mode === 'light' || (mode === 'system' && prefersLight);
+        const root = document.documentElement;
+        root.dataset.theme = light ? 'light' : 'dark';
+        root.dataset.themeMode = mode;
+      } catch (error) {
+        document.documentElement.dataset.theme = 'dark';
+        document.documentElement.dataset.themeMode = 'dark';
+      }
+    })();
+  </script>
+"""
+
+_THEME_TOGGLE_HTML = r"""        <button id="theme-toggle" class="theme-toggle" type="button" title="主题：跟随系统（点击切换）" aria-label="切换主题，当前跟随系统">
+          <svg class="theme-icon theme-icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8 20h8M12 16.5v3.5"/></svg>
+          <svg class="theme-icon theme-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
+          <svg class="theme-icon theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <span id="theme-label">跟随系统</span>
+        </button>
+"""
+
+_THEME_SCRIPT = r"""  // 主题：跟随系统 / 白天 / 夜间，选择存 localStorage，切换不需要刷新页面。
+  const THEME_STORAGE_KEY = 'token-monitor-theme';
+  const THEME_MODES = ['system', 'light', 'dark'];
+  const THEME_LABELS = { system: '跟随系统', light: '白天', dark: '夜间' };
+  const themeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+  const readThemeMode = () => {
+    try {
+      const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+      return THEME_MODES.includes(stored) ? stored : 'system';
+    } catch (error) {
+      return 'system';
+    }
+  };
+  const resolvedTheme = (mode) => (mode === 'system'
+    ? (themeQuery && themeQuery.matches ? 'light' : 'dark')
+    : mode);
+  const applyTheme = () => {
+    const mode = readThemeMode();
+    const root = document.documentElement;
+    root.dataset.theme = resolvedTheme(mode);
+    root.dataset.themeMode = mode;
+    const label = document.getElementById('theme-label');
+    if (label) label.textContent = THEME_LABELS[mode];
+    const toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+      toggle.title = `主题：${THEME_LABELS[mode]}（点击切换）`;
+      toggle.setAttribute('aria-label', `切换主题，当前${THEME_LABELS[mode]}`);
+    }
+  };
+  const cycleTheme = () => {
+    const mode = readThemeMode();
+    const next = THEME_MODES[(THEME_MODES.indexOf(mode) + 1) % THEME_MODES.length];
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch (error) {
+      // 隐私模式下写不了 localStorage：本次仍然生效，只是不记忆。
+    }
+    applyTheme();
+  };
+  document.getElementById('theme-toggle')?.addEventListener('click', cycleTheme);
+  if (themeQuery && themeQuery.addEventListener) {
+    themeQuery.addEventListener('change', () => {
+      if (readThemeMode() === 'system') applyTheme();
+    });
+  }
+  applyTheme();
+"""
+
+
+_PAGE_THEME_REPLACEMENTS = (
+    ("__THEME_BOOT__", _THEME_BOOT_SCRIPT),
+    ("__THEME_TOGGLE__", _THEME_TOGGLE_HTML),
+    ("__THEME_SCRIPT__", _THEME_SCRIPT),
+)
+
+
+def _apply_theme_parts(html: str) -> str:
+    """把共享的主题实现注入页面模板，并确认占位符都已替换。"""
+
+    for marker, snippet in _PAGE_THEME_REPLACEMENTS:
+        html = html.replace(marker, snippet)
+    return html
+
+
+_DASHBOARD_HTML = _apply_theme_parts((
     r"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
+__THEME_BOOT__
   <title>Token Monitor</title>
   <style>
 """
@@ -713,6 +757,7 @@ _DASHBOARD_HTML = (
       <div class="topbar-actions">
         <div class="live-indicator"><span class="status-dot"></span><span id="service-sync">等待首次同步</span></div>
         <button id="health-indicator" class="health-badge" type="button" style="display:none" aria-expanded="false"></button>
+__THEME_TOGGLE__
         <button id="refresh-button" class="refresh-button" type="button" aria-label="立即刷新状态"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
       </div>
     </header>
@@ -2497,6 +2542,7 @@ _DASHBOARD_HTML = (
       if (collapsedSections.has(id)) setSectionCollapsed(id, false);
     });
   });
+__THEME_SCRIPT__
   refresh();
   ['alert-history', 'usage-search', 'housekeeping'].forEach(ensureSectionLoaded);
   window.setInterval(refresh, 5000);
@@ -2504,18 +2550,19 @@ _DASHBOARD_HTML = (
 </body>
 </html>
 """
-)
+))
 
 
 # 中文注释：独立设置页与主页共用 _BASE_CSS / _RESPONSIVE_CSS，只追加设置页独有样式；
 # 设置子块（如扫描目录）平级放在 #settings-body 内，之后可直接追加新的设置项。
-_SETTINGS_HTML = (
+_SETTINGS_HTML = _apply_theme_parts((
     r"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
+__THEME_BOOT__
   <title>设置 - Token Monitor</title>
   <style>
 """
@@ -2551,6 +2598,7 @@ _SETTINGS_HTML = (
     <header class="topbar">
       <div class="breadcrumb"><span>Token Monitor</span><span class="breadcrumb-separator">/</span><strong>设置</strong></div>
       <div class="topbar-actions">
+__THEME_TOGGLE__
         <button id="scan-dirs-refresh-button" class="refresh-button" type="button" aria-label="刷新扫描目录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
       </div>
     </header>
@@ -2873,13 +2921,14 @@ _SETTINGS_HTML = (
     refreshScanDirs();
     refreshHistory();
   });
+__THEME_SCRIPT__
   refreshScanDirs();
   refreshHistory();
 </script>
 </body>
 </html>
 """
-)
+))
 
 
 @dataclass(frozen=True)

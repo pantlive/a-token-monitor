@@ -159,6 +159,11 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 
 ## 监控内容
 
+- **Dashboard 与设置页支持白天 / 夜间主题**：右上角按钮在「跟随系统 → 白天 → 夜间」
+  之间循环，选择保存在浏览器 `localStorage`（两个页面共用同一份偏好），默认跟随系统
+  `prefers-color-scheme`；首屏脚本在样式解析前写入 `data-theme`，切换主题与刷新页面都
+  不会闪屏。所有配色收敛成一套语义变量（状态色、边框、遮罩、图表轨道、阴影），浅色模式
+  下表格、徽标、告警等级与图表一起变色。
 - **Codex 账号是可选的**：没有 Codex CLI、`CODEX_HOME` 或有效登录时 daemon 仍可启动，
   只监控已启用的其他 provider（Grok / Kimi / DeepSeek Harness / Claude Code /
   Command Code）或仅监控流量与磁盘占用。每个 provider 目录独立初始化：目录不存在直接跳过，
