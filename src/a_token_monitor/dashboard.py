@@ -2076,8 +2076,8 @@ __THEME_TOGGLE__
     return map;
   };
   // 账号成本排行的标签：`Codex · Plus/账号 ID`，与卡片标题同源。
-  const usageAccountRankingLabel = (group) => {
-    const meta = usageAccountSubscriptions().get(group.key) || {};
+  const usageAccountRankingLabel = (group, subscriptions) => {
+    const meta = (subscriptions || usageAccountSubscriptions()).get(group.key) || {};
     const product = meta.product || usageTagLine(group.products, '未知产品');
     const subscription = meta.plan ? `${product} · ${meta.plan}` : product;
     const accountId = group.accountId || group.key;
@@ -2395,7 +2395,7 @@ __THEME_TOGGLE__
       ${savingsItem}${budgetItem}
     </div>`;
     const dimensionHeaders = {
-      account: '<tr><th>账号 / Profile</th><th>调用模型</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
+      account: '<tr><th>订阅 / 账号 ID</th><th>调用模型</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
       model: '<tr><th>模型</th><th>使用账号</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
       project: '<tr><th>项目 / 工作目录</th><th>账号</th><th>输入 token</th><th>缓存输入</th><th>缓存写入</th><th>输出 token</th><th>推理输出</th><th>总 token</th><th>Plus credits（不可反推）</th><th>API 等价金额</th><th>占比</th></tr>',
     };
@@ -2407,6 +2407,9 @@ __THEME_TOGGLE__
     };
     const groupsByAccount = usageGroups(filteredAccounts, 'account');
     const accountGroupByKey = new Map(groupsByAccount.map((group) => [group.key, group]));
+    // 订阅（产品 · 套餐）从 /api/state 取一次，表格与排行共用同一份标签。
+    const accountSubscriptions = usageAccountSubscriptions();
+    const accountLabel = (group) => usageAccountRankingLabel(group, accountSubscriptions);
     const rows = groups.map((group) => {
       const stats = group.stats;
       const accountGroup = accountGroupByKey.get(group.key) || group;
@@ -2420,7 +2423,6 @@ __THEME_TOGGLE__
         ? `<button class="chip-button usage-models-toggle" type="button" data-usage-models="${escapeHtml(group.key)}" aria-expanded="${modelsExpanded ? 'true' : 'false'}">${modelsExpanded ? '收起模型' : `另有 ${hiddenModels} 个模型`}</button>`
         : '';
       const profiles = usageTagLine(accountGroup.profiles, '未知 profile');
-      const products = accountGroup.products.size ? usageTagLine(accountGroup.products, '') : '';
       const pricingWarning = stats.unpriced_models && stats.unpriced_models.length
         ? `<div class="muted">未定价（未计入金额）：${escapeHtml(stats.unpriced_models.join(', '))}</div>`
         : '';
@@ -2430,7 +2432,9 @@ __THEME_TOGGLE__
       } else if (selectedUsageDimension === 'project') {
         labelCell = `<td><div>${escapeHtml(group.key)}</div><div class="muted">${escapeHtml(usageContributorLabel(group) || '未知账号')}</div></td>`;
       } else {
-        labelCell = `<td><div>${escapeHtml(group.key)}</div><div class="muted">${escapeHtml(products ? `${products} · ${profiles}` : profiles)}</div></td>`;
+        // 中文注释：与账号成本排行同一份标签（产品 · 套餐/账号 ID），
+        // 次要行保留 profile，用来区分同一账号下的多个登录目录。
+        labelCell = `<td><div>${accountLabel(group)}</div><div class="muted">Profile：${escapeHtml(profiles)}</div></td>`;
       }
       const detailCell = selectedUsageDimension === 'account'
         ? `<td class="usage-models">${models || '<span class="muted">暂无模型</span>'}${modelsToggle}${pricingWarning}</td>`
@@ -2468,7 +2472,7 @@ __THEME_TOGGLE__
       '账号成本排行',
       '当前筛选 · 占比为筛选内合计',
       groupsByAccount,
-      usageAccountRankingLabel,
+      accountLabel,
     );
     const projectLabel = (group) => {
       const sub = usageContributorLabel(group);
