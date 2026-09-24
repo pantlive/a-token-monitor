@@ -76,6 +76,8 @@ _KIMI_API_PRICING_SOURCE = "https://platform.kimi.com/docs/pricing/chat"
 _DSH_API_PRICING_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing"
 _CLAUDE_API_PRICING_SOURCE = "https://docs.claude.com/en/docs/about-claude/pricing"
 _MIMO_API_PRICING_SOURCE = "https://mimo.mi.com/"
+_ZAI_API_PRICING_SOURCE = "https://docs.z.ai/guides/overview/pricing"
+_STEPFUN_API_PRICING_SOURCE = "https://platform.stepfun.com/docs/zh/guides/pricing/details"
 # 中文注释：解析规则变化时必须升版本，避免沿用错误的历史增量。
 _USAGE_INDEX_VERSION = 6
 _USAGE_LINE_HINTS = (
@@ -323,6 +325,46 @@ _MODEL_PRICING: dict[str, ModelPricing] = {
     # 中文注释：Anthropic 公开单价（美元 / 百万 token）。缓存读为输入价的
     # 0.1×，缓存写由 _estimate_amount 统一按 1.25× 输入价计算（5 分钟缓存；
     # 1 小时缓存官方为 2×，本工具不做区分）。
+    # 中文注释：Z.ai（智谱）官方美元价目，缓存命中价按官方标价；官方未公布
+    # 长上下文分段计费，三个倍率固定为 1。
+    "glm-5.3": ModelPricing(
+        input_usd=1.4,
+        cached_input_usd=0.26,
+        output_usd=4.4,
+        long_context_threshold=_LONG_CONTEXT_INPUT_THRESHOLD,
+        long_input_multiplier=1.0,
+        long_cached_multiplier=1.0,
+        long_output_multiplier=1.0,
+    ),
+    "glm-5.3-flash": ModelPricing(
+        input_usd=0.15,
+        cached_input_usd=0.03,
+        output_usd=0.5,
+        long_context_threshold=_LONG_CONTEXT_INPUT_THRESHOLD,
+        long_input_multiplier=1.0,
+        long_cached_multiplier=1.0,
+        long_output_multiplier=1.0,
+    ),
+    "glm-5.3-flashx": ModelPricing(
+        input_usd=0.37,
+        cached_input_usd=0.075,
+        output_usd=1.25,
+        long_context_threshold=_LONG_CONTEXT_INPUT_THRESHOLD,
+        long_input_multiplier=1.0,
+        long_cached_multiplier=1.0,
+        long_output_multiplier=1.0,
+    ),
+    # 中文注释：阶跃星辰官方价目为人民币（输入 ¥7、缓存命中 ¥0.35、输出 ¥20 每百万
+    # token），与表里其它人民币价目一样按 7.0 折算成美元；官方未公布长上下文分段。
+    "step-5-preview": ModelPricing(
+        input_usd=1.0,
+        cached_input_usd=0.05,
+        output_usd=2.86,
+        long_context_threshold=_LONG_CONTEXT_INPUT_THRESHOLD,
+        long_input_multiplier=1.0,
+        long_cached_multiplier=1.0,
+        long_output_multiplier=1.0,
+    ),
     "claude-opus-4-5": ModelPricing(
         input_usd=5,
         cached_input_usd=0.5,
@@ -4622,6 +4664,8 @@ def pricing_metadata() -> dict[str, str]:
         "dsh_api_source": _DSH_API_PRICING_SOURCE,
         "claude_api_source": _CLAUDE_API_PRICING_SOURCE,
         "mimo_api_source": _MIMO_API_PRICING_SOURCE,
+        "zai_api_source": _ZAI_API_PRICING_SOURCE,
+        "stepfun_api_source": _STEPFUN_API_PRICING_SOURCE,
         "cost_kind": "api_equivalent_estimate",
         "credits_kind": "not_available_from_plus_jsonl",
         "note": (
@@ -4632,7 +4676,9 @@ def pricing_metadata() -> dict[str, str]:
             "用量来自本地 projcache 合计，金额按 DeepSeek 官方峰时 API 单价估算，"
             "不代表 Command Code 等转发账单；Claude Code 用量来自本地会话 JSONL，"
             "金额按 Anthropic 公开 API 单价换算，缓存写统一按 1.25× 输入价；"
-            "小米 MiMo 按开放平台国际站单价估算（官方未公布长上下文加价）。"
+            "小米 MiMo 按开放平台国际站单价估算（官方未公布长上下文加价）；"
+            "智谱 GLM 按 Z.ai 官方美元价目估算；阶跃星辰 Step 按开放平台人民币价目"
+            "按 7.0 折算（官方未公布长上下文分段）。"
             "未定价模型只展示 token，不计入 API 等价值。"
         ),
     }
