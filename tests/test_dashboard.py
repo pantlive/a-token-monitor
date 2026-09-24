@@ -2863,7 +2863,9 @@ class HousekeepingDashboardTests(unittest.TestCase):
             finally:
                 server.close()
 
-        self.assertEqual(started["task"]["state"], "running")
+        # 中文注释：只归档一个小文件时任务可能在响应返回前就跑完了，
+        # 所以这里只要求「已被接受」，真正的完成状态由后面的轮询断言。
+        self.assertIn(started["task"]["state"], {"running", "done"})
         self.assertIsNotNone(status)
         self.assertEqual(status["task"]["state"], "done")
         self.assertEqual(status["task"]["result"]["count"], 1)
