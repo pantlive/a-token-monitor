@@ -9,6 +9,12 @@ description = "Monitor Codex, Grok, Kimi, DeepSeek Harness and other code agents
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
 
 [project.scripts]
 token-monitor = "token_monitor.cli:main"

@@ -520,17 +520,13 @@ class CodexRunner:
 
     @staticmethod
     def _pid_is_alive(pid: int | None) -> bool:
-        """以零信号检查进程是否存在，不向进程发送实际信号。"""
+        """判断进程是否存活（Windows 上不能用 os.kill(pid, 0)）。"""
 
         if pid is None:
             return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+        from .process_backend import process_alive
+
+        return process_alive(pid)
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:

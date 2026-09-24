@@ -1,0 +1,64 @@
+# token-monitor 跨平台 CI：在 Linux / macOS / Windows 上跑同一套 unittest 用例。
+#
+# 三个平台跑完全相同的两步检查：`ruff check src tests` 与 `python -m pytest -q`
+# （Windows 的 job 也一样跑这两步，不做任何裁剪），差异只体现在 pytest 的跳过项上。
+#
+# Windows 上预期被跳过的用例类别（由 tests/_platform_support.py 的装饰器声明，
+# 属于平台能力缺失而不是失败）：
+#   1. requires_symlinks —— 需要创建符号链接的合成 /proc 用例（约 25 个）。注意
+#      GitHub 托管的 windows-latest 以管理员身份运行、可创建符号链接，实际通常
+#      不会跳过；只有本地未开开发者模式的 Windows 才会命中；
+#   2. requires_chmod   —— 断言 POSIX 权限位（0o600）或依赖 chmod 生效的用例（约 7 个）；
+#   3. requires_proc    —— 需要真实 /proc 与其 netlink 的用例（约 5 个，Linux 专有）；
+#   4. posix_only       —— 直接调用 os.getuid() 等 POSIX 专有 API 的用例（1 个）。
+# macOS 上预期只跳过第 3 类：符号链接、POSIX 权限位和 os.getuid 在 macOS 上都可用。
+#
+# 平台与版本策略（三平台 × 3.10 / 3.13 全矩阵，共 6 个 job）：
+# Python 3.10 是 pyproject 声明的下限，3.13 是当前最新稳定版，两端都验证；
+# 有人会只在 ubuntu 上跑 3.10 省额度，但这次 Windows 支持要验证的正是平台
+# 差异——符号链接权限（Windows 需开发者模式）、缺少 /proc、POSIX 权限位
+# 不生效——所以三个平台都跑两个版本，确认 tests/_platform_support.py 的
+# skip 条件在不同平台上的行为一致，而不是只在 Linux 上“看起来是绿的”。
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 中文注释：某个平台失败时不要取消其余平台，一次就能看到全部平台的差异。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.13"]
+    env:
+      # 中文注释：Windows 控制台默认不是 UTF-8，而测试里含中文断言、skip 原因
+      # 和日志，必须开 UTF-8 模式避免 UnicodeEncodeError；Linux/macOS 上无副作用。
+      PYTHONUTF8: "1"
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 中文注释：项目零运行时依赖，按 PEP 517 可编辑安装，让 src 布局与
+      # token-monitor 控制台脚本在三个平台都能被导入。
+      - name: 安装项目（零依赖）
+        run: python -m pip install -e .
+
+      # 中文注释：ruff 与 pytest 只装在 CI，不写进项目依赖（保持零依赖）。
+      - name: 安装测试工具 ruff / pytest
+        run: python -m pip install ruff pytest
+
+      - name: 代码风格检查
+        run: ruff check src tests
+
+      # 中文注释：三个平台跑同一套用例；平台不具备的能力由 tests/_platform_support.py
+      # 的装饰器显式跳过（Windows 无 /proc、无 POSIX 权限位等），不算失败。
+      - name: 运行单元测试
+        run: python -m pytest -q

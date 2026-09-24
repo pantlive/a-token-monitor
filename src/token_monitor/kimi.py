@@ -172,7 +172,11 @@ def list_kimi_active_sessions(
     home = _normalize_path(kimi_home)
     sessions_root = home / "sessions"
     observed_at = time.time() if now is None else float(now)
-    agents = scan_running_agents(proc_root=proc_root, products=("kimi",))
+    agents = scan_running_agents(
+        proc_root=proc_root,
+        products=("kimi",),
+        session_roots=(sessions_root,),
+    )
     index = load_kimi_session_index(home)
     grouped: dict[str, list[int]] = {}
     paths_by_session: dict[str, Path] = {}

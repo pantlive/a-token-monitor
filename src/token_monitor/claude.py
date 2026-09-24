@@ -238,7 +238,11 @@ def list_claude_active_sessions(
     home = _normalize_path(claude_home)
     projects_root = claude_projects_root(home)
     observed_at = time.time() if now is None else float(now)
-    agents = scan_running_agents(proc_root=proc_root, products=("claude",))
+    agents = scan_running_agents(
+        proc_root=proc_root,
+        products=("claude",),
+        session_roots=(projects_root,),
+    )
     grouped: dict[str, list[int]] = {}
     path_by_session: dict[str, Path] = {}
     for agent in agents:

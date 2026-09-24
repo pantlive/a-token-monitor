@@ -14,12 +14,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import Any, ClassVar
+from xml.sax.saxutils import escape
 
 from .accounts import build_account_specs
 from .alerts import DEFAULT_RETENTION_DAYS as DEFAULT_ALERT_RETENTION_DAYS
@@ -886,12 +888,18 @@ def create_service_manager(
     unit_dir: Path | None = None,
     python_executable: Path | None = None,
     platform: str | None = None,
-) -> UserServiceManager | LaunchdServiceManager:
-    """按平台创建后台服务管理器，macOS 使用 launchd。"""
+) -> UserServiceManager | LaunchdServiceManager | TaskSchedulerServiceManager:
+    """按平台创建后台服务管理器：macOS 用 launchd，Windows 用计划任务。"""
 
     resolved_platform = sys.platform if platform is None else platform
     if resolved_platform == "darwin":
         return LaunchdServiceManager(
+            state_dir=state_dir,
+            unit_dir=unit_dir,
+            python_executable=python_executable,
+        )
+    if resolved_platform in ("win32", "windows"):
+        return TaskSchedulerServiceManager(
             state_dir=state_dir,
             unit_dir=unit_dir,
             python_executable=python_executable,
@@ -909,6 +917,12 @@ def launchd_available() -> bool:
     return sys.platform == "darwin" and shutil.which("launchctl") is not None
 
 
+def windows_service_available() -> bool:
+    """判断当前系统是否支持 Windows 计划任务服务。"""
+
+    return sys.platform == "win32" and shutil.which("schtasks") is not None
+
+
 def _default_launchd_unit_dir() -> Path:
     """返回当前用户的 LaunchAgents 目录。"""
 
@@ -920,3 +934,239 @@ def _current_uid() -> int:
 
     getuid = getattr(os, "getuid", None)
     return int(getuid()) if callable(getuid) else 0
+
+
+# 中文注释：Windows 用计划任务（Task Scheduler）代替 systemd / launchd。
+# 注册的 XML 必须是 UTF-16（schtasks 对中文路径尤其挑剔），日志由 cmd.exe
+# 的重定向直接写入 daemon.log，因此不需要额外的日志轮询进程。
+TASK_SCHEDULER_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>token-monitor</Author>
+    <Description>{description}</Description>
+    <URI>\\{task_name}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+{principal_user}      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{working_directory}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+class TaskSchedulerServiceManager:
+    """安装和控制当前用户的 Windows 计划任务服务。"""
+
+    def __init__(
+        self,
+        state_dir: Path,
+        unit_dir: Path | None = None,
+        python_executable: Path | None = None,
+        task_name: str = "TokenMonitor",
+        user: str | None = None,
+    ) -> None:
+        """创建计划任务管理器，并规范化所有运行路径。
+
+        unit_dir 只为与其它平台的管理器保持相同构造签名；计划任务的 XML
+        固定放在状态目录，因此这里忽略它。``user`` 缺省表示“当前登录用户”，
+        此时 XML 里不写 ``UserId`` 元素——空元素在部分 Windows 版本上会让
+        ``schtasks /Create /XML`` 直接报格式错误。
+        """
+
+        self.state_dir = _absolute_path(state_dir)
+        self.task_name = task_name
+        self.user = user.strip() if user else None
+        self.task_path = self.state_dir / "token-monitor-task.xml"
+        self.log_path = self.state_dir / "daemon.log"
+        self.python_executable = _absolute_path(
+            python_executable or Path(sys.executable)
+        )
+
+    @property
+    def config_path(self) -> Path:
+        """返回计划任务启动的 daemon 读取的配置文件。"""
+
+        return self.state_dir / "service.json"
+
+    def render_task_xml(self) -> str:
+        """生成登录时自动启动、失败重启且不限时的计划任务 XML。"""
+
+        principal_user = (
+            f"      <UserId>{_xml_escape(self.user)}</UserId>\n"
+            if self.user
+            else ""
+        )
+        return TASK_SCHEDULER_XML.format(
+            description=_xml_escape("Token Monitor 后台额度监控服务"),
+            task_name=_xml_escape(self.task_name),
+            arguments=_xml_escape(self.render_arguments()),
+            working_directory=_xml_escape(str(self.state_dir)),
+            principal_user=principal_user,
+        )
+
+    def render_arguments(self) -> str:
+        """生成 cmd.exe /c 使用的嵌套引号参数串。"""
+
+        # 中文注释：cmd.exe /c 会把最外层引号当作定界符，因此命令整体再包一
+        # 层引号，内部路径各自单独加引号，右尖括号重定向到 daemon.log。
+        return (
+            f'/c ""{self.python_executable}"'
+            " -m token_monitor"
+            f' --state-dir "{self.state_dir}"'
+            " service run"
+            f' >> "{self.log_path}" 2>&1"'
+        )
+
+    def install(self, config: ServiceConfig, start: bool = True) -> None:
+        """写入配置和计划任务 XML，并选择是否立即启动。"""
+
+        if _absolute_path(config.state_dir) != self.state_dir:
+            raise ServiceError("服务配置与管理器的 state_dir 不一致")
+        config.save()
+        self.task_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.task_path.write_text(self.render_task_xml(), encoding="utf-16")
+        self._schtasks(
+            "/Create",
+            "/TN",
+            self.task_name,
+            "/XML",
+            str(self.task_path),
+            "/F",
+        )
+        if start:
+            self._schtasks("/Run", "/TN", self.task_name)
+
+    def start(self) -> None:
+        """启动已注册的计划任务。"""
+
+        self._schtasks("/Run", "/TN", self.task_name)
+
+    def stop(self) -> None:
+        """停止计划任务但保留注册信息。"""
+
+        self._schtasks("/End", "/TN", self.task_name, check=False)
+
+    def restart(self) -> None:
+        """先结束再启动计划任务，让进程重新读取 service.json。"""
+
+        self._schtasks("/End", "/TN", self.task_name, check=False)
+        self._schtasks("/Run", "/TN", self.task_name)
+
+    def status(self) -> int:
+        """返回 schtasks 查询退出码，任务未注册时为非 0 且不抛异常。"""
+
+        return self._schtasks("/Query", "/TN", self.task_name, check=False)
+
+    def logs(self, lines: int = 50, follow: bool = False) -> int:
+        """显示 daemon 日志；follow 为真时持续跟踪新增内容。"""
+
+        if lines <= 0:
+            raise ValueError("日志行数必须大于 0")
+        if not follow:
+            self._print_log_tail(lines)
+            return 0
+        try:
+            position = self._print_log_tail(lines)
+            while True:
+                time.sleep(0.5)
+                try:
+                    size = self.log_path.stat().st_size
+                except OSError:
+                    # 中文注释：日志还没创建时继续等待，不当作错误。
+                    position = 0
+                    continue
+                if size < position:
+                    # 中文注释：日志被截断或轮转，从文件开头重新读取。
+                    position = 0
+                if size == position:
+                    continue
+                with self.log_path.open("rb") as handle:
+                    handle.seek(position)
+                    chunk = handle.read()
+                    position = handle.tell()
+                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            # 中文注释：用户只是在退出日志跟踪，计划任务本身不受影响。
+            return 0
+
+    def uninstall(self) -> None:
+        """注销计划任务并删除本地服务文件；监控数据继续保留。"""
+
+        self._schtasks("/Delete", "/TN", self.task_name, "/F", check=False)
+        try:
+            self.task_path.unlink(missing_ok=True)
+            # 中文注释：与 systemd / launchd 版一致，同时删除 service.json。
+            self.config_path.unlink(missing_ok=True)
+        except OSError as error:
+            raise ServiceError(f"无法移除后台服务文件: {error}") from error
+
+    def _print_log_tail(self, lines: int) -> int:
+        """打印日志最后若干行，并返回后续读取的字节偏移。"""
+
+        try:
+            position = self.log_path.stat().st_size
+        except FileNotFoundError:
+            print(f"日志文件不存在: {self.log_path}；服务还没有写入日志")
+            return 0
+        except OSError as error:
+            raise ServiceError(
+                f"无法读取日志文件 {self.log_path}: {error}"
+            ) from error
+        try:
+            with self.log_path.open(
+                "r",
+                encoding="utf-8",
+                errors="replace",
+            ) as handle:
+                for line in deque(handle, maxlen=lines):
+                    print(line, end="")
+        except OSError as error:
+            raise ServiceError(
+                f"无法读取日志文件 {self.log_path}: {error}"
+            ) from error
+        return position
+
+    def _schtasks(self, *arguments: str, check: bool = True) -> int:
+        """执行 schtasks，并统一错误语义。"""
+
+        return _run_command(["schtasks", *arguments], check=check)
+
+
+def _xml_escape(value: str) -> str:
+    """转义计划任务 XML 文本节点和属性里不能直接出现的字符。"""
+
+    return escape(value, {'"': "&quot;", "'": "&apos;"})

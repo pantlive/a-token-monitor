@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from _platform_support import requires_proc
 from token_monitor.accounts import (
     _path_suffix,
     build_account_specs,
@@ -340,6 +341,7 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(empty, ())
         self.assertEqual(len(explicit), 1)
 
+    @requires_proc
     def test_monitor_without_codex_accounts_still_runs(self) -> None:
         """零 Codex 账号时 daemon 仍能跑一轮（流量与磁盘提醒）。"""
 

@@ -14,6 +14,20 @@ from typing import Sequence
 # 中文注释：监控器自身命令行里会出现这些标记，不能当成被监控的 Codex。
 _MONITOR_MARKERS = ("token_monitor", "token-monitor")
 
+# 中文注释：Windows 上 npm 安装的 CLI 是 .cmd/.exe 包装，脚本型 CLI 也会以
+# ``node .../codex.js`` 的形式出现，识别前统一去掉这些后缀。
+_EXECUTABLE_SUFFIXES = (
+    ".exe",
+    ".cmd",
+    ".bat",
+    ".com",
+    ".ps1",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".py",
+)
+
 _INTERPRETERS = {
     "node",
     "nodejs",
@@ -25,6 +39,11 @@ _INTERPRETERS = {
     "python3.13",
     "bun",
     "deno",
+    # Windows 的 shell 包装（cmd /c codex.cmd、powershell -File ...）
+    "cmd",
+    "powershell",
+    "pwsh",
+    "wsl",
 }
 
 _GENERIC_COMM = _INTERPRETERS | {
@@ -34,6 +53,17 @@ _GENERIC_COMM = _INTERPRETERS | {
     "zsh",
     "fish",
     "dash",
+}
+
+# npm 包的入口常叫 cli.js / index.js，用包目录名兜底识别（仅限 node_modules 路径）。
+_AGENT_DIRECTORIES = {
+    "claude-code": "claude",
+    "codex": "codex",
+    "kimi-code": "kimi",
+    "deepseek-harness": "dsh",
+    "command-code": "command-code",
+    "grok": "grok",
+    "grok-cli": "grok",
 }
 
 # argv0 / 解释器脚本名 -> 产品 ID。
@@ -109,7 +139,7 @@ def identify_agent(
     product = _AGENT_BINARIES.get(argv0)
     if product is not None:
         return product
-    comm_name = comm.strip()
+    comm_name = _basename(comm)
     product = _AGENT_BINARIES.get(comm_name)
     if product is not None:
         return product
@@ -120,6 +150,30 @@ def identify_agent(
             product = _AGENT_BINARIES.get(_basename(part))
             if product is not None:
                 return product
+        product = _identify_from_node_modules(parts[1:])
+        if product is not None:
+            return product
+    return None
+
+
+def _identify_from_node_modules(parts: Sequence[str]) -> str | None:
+    """解释器 + 通用入口脚本时，用 node_modules 之后的包目录名识别产品。"""
+
+    for part in parts:
+        if part.startswith("-"):
+            continue
+        normalized = part.replace("\\", "/")
+        if "node_modules/" not in normalized and "/node_modules" not in normalized:
+            continue
+        segments = [
+            item
+            for item in normalized.split("/")
+            if item and item != "node_modules"
+        ]
+        for segment in reversed(segments):
+            product = _AGENT_DIRECTORIES.get(segment.lower())
+            if product is not None:
+                return product
     return None
 
 
@@ -127,24 +181,37 @@ def scan_running_agents(
     proc_root: Path | None = None,
     products: Sequence[str] | None = None,
     ignore_pids: Sequence[int] | None = None,
+    session_roots: Sequence[Path] | None = None,
 ) -> tuple[RunningAgent, ...]:
     """返回指定产品的进程和它们打开的普通文件。
 
-    Linux 走 ``/proc``；macOS 没有 ``/proc``，由
-    :mod:`token_monitor.process_backend` 改用 ``ps`` + ``lsof``。显式传入
-    ``proc_root``（测试与容器）时始终按 ``/proc`` 语义处理。
+    Linux 走 ``/proc``；macOS 没有 ``/proc``，改用 ``ps`` + ``lsof``；
+    Windows 用 Toolhelp32 + Restart Manager。显式传入 ``proc_root``
+    （测试与容器）时始终按 ``/proc`` 语义处理。
+
+    ``session_roots`` 只在 Windows 上使用：句柄反查需要知道会话文件在哪些目录下，
+    其它平台会忽略它。
     """
 
     from .process_backend import scan_agents
 
-    return tuple(scan_agents(proc_root, products, ignore_pids))
+    return tuple(scan_agents(proc_root, products, ignore_pids, session_roots))
 
 
 def _basename(value: str) -> str:
-    """读取路径的最后一段，兼容没有目录分隔符的命令名。"""
+    """读取可执行名：同时兼容 POSIX 与 Windows 路径和可执行后缀。"""
 
-    name = Path(value).name
-    return name.strip() if name else ""
+    text = value.strip()
+    if not text:
+        return ""
+    # 中文注释：POSIX 上 Path 不把反斜杠当分隔符，这里显式统一，
+    # 让 Windows 风格命令行（或测试数据）在两个平台都能识别。
+    text = text.replace("\\", "/").rsplit("/", 1)[-1]
+    lowered = text.lower()
+    for suffix in _EXECUTABLE_SUFFIXES:
+        if lowered.endswith(suffix) and len(text) > len(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _read_command(path: Path) -> tuple[str, ...]:

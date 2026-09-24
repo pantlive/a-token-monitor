@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _platform_support import requires_symlinks
 from token_monitor.claude import (
     claude_home_for,
     claude_has_inline_sidechains,
@@ -425,6 +426,7 @@ class ClaudeActiveSessionTests(unittest.TestCase):
         if open_path is not None:
             (directory / "fd" / "3").symlink_to(open_path)
 
+    @requires_symlinks
     def test_detects_session_from_open_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -459,6 +461,7 @@ class ClaudeActiveSessionTests(unittest.TestCase):
         self.assertIsNotNone(session.started_at)
         self.assertIsNotNone(session.last_activity_at)
 
+    @requires_symlinks
     def test_merges_processes_and_ignores_foreign_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -501,6 +504,7 @@ class ClaudeActiveSessionTests(unittest.TestCase):
 
         self.assertEqual(sessions, ())
 
+    @requires_symlinks
     def test_header_without_cwd_still_reports_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

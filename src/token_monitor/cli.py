@@ -2210,16 +2210,35 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
     )
 
 
+def _service_definition_path(manager: object) -> object:
+    """返回服务定义文件路径：systemd 单元 / launchd plist / 计划任务 XML。"""
+
+    for attribute in ("plist_path", "task_path", "unit_path"):
+        value = getattr(manager, attribute, None)
+        if value is not None:
+            return value
+    return getattr(manager, "unit_path", "")
+
+
+def _render_service_definition(manager: object) -> str:
+    """渲染当前平台的服务定义文本。"""
+
+    for attribute in ("render_plist", "render_task_xml", "render_unit"):
+        render = getattr(manager, attribute, None)
+        if callable(render):
+            return str(render())
+    raise ServiceError("当前平台没有可用的服务定义模板")
+
+
 def _manage_service(args: argparse.Namespace) -> int:
-    """执行一个后台服务管理动作（Linux systemd / macOS launchd）。"""
+    """执行一个后台服务管理动作（systemd / launchd / 计划任务）。"""
 
     manager = create_service_manager(args.state_dir)
     action = args.service_action
     if action == "install":
         manager.install(_service_config(args))
-        location = getattr(manager, "plist_path", None) or manager.unit_path
         sys.stdout.write(
-            f"后台服务已安装并启动（服务定义: {location}）。"
+            f"后台服务已安装并启动（服务定义: {_service_definition_path(manager)}）。"
             "使用 service status 查看状态，service logs 查看日志。\n"
         )
         return 0
@@ -2241,8 +2260,7 @@ def _manage_service(args: argparse.Namespace) -> int:
         sys.stdout.write("后台服务已移除；SQLite 状态仍保留。\n")
         return 0
     if action == "plist":
-        render = getattr(manager, "render_plist", None) or manager.render_unit
-        sys.stdout.write(render())
+        sys.stdout.write(_render_service_definition(manager))
         return 0
     if action == "run":
         return run_saved_service(args.state_dir)
@@ -2259,9 +2277,28 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
+def _configure_output_encoding() -> None:
+    """把标准输出/错误固定为 UTF-8。
+
+    中文注释：Windows 控制台在重定向（管道、计划任务）时按本地代码页编码，
+    中文与 ``⚠`` 之类的符号会抛 ``UnicodeEncodeError``；这里统一成 UTF-8 并允许
+    替换字符，保证任何平台、任何终端都能输出。
+    """
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):  # pragma: no cover - 特殊流不支持时忽略
+            continue
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行主函数。"""
 
+    _configure_output_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)

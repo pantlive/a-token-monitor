@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from _platform_support import requires_chmod, requires_symlinks
 from token_monitor import kimi as kimi_module
 from token_monitor.kimi import (
     _clear_quota_cache,
@@ -259,6 +260,7 @@ class KimiUsageTests(unittest.TestCase):
             )
         self.assertEqual(resolve_kimi_homes(()), ())
 
+    @requires_symlinks
     def test_lists_process_backed_active_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -374,6 +376,7 @@ class KimiQuotaTests(unittest.TestCase):
         self.assertEqual(timeout, 8.0)
         self.assertNotIn("SECRET", repr(snapshot))
 
+    @requires_chmod
     def test_refreshes_expired_token_and_writes_back(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = _make_quota_home(Path(temporary_directory), fresh=False)

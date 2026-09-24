@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _platform_support import requires_symlinks
 from token_monitor.grok import (
     decode_grok_project,
     list_grok_active_sessions,
@@ -290,6 +291,7 @@ class GrokActiveSessionTests(unittest.TestCase):
         if open_path is not None:
             (directory / "fd" / "3").symlink_to(open_path)
 
+    @requires_symlinks
     def test_detects_session_from_open_log(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -325,6 +327,7 @@ class GrokActiveSessionTests(unittest.TestCase):
         self.assertEqual(session.product, "grok")
         self.assertEqual(session.project, "/workspace/demo")
 
+    @requires_symlinks
     def test_merges_multiple_processes_and_ignores_others(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -361,6 +364,7 @@ class GrokActiveSessionTests(unittest.TestCase):
 
         self.assertEqual(sessions, ())
 
+    @requires_symlinks
     def test_falls_back_to_process_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -389,6 +393,7 @@ class GrokActiveSessionTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].pids, (200,))
 
+    @requires_symlinks
     def test_rotated_session_still_reported_from_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

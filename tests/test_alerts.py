@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _platform_support import requires_chmod
 from token_monitor.alerts import (
     AlertQuery,
     AlertStoreError,
@@ -317,6 +318,7 @@ class TrafficAlertStoreTests(unittest.TestCase):
             self.assertEqual(store.acknowledge(all_alerts=True), 0)
             self.assertEqual(store.clear_all(), 0)
 
+    @requires_chmod
     @unittest.skipIf(os.name != "posix", "只验证 POSIX 权限位")
     def test_database_file_is_owner_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

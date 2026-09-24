@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from _platform_support import posix_only, requires_chmod
 from token_monitor.service import (
     LAUNCHD_LABEL,
     LaunchdServiceManager,
@@ -59,6 +60,7 @@ class LaunchdServiceTests(unittest.TestCase):
             )
             self.assertEqual(payload["ProcessType"], "Background")
 
+    @posix_only
     def test_defaults_follow_launch_agent_conventions(self) -> None:
         """默认 plist 目录、日志路径和 domain 应符合 launchd 约定。"""
 
@@ -80,6 +82,7 @@ class LaunchdServiceTests(unittest.TestCase):
             self.assertEqual(manager.log_path, manager.state_dir / "launchd.log")
             self.assertEqual(manager.config_path, manager.state_dir / "service.json")
 
+    @requires_chmod
     def test_install_writes_files_and_bootstraps_service(self) -> None:
         """安装应原子写入配置和 plist，并通知 launchd 引导服务。"""
 

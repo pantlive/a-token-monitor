@@ -11,6 +11,20 @@
 
 ## 已完成
 
+- [x] 跨平台部署：Windows
+  - P0 安全修复：存活探测改用 `OpenProcess` + `GetExitCodeProcess`（Windows 上
+    `os.kill(pid, 0)` 会直接结束目标进程）、`SIGKILL` 缺失时退回 `SIGTERM`、
+    `identify_agent` 兼容 `.exe/.cmd/.bat/.ps1` 与 `node …/cli.js` 包装、
+    npm 的 `.cmd` 包装改用 `cmd.exe /c` 启动、CLI 输出固定 UTF-8。
+  - P1 进程后端：Toolhelp32 快照拿进程树/镜像路径/启动时间，PEB 读命令行，
+    Restart Manager 反查「谁持有会话文件」（不需要管理员）；TCP 连接用
+    `GetExtendedTcpTable`，没有字节数，因此与 macOS 一样退化成 process-only。
+  - P2 后台服务：`TaskSchedulerServiceManager`（`schtasks`，登录时启动、
+    `LeastPrivilege`、日志写 `<state_dir>\daemon.log`），`service plist`
+    打印计划任务 XML，卸载移除任务与 `service.json`。
+  - P3/P4：README 增加 Windows 章节与三平台能力对照表；`tests/_platform_support.py`
+    提供符号链接/POSIX 权限守卫，GitHub Actions 增加 Linux/macOS/Windows 矩阵。
+
 - [x] 跨平台部署：Linux + macOS
   - 新增 `process_backend`：Linux 走 `/proc`，macOS 改用系统自带的 `ps` + `lsof`
     获取进程树、工作目录与打开的会话文件，结果带秒级缓存避免一轮刷新重复 fork；

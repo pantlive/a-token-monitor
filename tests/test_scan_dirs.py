@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from _platform_support import requires_chmod
 from token_monitor.scan_dirs import (
     PROVIDER_SPECS,
     EffectiveScanDirs,
@@ -131,7 +132,11 @@ class ValidateDirectoryTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertTrue(any("状态目录" in item for item in result.errors))
 
-    @unittest.skipIf(os.geteuid() == 0, "root 可以读取任何目录")
+    @requires_chmod
+    @unittest.skipIf(
+        getattr(os, "geteuid", lambda: 1)() == 0,
+        "root 可以读取任何目录",
+    )
     def test_unreadable_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -168,6 +173,7 @@ class ValidateDirectoryTests(unittest.TestCase):
 class ScanDirsConfigTests(unittest.TestCase):
     """配置持久化与严格校验。"""
 
+    @requires_chmod
     def test_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

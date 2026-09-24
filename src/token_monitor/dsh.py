@@ -133,7 +133,11 @@ def list_dsh_active_sessions(
     home = _normalize_path(dsh_home)
     sessions_root = home / "sessions"
     observed_at = time.time() if now is None else float(now)
-    agents = scan_running_agents(proc_root=proc_root, products=("dsh",))
+    agents = scan_running_agents(
+        proc_root=proc_root,
+        products=("dsh",),
+        session_roots=(sessions_root,),
+    )
     grouped: dict[str, list[int]] = {}
     lock_by_session: dict[str, Path] = {}
     for agent in agents:

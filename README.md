@@ -305,7 +305,8 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 
 - **Python ≥ 3.10**，只使用标准库，没有第三方运行时依赖，也不需要编译工具链。
   macOS 自带的 `python3` 通常是 3.9，需要 Homebrew、python.org 或 conda 提供的
-  3.10+ 解释器（`environment.yml` 使用 conda-forge 的 3.11，两个平台都可用）。
+  3.10+ 解释器；Windows 用 python.org 安装包、Microsoft Store 或 conda 均可
+  （`environment.yml` 使用 conda-forge 的 3.11，三个平台都可用）。
 - **SQLite** 需要 JSON1 扩展来加速聚合；缺失时（例如很旧的系统 Python）会自动退回
   Python 侧聚合，功能不受影响，只是检索慢一些。
 - **Codex CLI 是可选的**：没有 Codex、`CODEX_HOME` 或有效登录时 daemon 仍可启动，
@@ -317,13 +318,14 @@ Dashboard 设置页的「历史数据」子块展示状态目录及各类索引�
 
 ### 平台能力对照
 
-| 能力 | Linux | macOS |
-| --- | --- | --- |
-| 额度查询、用量索引与检索、告警、磁盘与会话管理、Dashboard、健康检查 | ✅ | ✅ |
-| 活动会话与进程证据 | ✅ `/proc` | ✅ `ps` + `lsof`（无 `/proc`） |
-| 异常流量字节统计（`traffic`、流量告警） | ✅ netlink `INET_DIAG` | ⚠️ 平台没有 netlink：只列出 agent 进程与远端连接，不统计字节、不产生流量告警 |
-| 后台服务 | systemd 用户服务 | launchd LaunchAgent |
-| 进程发现依赖 | `/proc`（容器需共享 PID 命名空间） | 系统自带 `ps`、`lsof` |
+| 能力 | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| 额度查询、用量索引与检索、告警、磁盘与会话管理、Dashboard、健康检查 | ✅ | ✅ | ✅ |
+| 活动会话与进程证据 | ✅ `/proc` | ✅ `ps` + `lsof` | ✅ Toolhelp32 + Restart Manager |
+| 异常流量字节统计（`traffic`、流量告警） | ✅ netlink `INET_DIAG` | ⚠️ 只列进程与远端连接，不统计字节 | ⚠️ 同 macOS（`GetExtendedTcpTable` 无字节数） |
+| 后台服务 | systemd 用户服务 | launchd LaunchAgent | 计划任务（`schtasks`，登录时启动） |
+| 进程发现依赖 | `/proc`（容器需共享 PID 命名空间） | 系统自带 `ps`、`lsof` | 系统自带 Toolhelp32、Restart Manager（`rstrtmgr.dll`） |
+| 单实例锁 | `flock` | `flock` | `msvcrt.locking` |
 
 ## Linux（含 WSL2）后台服务
 
@@ -379,6 +381,52 @@ token-monitor --state-dir "$HOME/.token-monitor" service uninstall
   连接」，不会报错；字节级告警只在 Linux 生效。
 - 活动会话依赖系统自带的 `ps` 与 `lsof`（macOS 默认都有）。若 `lsof` 被裁剪，
   会话仍能被识别，但缺少「打开了哪个会话文件」的证据，活动会话列表会为空。
+
+## Windows 部署
+
+安装方式与 Linux/macOS 相同（Python ≥ 3.10，零运行时依赖）：
+
+```powershell
+python -m pip install -e .
+token-monitor --state-dir "$env:USERPROFILE\.token-monitor" sessions
+```
+
+后台服务用 Windows 计划任务实现，`service` 子命令会自动选择：
+
+```powershell
+token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service install --dashboard
+token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service status
+token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service logs --lines 100
+token-monitor --state-dir "$env:USERPROFILE\.token-monitor" service uninstall
+```
+
+- 计划任务名 `TokenMonitor`，配置写回 `<state_dir>\service.json`，任务定义备份在
+  `<state_dir>\token-monitor-task.xml`（`service plist` 可打印同一份 XML）；
+  触发方式是**登录时启动**，运行级别 `LeastPrivilege`，**不需要管理员权限**。
+- 日志写到 `<state_dir>\daemon.log`（计划任务的 stdout/stderr 重定向），
+  `service logs --follow` 用 Python 轮询该文件，不依赖 `tail`。
+- 计划任务没有 POSIX 式的优雅停止信号：`service stop` 等价于结束进程。SQLite 事务与
+  单实例锁由系统回收，不会留下损坏的索引；下次启动会从检查点继续。
+- 进程发现走系统自带的 Toolhelp32 快照 + Restart Manager：前者给进程树、镜像路径和
+  创建时间，后者反查「哪个进程持有会话文件」。工作目录不在进程表里，由会话文件自身
+  的元数据推断（Grok/Claude 等适配器已经这么做）。
+- 与 macOS 一样没有 netlink：`traffic` 与流量面板退化成 process-only
+  （列出 agent 进程与远端连接，不统计字节、不产生流量告警），CLI 与 Dashboard
+  都会说明原因。
+- 注意事项：
+  - `Restart Manager` 不可用（极少数裁剪系统）或目标文件被更高权限进程持有时，
+    该会话的活动状态可能识别不到；`quota`、用量索引与 Dashboard 不受影响。
+  - NTFS 之外的卷（FAT/exFAT、部分网络盘）拿不到稳定的文件 ID，日志轮转检测会退化
+    成按大小/时间判断。
+  - 状态目录的 `chmod 0700/0600` 在 Windows 上只影响只读位，不构成权限隔离；
+    需要严格隔离时请自行用 `icacls` 收紧 ACL。
+  - 路径超过 260 字符需要系统开启 `LongPathsEnabled`。
+  - agent CLI 若是 npm 的 `.cmd` 包装，监控器会自动用 `cmd.exe /c` 启动
+    （`CreateProcess` 不解析 `PATHEXT`），进程识别也会去掉 `.exe/.cmd/.bat`
+    等后缀与 `node .../cli.js` 形式的包装。
+  - 正在被 agent 打开着的会话文件在 Windows 上无法删除：归档/清理会跳过该文件并在
+    结果里给出原因，而不是中断整批操作。
+  - 容器/无计划任务场景可以直接前台运行：`token-monitor ... daemon`。
 
 ## 容器部署
 

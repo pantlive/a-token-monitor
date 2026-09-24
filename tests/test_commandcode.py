@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from _platform_support import requires_symlinks
 from token_monitor.commandcode import (
     _clear_quota_cache,
     list_commandcode_active_sessions,
@@ -482,6 +483,7 @@ class CommandCodeSessionTests(unittest.TestCase):
         self.assertEqual(info.session_id, session_id)
         self.assertEqual(info.cwd, "/workspace/demo")
 
+    @requires_symlinks
     def test_lists_only_sessions_with_open_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -515,6 +517,7 @@ class CommandCodeSessionTests(unittest.TestCase):
         self.assertEqual(session.last_event_type, "deepseek/deepseek-v4.1-flash")
         self.assertNotIn("SECRET-PROMPT", json.dumps(session.to_record()))
 
+    @requires_symlinks
     def test_ignores_unrelated_processes_and_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -6,12 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _platform_support import requires_symlinks
 from token_monitor.discovery import JsonlSessionReader, ProcessScanner
 
 
 class DiscoveryTests(unittest.TestCase):
     """验证只识别打开的 session JSONL，并正确保留不完整尾行。"""
 
+    @requires_symlinks
     def test_scans_process_fd_and_reads_session_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
