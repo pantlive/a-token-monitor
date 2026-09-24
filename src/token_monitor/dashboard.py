@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import struct
 import time
 import zlib
@@ -759,21 +760,14 @@ _SETTINGS_CSS = r"""
 """
 
 
-# 中文注释：浏览器标签页图标（favicon）。几何只定义一次——圆角徽章 + 三根递增柱，
-# 与侧栏品牌同色（蓝 → 青渐变的用量柱状图）。同一份几何既生成矢量 SVG（现代浏览器
-# 走 /favicon.svg），也光栅化成 PNG / ICO（老浏览器走 /favicon.ico），因此图标不需要
-# 任何图像库、不写外部文件、也不发起站外请求。
+# 中文注释：浏览器标签页图标（favicon）与页面内品牌图形。图形由一组几何原语描述，
+# 同一份原语既生成矢量 SVG（现代浏览器走 /favicon.svg），也用 zlib/struct 光栅化成
+# PNG / ICO（老浏览器与 Safari 走 /favicon.ico），所以不需要图像库、不写外部文件、
+# 也不发起站外请求。候选方案来自 Stitch MCP 的设计稿，换方案只改 _FAVICON_STYLE。
 _FAVICON_SIZE = 64.0
 _FAVICON_RADIUS = 14.0
 _FAVICON_BACKGROUND = ((0x3B, 0x82, 0xF6), (0x06, 0xB6, 0xD4))
 _FAVICON_FOREGROUND = (0xFF, 0xFF, 0xFF)
-# 中文注释：(x, y, 宽度, 高度)，坐标基于 64×64 画布。
-_FAVICON_BARS = (
-    (14.0, 34.0, 8.0, 18.0),
-    (28.0, 24.0, 8.0, 28.0),
-    (42.0, 14.0, 8.0, 38.0),
-)
-_FAVICON_BAR_RADIUS = 4.0
 _FAVICON_ICO_SIZES = (16, 32)
 _FAVICON_SVG_ROUTE = "/favicon.svg"
 _FAVICON_ICO_ROUTE = "/favicon.ico"
@@ -784,6 +778,119 @@ _FAVICON_ICO_MIME = "image/x-icon"
 # 于是旧浏览器一定会重新拉取，不会一直顶着空白标签。
 _FAVICON_CACHE_SECONDS = 604800
 _FAVICON_ICO_CACHE: bytes | None = None
+
+# 中文注释：几何原语。坐标都在 64×64 画布上，形状列表顺序即绘制顺序，
+# mode="cut" 的原语从已画好的白色图形里挖洞（露出渐变底）。
+#   ("rect", x, y, w, h, rx)                  填充圆角矩形
+#   ("circle", cx, cy, r)                     填充圆
+#   ("ring", cx, cy, r, width)                圆环
+#   ("capsule", x1, y1, x2, y2, width)        圆头线段
+#   ("arc", cx, cy, r, start, end, width)     圆弧（角度制，顺时针，0° 指右）
+#   ("polyline", points, width)               折线（圆角连接）
+#   ("polygon", points)                       填充多边形
+_FAVICON_GLYPHS: dict[str, tuple[tuple, ...]] = {
+    # A. 用量柱 + 高水位刻度孔（Stitch 方案 A）。
+    "bars": (
+        ("rect", 14.0, 34.0, 8.0, 18.0, 4.0),
+        ("rect", 28.0, 24.0, 8.0, 28.0, 4.0),
+        ("rect", 42.0, 14.0, 8.0, 38.0, 4.0),
+        {"mode": "cut", "shape": ("circle", 46.0, 18.5, 2.8)},
+    ),
+    # B. 代币 + 脉搏线（监视 + token）。
+    "token": (
+        ("ring", 32.0, 32.0, 17.0, 5.0),
+        (
+            "polyline",
+            (
+                (12.0, 33.0),
+                (24.0, 33.0),
+                (28.5, 21.0),
+                (35.5, 43.0),
+                (40.0, 29.0),
+                (52.0, 29.0),
+            ),
+            4.2,
+        ),
+    ),
+    # C. 额度表盘：弧 + 指针 + 轴心。
+    "gauge": (
+        ("arc", 32.0, 33.0, 16.0, 145.0, 395.0, 5.0),
+        ("capsule", 32.0, 33.0, 42.5, 22.5, 4.4),
+        ("circle", 32.0, 33.0, 3.8),
+    ),
+    # D. 成本盾牌 + 脉搏线（预算守护）。
+    "guard": (
+        (
+            "polygon",
+            (
+                (32.0, 12.0),
+                (49.0, 18.5),
+                (49.0, 33.0),
+                (47.0, 41.0),
+                (41.0, 47.5),
+                (32.0, 52.0),
+                (23.0, 47.5),
+                (17.0, 41.0),
+                (15.0, 33.0),
+                (15.0, 18.5),
+            ),
+        ),
+        {"mode": "cut", "shape": (
+            "polyline",
+            (
+                (19.0, 33.0),
+                (26.0, 33.0),
+                (29.5, 24.5),
+                (34.5, 41.0),
+                (38.0, 31.0),
+                (45.0, 31.0),
+            ),
+            4.0,
+        )},
+    ),
+    # E. 鲸鱼吉祥物（对应 DeepSeek 那种白色剪影，但为 16px 做了粗简化）。
+    "whale": (
+        (
+            "polygon",
+            (
+                (13.0, 36.0),
+                (14.5, 29.5),
+                (19.0, 25.0),
+                (26.0, 22.5),
+                (34.0, 22.5),
+                (41.0, 24.5),
+                (45.5, 28.0),
+                (47.5, 32.0),
+                (47.0, 37.0),
+                (43.0, 41.0),
+                (36.0, 43.5),
+                (27.0, 44.0),
+                (19.0, 42.0),
+            ),
+        ),
+        ("polygon", ((47.0, 28.0), (54.0, 21.0), (52.5, 33.0), (54.0, 45.0), (46.5, 37.5))),
+        {"mode": "cut", "shape": ("circle", 21.5, 32.0, 2.6)},
+    ),
+}
+# 中文注释：当前上线的方案（改这一个常量即可切换，测试会渲染全部方案）。
+_FAVICON_STYLE = "bars"
+
+
+def _favicon_shapes() -> tuple[tuple, ...]:
+    """返回当前方案的徽章 + 图形原语列表。"""
+
+    badge = {"mode": "fill", "shape": ("rect", 0.0, 0.0, _FAVICON_SIZE, _FAVICON_SIZE, _FAVICON_RADIUS)}
+    try:
+        glyph = _FAVICON_GLYPHS[_FAVICON_STYLE]
+    except KeyError as error:  # pragma: no cover - 常量写错时立刻暴露
+        raise ValueError(f"未知的图标方案: {_FAVICON_STYLE}") from error
+    shapes: list[tuple] = [badge]
+    for item in glyph:
+        if isinstance(item, dict):
+            shapes.append({"mode": item.get("mode", "cut"), "shape": item["shape"]})
+        else:
+            shapes.append({"mode": "draw", "shape": item})
+    return tuple(shapes)
 
 
 def _hex_color(color: tuple[int, int, int]) -> str:
@@ -798,25 +905,117 @@ def _favicon_token() -> str:
     payload = repr(
         (
             _FAVICON_SIZE,
-            _FAVICON_RADIUS,
             _FAVICON_BACKGROUND,
             _FAVICON_FOREGROUND,
-            _FAVICON_BARS,
-            _FAVICON_BAR_RADIUS,
-            _FAVICON_ICO_SIZES,
+            _FAVICON_STYLE,
+            _FAVICON_GLYPHS[_FAVICON_STYLE],
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
 
 
-# 中文注释：先给 ICO（老浏览器与 Safari 稳），再给 SVG（大小屏幕都清晰），
-# 浏览器按自己支持的类型挑选。
+# 中文注释：先给 ICO（老浏览器与 Safari 稳），再给 SVG（大小屏幕都清晰）。
 _FAVICON_LINK = (
     f'  <link rel="icon" type="{_FAVICON_ICO_MIME}" '
     f'href="{_FAVICON_ICO_ROUTE}?v={_favicon_token()}" sizes="16x16 32x32">\n'
     f'  <link rel="icon" type="{_FAVICON_SVG_MIME}" '
     f'href="{_FAVICON_SVG_ROUTE}?v={_favicon_token()}">\n'
 )
+
+
+def _fill_attribute(mode: str, gradient_id: str) -> str:
+    """填充类原语的 fill：徽章用渐变，挖洞用黑，图形继承父级白色。"""
+
+    if mode == "badge":
+        return f' fill="url(#{gradient_id})"'
+    if mode == "cut":
+        return ' fill="black"'
+    return ""
+
+
+def _stroke_attribute(mode: str, width: float) -> str:
+    """描边类原语的 stroke：图形白色，挖洞黑色。"""
+
+    color = "black" if mode == "cut" else _hex_color(_FAVICON_FOREGROUND)
+    return f' stroke="{color}" stroke-width="{width:g}"'
+
+
+def _shape_svg(shape: tuple, gradient_id: str, mode: str) -> str:
+    """把一个几何原语渲染成 SVG 元素。"""
+
+    kind = shape[0]
+    if kind == "rect":
+        _, x, y, width, height, radius = shape
+        return (
+            f'<rect x="{x:g}" y="{y:g}" width="{width:g}" height="{height:g}" '
+            f'rx="{radius:g}"{_fill_attribute(mode, gradient_id)}/>'
+        )
+    if kind == "circle":
+        _, cx, cy, radius = shape
+        return (
+            f'<circle cx="{cx:g}" cy="{cy:g}" r="{radius:g}"'
+            f'{_fill_attribute(mode, gradient_id)}/>'
+        )
+    if kind == "ring":
+        _, cx, cy, radius, width = shape
+        return (
+            f'<circle cx="{cx:g}" cy="{cy:g}" r="{radius:g}" fill="none"'
+            f'{_stroke_attribute(mode, width)}/>'
+        )
+    if kind == "capsule":
+        _, x1, y1, x2, y2, width = shape
+        return (
+            f'<line x1="{x1:g}" y1="{y1:g}" x2="{x2:g}" y2="{y2:g}"'
+            f'{_stroke_attribute(mode, width)} stroke-linecap="round"/>'
+        )
+    if kind == "arc":
+        _, cx, cy, radius, start, end, width = shape
+        points = _arc_points(cx, cy, radius, start, end)
+        return (
+            f'<polyline points="{_svg_points(points)}" fill="none"'
+            f'{_stroke_attribute(mode, width)} stroke-linecap="round" '
+            'stroke-linejoin="round"/>'
+        )
+    if kind == "polyline":
+        _, points, width = shape
+        return (
+            f'<polyline points="{_svg_points(points)}" fill="none"'
+            f'{_stroke_attribute(mode, width)} stroke-linecap="round" '
+            'stroke-linejoin="round"/>'
+        )
+    if kind == "polygon":
+        _, points = shape
+        return (
+            f'<polygon points="{_svg_points(points)}"'
+            f'{_fill_attribute(mode, gradient_id)}/>'
+        )
+    raise ValueError(f"未知的几何原语: {kind}")
+
+
+def _svg_points(points: tuple[tuple[float, float], ...]) -> str:
+    """把点序列格式化成 SVG 的 points 属性。"""
+
+    return " ".join(f"{x:g},{y:g}" for x, y in points)
+
+
+def _arc_points(
+    cx: float,
+    cy: float,
+    radius: float,
+    start: float,
+    end: float,
+    steps: int = 24,
+) -> tuple[tuple[float, float], ...]:
+    """把一段圆弧离散成折线点（SVG 与光栅化共用同一份采样）。"""
+
+    total = end - start
+    return tuple(
+        (
+            cx + radius * math.cos(math.radians(start + total * index / steps)),
+            cy + radius * math.sin(math.radians(start + total * index / steps)),
+        )
+        for index in range(steps + 1)
+    )
 
 
 def _icon_svg(gradient_id: str, label: str | None = None) -> str:
@@ -830,24 +1029,43 @@ def _icon_svg(gradient_id: str, label: str | None = None) -> str:
         f'<stop offset="{index}" stop-color="{_hex_color(color)}"/>'
         for index, color in enumerate(_FAVICON_BACKGROUND)
     )
-    bars = "".join(
-        f'<rect x="{x:g}" y="{y:g}" width="{width:g}" height="{height:g}" '
-        f'rx="{_FAVICON_BAR_RADIUS:g}"/>'
-        for x, y, width, height in _FAVICON_BARS
-    )
     size = int(_FAVICON_SIZE)
-    attributes = (
-        f'role="img" aria-label="{label}"' if label else 'aria-hidden="true"'
-    )
+    attributes = f'role="img" aria-label="{label}"' if label else 'aria-hidden="true"'
+    shapes = _favicon_shapes()
+    badge = _shape_svg(shapes[0]["shape"], gradient_id, "badge")
+    draws = [entry["shape"] for entry in shapes[1:] if entry["mode"] != "cut"]
+    cuts = [entry["shape"] for entry in shapes[1:] if entry["mode"] == "cut"]
+    parts = [
+        f'<defs><linearGradient id="{gradient_id}" x1="0" y1="0" x2="1" y2="1">'
+        f"{stops}</linearGradient></defs>",
+        badge,
+    ]
+    if draws:
+        glyph = "".join(
+            _shape_svg(shape, gradient_id, "glyph") for shape in draws
+        )
+        if cuts:
+            # 中文注释：白色图形统一走一个 mask 组，黑色原语即为挖掉的洞
+            # （例如柱状图的高水位点、盾牌里的脉搏线），露出的就是渐变底。
+            mask_id = f"{gradient_id}-glyph"
+            holes = "".join(
+                _shape_svg(shape, gradient_id, "cut") for shape in cuts
+            )
+            parts.append(
+                f'<mask id="{mask_id}"><rect width="{size}" height="{size}" '
+                f'fill="white"/>{holes}</mask>'
+            )
+            parts.append(
+                f'<g mask="url(#{mask_id})" fill="{_hex_color(_FAVICON_FOREGROUND)}">'
+                f"{glyph}</g>"
+            )
+        else:
+            parts.append(
+                f'<g fill="{_hex_color(_FAVICON_FOREGROUND)}">{glyph}</g>'
+            )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
-        f"{attributes}>"
-        f'<defs><linearGradient id="{gradient_id}" x1="0" y1="0" x2="1" y2="1">'
-        f"{stops}</linearGradient></defs>"
-        f'<rect width="{size}" height="{size}" rx="{_FAVICON_RADIUS:g}" '
-        f'fill="url(#{gradient_id})"/>'
-        f'<g fill="{_hex_color(_FAVICON_FOREGROUND)}">{bars}</g>'
-        "</svg>"
+        f"{attributes}>" + "".join(parts) + "</svg>"
     )
 
 
@@ -884,28 +1102,111 @@ def _inside_rounded_square(
     return delta_x * delta_x + delta_y * delta_y <= radius * radius
 
 
-def _favicon_sample(x: float, y: float) -> tuple[int, int, int, int]:
-    """返回 64×64 画布上某个采样点的 RGBA：柱体纯白，其余按对角渐变。"""
+def _distance_to_segment(
+    x: float,
+    y: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    """点到线段的距离。"""
 
-    size = _FAVICON_SIZE
-    if not _inside_rounded_square(x, y, size, size, _FAVICON_RADIUS):
+    delta_x = x2 - x1
+    delta_y = y2 - y1
+    length_squared = delta_x * delta_x + delta_y * delta_y
+    if length_squared <= 0:
+        return math.hypot(x - x1, y - y1)
+    ratio = ((x - x1) * delta_x + (y - y1) * delta_y) / length_squared
+    ratio = min(1.0, max(0.0, ratio))
+    return math.hypot(x - (x1 + ratio * delta_x), y - (y1 + ratio * delta_y))
+
+
+def _inside_polygon(x: float, y: float, points: tuple[tuple[float, float], ...]) -> bool:
+    """射线法判断点是否在多边形内。"""
+
+    inside = False
+    count = len(points)
+    for index in range(count):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % count]
+        if (y1 > y) != (y2 > y):
+            crossing = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < crossing:
+                inside = not inside
+    return inside
+
+
+def _inside_shape(x: float, y: float, shape: tuple) -> bool:
+    """判断点是否落在某个几何原语内（描边类形状按半宽判定）。"""
+
+    kind = shape[0]
+    if kind == "rect":
+        _, rect_x, rect_y, width, height, radius = shape
+        return _inside_rounded_square(x - rect_x, y - rect_y, width, height, radius)
+    if kind == "circle":
+        _, cx, cy, radius = shape
+        return math.hypot(x - cx, y - cy) <= radius
+    if kind == "ring":
+        _, cx, cy, radius, width = shape
+        return abs(math.hypot(x - cx, y - cy) - radius) <= width / 2
+    if kind == "capsule":
+        _, x1, y1, x2, y2, width = shape
+        return _distance_to_segment(x, y, x1, y1, x2, y2) <= width / 2
+    if kind == "arc":
+        _, cx, cy, radius, start, end, width = shape
+        return _distance_to_polyline(
+            x, y, _arc_points(cx, cy, radius, start, end)
+        ) <= width / 2
+    if kind == "polyline":
+        _, points, width = shape
+        return _distance_to_polyline(x, y, points) <= width / 2
+    if kind == "polygon":
+        _, points = shape
+        return _inside_polygon(x, y, points)
+    raise ValueError(f"未知的几何原语: {kind}")
+
+
+def _distance_to_polyline(
+    x: float,
+    y: float,
+    points: tuple[tuple[float, float], ...],
+) -> float:
+    """点到折线的最短距离（圆角连接靠逐段取最小自然成立）。"""
+
+    if len(points) < 2:
+        return math.hypot(x - points[0][0], y - points[0][1]) if points else math.inf
+    return min(
+        _distance_to_segment(x, y, x1, y1, x2, y2)
+        for (x1, y1), (x2, y2) in zip(points, points[1:])
+    )
+
+
+def _favicon_sample(x: float, y: float) -> tuple[int, int, int, int]:
+    """返回 64×64 画布上某个采样点的 RGBA：图形纯白，徽章按对角渐变。"""
+
+    shapes = _favicon_shapes()
+    badge = shapes[0]["shape"]
+    for entry in shapes[1:]:
+        if entry["mode"] == "cut" and _inside_shape(x, y, entry["shape"]):
+            return (*_gradient_color(x, y), 255)
+    if not _inside_shape(x, y, badge):
         return (0, 0, 0, 0)
-    for bar_x, bar_y, bar_width, bar_height in _FAVICON_BARS:
-        if _inside_rounded_square(
-            x - bar_x,
-            y - bar_y,
-            bar_width,
-            bar_height,
-            _FAVICON_BAR_RADIUS,
-        ):
+    for entry in shapes[1:]:
+        if entry["mode"] != "cut" and _inside_shape(x, y, entry["shape"]):
             return (*_FAVICON_FOREGROUND, 255)
-    ratio = min(1.0, max(0.0, (x + y) / (2.0 * size)))
+    return (*_gradient_color(x, y), 255)
+
+
+def _gradient_color(x: float, y: float) -> tuple[int, int, int]:
+    """按对角线位置在品牌渐变上取色。"""
+
+    ratio = min(1.0, max(0.0, (x + y) / (2.0 * _FAVICON_SIZE)))
     start, end = _FAVICON_BACKGROUND
     return (
         round(start[0] + (end[0] - start[0]) * ratio),
         round(start[1] + (end[1] - start[1]) * ratio),
         round(start[2] + (end[2] - start[2]) * ratio),
-        255,
     )
 
 
