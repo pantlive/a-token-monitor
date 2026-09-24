@@ -6,6 +6,10 @@ __pycache__/
 .a-token-monitor/
 .token-monitor/
 .codex-reset-monitor/
+# 冒烟测试用的临时状态目录：state.json 里含本机绝对路径、账号 ID 与会话 ID，
+# 只应留在本地，绝不入库。
+.cc/
+.pytest_cache/
 .venv/
 build/
 dist/
