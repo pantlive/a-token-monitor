@@ -2296,12 +2296,26 @@ class FaviconTests(unittest.TestCase):
         page = _DASHBOARD_HTML
         self.assertIn("const accountProductLabel = (account) => {", page)
         self.assertIn("const usageAccountSubscriptions = () => {", page)
-        self.assertIn("const usageAccountRankingLabel = (group) => {", page)
+        self.assertIn(
+            "const usageAccountRankingLabel = (group, subscriptions) => {",
+            page,
+        )
         self.assertIn("const projectLabel = (group) => {", page)
         # 排行渲染改成接收「标签 HTML」函数，两个排行各自决定格式。
         self.assertIn("const renderUsageRanking = (title, hint, groups, labelOf) => {", page)
-        self.assertIn("usageAccountRankingLabel,", page)
+        self.assertIn(
+            "const accountLabel = (group) => usageAccountRankingLabel(group, accountSubscriptions);",
+            page,
+        )
+        self.assertIn("      accountLabel,\n", page)
         self.assertIn("projectLabel,", page)
+        # 明细表第一列也用同一份标签，表头跟着改成「订阅 / 账号 ID」。
+        self.assertIn(
+            'labelCell = `<td><div>${accountLabel(group)}</div><div class="muted">Profile：',
+            page,
+        )
+        self.assertIn("account: '<tr><th>订阅 / 账号 ID</th><th>调用模型</th>", page)
+        self.assertNotIn("账号 / Profile", page)
         # 卡片里的产品映射抽成公用函数，避免两处叫法不一致。
         self.assertNotIn("const productLabel = (id, label) =>", page)
         self.assertIn('`<span class="muted">/${escapeHtml(accountId)}</span>`', page)
