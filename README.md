@@ -145,7 +145,9 @@ PNG / ICO（4×4 超采样抗锯齿），所以两处渲染结果一致。徽章
 
 卡片标题是**订阅类型**
 （`产品 · 套餐`，例如 `Codex · Plus`、`Codex · Pro Lite`、`Grok · SuperGrok`、
-`Command Code · GOAT`），账号 ID、profile 和来源退到标题下方的次要信息行；
+`Command Code · GOAT`），头像徽标显示**订阅缩写**（产品与套餐的单词首字母，最多 3 个字符：`Codex · Plus → CP`、
+`Codex · Pro Lite → CPL`、`Grok · SuperGrok → GS`、`Command Code · GOAT → CCG`、`Kimi → K`，
+悬停显示完整订阅名），账号 ID、profile 和来源退到标题下方的次要信息行；
 没有套餐概念的 provider（Kimi、DeepSeek Harness、Claude Code）只显示产品名，
 不会拿模型名冒充套餐。订阅类型来源：Codex 读本地 `auth.json` 里 `id_token` 的
 `chatgpt_plan_type` claim（按文件 mtime 缓存，不解析或记录任何令牌内容），
