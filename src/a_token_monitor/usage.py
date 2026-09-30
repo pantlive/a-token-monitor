@@ -185,6 +185,13 @@ _MODEL_PRICING: dict[str, ModelPricing] = {
         output_usd=10,
         long_context_threshold=272_000,
     ),
+    # 官方文档：$2 / $0.1 / $10，长上下文加价规则同上（缓存价减半）。
+    "gpt-6.1-sol": ModelPricing(
+        input_usd=2,
+        cached_input_usd=0.1,
+        output_usd=10,
+        long_context_threshold=272_000,
+    ),
     # 官方文档：$0.1 / $0.01 / $0.5，长上下文加价规则同上。
     "gpt-6-luna": ModelPricing(
         input_usd=0.1,
@@ -5004,6 +5011,8 @@ def _lookup_pricing(model: str) -> ModelPricing | None:
         return None
     if normalized == "gpt-5.6":
         normalized = "gpt-5.6-sol"
+    if normalized == "gpt-6.1":
+        normalized = "gpt-6.1-sol"
     exact = _MODEL_PRICING.get(normalized)
     if exact is not None:
         return exact

@@ -410,6 +410,15 @@ class UsageAggregatorTests(unittest.TestCase):
             _estimate_usage(small, "gpt-6-luna")["estimated_cost_usd"],
             0.0107,
         )
+        # 6.1-sol $2/$0.1/$10：0.16+0.002+0.05；裸名 gpt-6.1 也归一到这里。
+        self.assertAlmostEqual(
+            _estimate_usage(small, "gpt-6.1-sol")["estimated_cost_usd"],
+            0.212,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(small, "gpt-6.1")["estimated_cost_usd"],
+            0.212,
+        )
         # MiMo 国际站 $0.14/$0.0028/$0.28：0.0112+0.000056+0.0014
         self.assertAlmostEqual(
             _estimate_usage(small, "xiaomi/mimo-v2.6-flash")["estimated_cost_usd"],
@@ -419,6 +428,10 @@ class UsageAggregatorTests(unittest.TestCase):
         long_usage = TokenUsage(input_tokens=300_000, total_tokens=300_000)
         self.assertAlmostEqual(
             _estimate_usage(long_usage, "gpt-6-sol")["estimated_cost_usd"],
+            1.2,
+        )
+        self.assertAlmostEqual(
+            _estimate_usage(long_usage, "gpt-6.1-sol")["estimated_cost_usd"],
             1.2,
         )
         self.assertAlmostEqual(
@@ -436,6 +449,7 @@ class UsageAggregatorTests(unittest.TestCase):
         self.assertIsNotNone(_lookup_pricing("xiaomi/mimo-v2.6-flash"))
         self.assertIsNotNone(_lookup_pricing("MiMo-V2.6-Flash-RL"))
         self.assertIsNotNone(_lookup_pricing("gpt-6-sol-2026-09-22"))
+        self.assertIsNotNone(_lookup_pricing("gpt-6.1-sol-2026-09-29"))
         self.assertIsNotNone(_lookup_pricing("GPT-6-Luna"))
 
     def test_applies_glm_and_step_api_pricing(self) -> None:

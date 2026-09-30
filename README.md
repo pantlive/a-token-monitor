@@ -195,7 +195,7 @@ Dashboard 顶栏据此显示「正常 / 部分降级 / 启动中 / 异常」徽�
   （交给 Claude Code 自己刷新），接口限速激进，所以成功缓存 5 分钟、失败缓存
   1 分钟，被限速或读取失败时只展示账号身份，本地用量统计不受影响。
 
-内置单价覆盖 GPT-6 系列（`gpt-6-astra/sol/luna`）、小米 MiMo、智谱 GLM
+内置单价覆盖 GPT-6 系列（`gpt-6.1-sol`、`gpt-6-astra/sol/luna`）、小米 MiMo、智谱 GLM
 （`glm-5.3` 系列）与阶跃星辰（`step-5-preview`）；聚合商前缀、大小写和
 官方快照后缀都能命中同一份价格。Claude Code 金额按 Anthropic 公开 API 单价
 换算，缓存写按 1.25× 输入价估算。

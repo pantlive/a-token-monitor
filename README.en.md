@@ -230,7 +230,7 @@ Shared rules:
   failures for 1 minute; when it is rate-limited or unreadable, only the account identity
   is shown and local usage statistics are unaffected.
 
-Built-in unit prices cover the GPT-6 family (`gpt-6-astra/sol/luna`), Xiaomi MiMo, Zhipu
+Built-in unit prices cover the GPT-6 family (`gpt-6.1-sol`, `gpt-6-astra/sol/luna`), Xiaomi MiMo, Zhipu
 GLM (the `glm-5.3` family) and StepFun (`step-5-preview`); aggregator prefixes, letter
 case and official snapshot suffixes all resolve to the same price. Claude Code amounts are
 converted from Anthropic's public API prices, and cache writes are estimated at 1.25× the
