@@ -285,6 +285,21 @@ class TrafficAlertStore:
 
     # ---------------------------------------------------------------- 查询
 
+    def get(self, alert_id: int) -> StoredAlert | None:
+        """按 id 返回单条告警；不存在或数据库不可读时返回 None。"""
+
+        if not self.database_file.exists():
+            return None
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    f"SELECT {_ALERT_COLUMNS} FROM traffic_alerts WHERE id = ?",
+                    (int(alert_id),),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise AlertStoreError(f"读取告警失败: {error}") from error
+        return _row_to_alert(row) if row is not None else None
+
     def query(self, query: AlertQuery | None = None) -> tuple[StoredAlert, ...]:
         """按条件返回历史告警，按最近出现时间倒序。"""
 

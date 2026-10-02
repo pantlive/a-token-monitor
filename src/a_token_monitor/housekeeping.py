@@ -1,12 +1,13 @@
 """agent 数据目录的磁盘占用统计，以及会话文件的归档与清理。
 
-只统计目录体积、文件数量和会话文件元数据，不读取会话内容。归档会把选中的
-Codex session JSONL 打包成 tar.gz 并写入 manifest，校验成功后删除原文件，
-可用 ``restore`` 还原；清理直接删除。两者都先给出预览，拒绝处理仍在运行的
-活动会话和过新的文件。
+只统计目录体积、文件数量和会话文件元数据；项目归属只读会话头部或目录名，
+不读取对话内容。归档会把选中的会话文件打包成 tar.gz 并写入 manifest，
+校验成功后删除原文件，可用 ``restore`` 还原；清理直接删除。两者都先给出
+预览，拒绝处理仍在运行的活动会话和过新的文件，并支持按项目（工作目录）
+筛选后压缩归档。
 
-v1 只对 Codex ``<CODEX_HOME>/sessions/**/rollout-*.jsonl`` 执行归档/清理；
-Kimi、DeepSeek Harness、Grok 等目录只统计占用并提醒，不在这里删除。
+Codex、Claude Code、Kimi Code、Grok、DeepSeek Harness、Command Code 的
+会话文件都可以归档/清理；监控状态目录只统计占用并提醒。
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import stat
 import tarfile
 import threading
 import time
@@ -23,6 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .claude import claude_session_id
+from .commandcode import read_commandcode_session_info
+from .dsh import read_dsh_projcache
+from .grok import decode_grok_project
 from .traffic import format_bytes
 from .usage import SessionUsage, session_id_from_path
 
@@ -35,13 +42,22 @@ _MIN_AGE_SECONDS = 600.0
 _MAX_PREVIEW_ITEMS = 50
 _TOP_CHILDREN = 6
 _REFRESH_INTERVAL_SECONDS = 60.0
-_SESSION_GLOB = "rollout-*.jsonl"
-_ARCHIVE_PREFIX = "codex-sessions"
+_ARCHIVE_PREFIX = "sessions"
+# 中文注释：旧版归档使用 codex-sessions 前缀，列出已有归档时保持兼容。
+_LEGACY_ARCHIVE_PREFIX = "codex-sessions"
 # 中文注释：后台任务只保留最近若干条，供网页轮询进度。
 _MAX_TASKS = 10
 # 中文注释：会话清单带 10 秒缓存，避免网页每 5 秒轮询都重新扫描目录。
 _SESSIONS_CACHE_SECONDS = 10.0
 _MANIFEST_SUFFIX = ".manifest.json"
+_UNKNOWN_PROJECT = "未知项目"
+# 中文注释：项目归属只读文件头部一小段，避免为大会话文件付出整文件 IO。
+_HEAD_READ_BYTES = 64 * 1024
+_HEAD_READ_LINES = 25
+_PROJECT_SLUG_MAX = 40
+# 中文注释：项目缓存只按路径保留，体积或修改时间变化即失效。
+_PROJECT_CACHE_MAX = 50_000
+_CWD_HEAD_PATTERN = re.compile(r'"cwd"\s*:\s*"([^"]+)"')
 
 
 class HousekeepingError(RuntimeError):
@@ -124,6 +140,7 @@ class SessionFile:
     size: int
     modified_at: float
     session_id: str
+    project: str = _UNKNOWN_PROJECT
 
     def to_dict(self) -> dict[str, Any]:
         """转换为 Dashboard / CLI 展示字段。"""
@@ -135,6 +152,7 @@ class SessionFile:
             "size": self.size,
             "modified_at": self.modified_at,
             "session_id": self.session_id,
+            "project": self.project,
         }
 
 
@@ -147,9 +165,15 @@ class CleanupCriteria:
     # 中文注释：指定具体会话时忽略保留天数，只按路径精确匹配，
     # 但仍然跳过活动会话和刚写入过的文件。
     paths: tuple[str, ...] = ()
+    # 中文注释：按项目（工作目录）筛选；空元组表示全部项目。
+    # 与 paths 同时指定时以 paths 为准。
+    projects: tuple[str, ...] = ()
+    # 中文注释：为 True 时忽略保留天数（整项目压缩用），
+    # 活动会话和 10 分钟内写入的文件仍然跳过。
+    any_age: bool = False
 
     def __post_init__(self) -> None:
-        """拒绝无意义的时间范围、大小下限和路径。"""
+        """拒绝无意义的时间范围、大小下限、路径和项目。"""
 
         if self.older_than_days < 1 or self.older_than_days > 3650:
             raise ValueError("older_than_days 必须在 1 到 3650 之间")
@@ -158,6 +182,11 @@ class CleanupCriteria:
         for item in self.paths:
             if not str(item).strip():
                 raise ValueError("paths 不能包含空路径")
+        for project in self.projects:
+            if not str(project).strip():
+                raise ValueError("projects 不能包含空项目")
+            if len(str(project)) > 1024:
+                raise ValueError("projects 单条不能超过 1024 字符")
 
     def to_dict(self) -> dict[str, Any]:
         """返回 Dashboard / CLI 展示字段。"""
@@ -166,6 +195,8 @@ class CleanupCriteria:
             "older_than_days": self.older_than_days,
             "min_bytes": self.min_bytes,
             "paths": list(self.paths),
+            "projects": list(self.projects),
+            "any_age": self.any_age,
         }
 
 
@@ -179,6 +210,7 @@ class CleanupPlan:
     skipped_active: int
     skipped_recent: int
     skipped_small: int
+    skipped_project: int = 0
 
     @property
     def count(self) -> int:
@@ -203,6 +235,7 @@ class CleanupPlan:
             "skipped_active": self.skipped_active,
             "skipped_recent": self.skipped_recent,
             "skipped_small": self.skipped_small,
+            "skipped_project": self.skipped_project,
             "oldest_at": min(
                 (item.modified_at for item in self.files),
                 default=None,
@@ -213,6 +246,8 @@ class CleanupPlan:
             ),
         }
         if include_items:
+            # 中文注释：plan() 已按「体积 × 闲置时长」降序排好，截断后留下的都是
+            # 很久没用且占用大的会话。
             payload["files"] = [
                 item.to_dict() for item in self.files[:_MAX_PREVIEW_ITEMS]
             ]
@@ -248,12 +283,17 @@ class HousekeepingMonitor:
         self.logger = logger or logging.getLogger(__name__)
         self._lock = threading.Lock()
         self._task_lock = threading.Lock()
+        # 中文注释：归档、清理和恢复串行执行，避免处理相同文件或争用归档名。
+        self._operation_lock = threading.Lock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self._report: dict[str, Any] | None = None
         self._reported_at = 0.0
         self._sessions_cache: (
             tuple[float, tuple[SessionFile, ...]] | None
         ) = None
+        # 中文注释：项目归属解析按 (path, size, mtime) 缓存，避免每轮扫描都
+        # 重读所有会话文件头部。
+        self._project_cache: dict[str, tuple[int, float, str]] = {}
 
     # ---------------------------------------------------------------- 统计
 
@@ -308,7 +348,7 @@ class HousekeepingMonitor:
         cleanable: list[SessionFile] = []
         for target in self.targets:
             size, files, top_children = _walk_usage(target.path)
-            sessions = scan_session_files(target)
+            sessions = scan_session_files(target, project_cache=self._project_cache)
             cleanable.extend(sessions)
             directories.append(
                 {
@@ -421,11 +461,67 @@ class HousekeepingMonitor:
         sessions: list[SessionFile] = []
         for target in self.targets:
             if target.cleanable:
-                sessions.extend(scan_session_files(target))
+                sessions.extend(
+                    scan_session_files(target, project_cache=self._project_cache)
+                )
         resolved = tuple(sessions)
         with self._lock:
             self._sessions_cache = (time.monotonic(), resolved)
         return resolved
+
+    def projects(
+        self,
+        criteria: CleanupCriteria | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """按项目聚合当前可归档会话，供 Dashboard 筛选下拉展示。
+
+        给定筛选条件时，每个项目额外带 ``selected_files``/``selected_bytes``
+        （该条件下实际会被处理的部分），让卡片总数和预览数量能对上。
+        """
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for item in self.sessions():
+            entry = grouped.get(item.project)
+            if entry is None:
+                entry = {
+                    "project": item.project,
+                    "files": 0,
+                    "bytes": 0,
+                    "oldest_at": None,
+                    "newest_at": None,
+                }
+                grouped[item.project] = entry
+            entry["files"] += 1
+            entry["bytes"] += item.size
+            entry["oldest_at"] = (
+                item.modified_at
+                if entry["oldest_at"] is None
+                else min(entry["oldest_at"], item.modified_at)
+            )
+            entry["newest_at"] = (
+                item.modified_at
+                if entry["newest_at"] is None
+                else max(entry["newest_at"], item.modified_at)
+            )
+        if criteria is not None:
+            selected: dict[str, dict[str, int]] = {}
+            for item in self.plan(criteria).files:
+                bucket = selected.get(item.project)
+                if bucket is None:
+                    bucket = {"files": 0, "bytes": 0}
+                    selected[item.project] = bucket
+                bucket["files"] += 1
+                bucket["bytes"] += item.size
+            for project, entry in grouped.items():
+                bucket = selected.get(project)
+                entry["selected_files"] = bucket["files"] if bucket else 0
+                entry["selected_bytes"] = bucket["bytes"] if bucket else 0
+        return tuple(
+            sorted(
+                grouped.values(),
+                key=lambda entry: (-int(entry["bytes"]), str(entry["project"])),
+            )
+        )
 
     def preview(
         self,
@@ -481,10 +577,10 @@ class HousekeepingMonitor:
             if item is None:
                 states[key] = {
                     "eligible": False,
-                    "reason": "不在可归档的 Codex 会话目录内",
+                    "reason": "不在可归档的会话目录内",
                 }
                 continue
-            if key in active:
+            if _path_is_protected(item.path, active):
                 states[key] = {"eligible": False, "reason": "会话仍在运行"}
                 continue
             if observed_at - item.modified_at < _MIN_AGE_SECONDS:
@@ -519,26 +615,47 @@ class HousekeepingMonitor:
             if selected_criteria.paths
             else None
         )
+        wanted_projects = (
+            {str(item).strip() for item in selected_criteria.projects}
+            if selected_criteria.projects
+            else None
+        )
         chosen: list[SessionFile] = []
         skipped_active = 0
         skipped_recent = 0
         skipped_small = 0
+        skipped_project = 0
         for item in candidates:
             if wanted is not None and str(item.path) not in wanted:
                 continue
-            if str(item.path) in active:
+            if _path_is_protected(item.path, active):
                 skipped_active += 1
                 continue
+            # 中文注释：指定具体会话时不再看项目筛选，只按路径精确匹配。
+            if (
+                wanted is None
+                and wanted_projects is not None
+                and item.project not in wanted_projects
+            ):
+                skipped_project += 1
+                continue
             too_recent = observed_at - item.modified_at < _MIN_AGE_SECONDS
-            # 中文注释：指定具体会话时不再看保留天数，但过新的文件仍然跳过。
-            if too_recent or (wanted is None and item.modified_at > cutoff):
+            # 中文注释：指定具体会话或整项目压缩时不再看保留天数，
+            # 但过新的文件仍然跳过。
+            bypass_age = wanted is not None or selected_criteria.any_age
+            if too_recent or (not bypass_age and item.modified_at > cutoff):
                 skipped_recent += 1
                 continue
             if item.size < selected_criteria.min_bytes:
                 skipped_small += 1
                 continue
             chosen.append(item)
-        chosen.sort(key=lambda item: item.modified_at)
+        # 中文注释：按「体积 × 闲置时长」降序——很久没用且占用大的会话排在最前，
+        # 展示与归档执行都用这个顺序。
+        chosen.sort(
+            key=lambda item: item.size * max(0.0, observed_at - item.modified_at),
+            reverse=True,
+        )
         return CleanupPlan(
             criteria=selected_criteria,
             cutoff=cutoff,
@@ -546,9 +663,26 @@ class HousekeepingMonitor:
             skipped_active=skipped_active,
             skipped_recent=skipped_recent,
             skipped_small=skipped_small,
+            skipped_project=skipped_project,
         )
 
     def archive(
+        self,
+        criteria: CleanupCriteria | None = None,
+        *,
+        now: float | None = None,
+        confirm: bool = False,
+        usage: Mapping[str, SessionUsage] | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """串行执行归档，防止多个任务同时压缩、删除同一会话。"""
+
+        with self._operation_lock:
+            return self._archive(
+                criteria, now=now, confirm=confirm, usage=usage, progress=progress
+            )
+
+    def _archive(
         self,
         criteria: CleanupCriteria | None = None,
         *,
@@ -575,21 +709,34 @@ class HousekeepingMonitor:
                 "deleted": 0,
                 "failed": [],
             }
-        archive_path, manifest_path = self._archive_paths(observed_at)
+        archive_path, manifest_path = self._archive_paths(
+            observed_at,
+            name_hint=_archive_name_hint(plan.criteria),
+        )
         self.archive_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = archive_path.with_name(archive_path.name + ".tmp")
+        signatures: dict[Path, tuple[int, ...]] = {}
         try:
             with tarfile.open(temporary, "w:gz") as handle:
+                bytes_done = 0
                 for index, item in enumerate(plan.files, start=1):
+                    signature = _session_file_signature(item.path)
+                    if (
+                        signature[2] != item.size
+                        or item.path.stat().st_mtime != item.modified_at
+                    ):
+                        raise HousekeepingError(
+                            "会话在归档前发生变化；未删除任何原文件"
+                        )
+                    signatures[item.path] = signature
                     handle.add(str(item.path), arcname=str(item.path).lstrip("/"))
+                    bytes_done += item.size
                     _report_progress(
                         progress,
                         phase="compress",
                         done=index,
                         total=plan.count,
-                        bytes_done=sum(
-                            entry.size for entry in plan.files[:index]
-                        ),
+                        bytes_done=bytes_done,
                         total_bytes=plan.total_bytes,
                     )
             _report_progress(
@@ -607,10 +754,29 @@ class HousekeepingMonitor:
                 )
             temporary.replace(archive_path)
             archive_path.chmod(0o600)
-        except (OSError, tarfile.TarError) as error:
+        except (OSError, tarfile.TarError, HousekeepingError) as error:
             temporary.unlink(missing_ok=True)
             raise HousekeepingError(f"归档失败: {error}") from error
-        deleted, failed = _delete_files(plan.files, progress=progress, total=plan.count)
+        # 中文注释：校验结果与 manifest 先持久化，再允许删除原会话。
+        archive_digest = _sha256(archive_path)
+        _write_manifest(
+            manifest_path,
+            {
+                "created_at": observed_at,
+                "archive": str(archive_path),
+                "archive_sha256": archive_digest,
+                "count": plan.count,
+                "deleted": 0,
+                "files": [item.to_dict() for item in plan.files],
+            },
+        )
+        deleted, failed = _delete_files(
+            plan.files,
+            progress=progress,
+            total=plan.count,
+            active_paths=self.active_paths,
+            signatures=signatures,
+        )
         self._invalidate_sessions()
         manifest = {
             "created_at": observed_at,
@@ -618,7 +784,7 @@ class HousekeepingMonitor:
             "criteria": plan.criteria.to_dict(),
             "cutoff": plan.cutoff,
             "archive": str(archive_path),
-            "archive_sha256": _sha256(archive_path),
+            "archive_sha256": archive_digest,
             "count": plan.count,
             "bytes": plan.total_bytes,
             "deleted": len(deleted),
@@ -656,6 +822,19 @@ class HousekeepingMonitor:
         confirm: bool = False,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        """串行执行清理；每个文件删除前重新检查保护名单和文件签名。"""
+
+        with self._operation_lock:
+            return self._clean(criteria, now=now, confirm=confirm, progress=progress)
+
+    def _clean(
+        self,
+        criteria: CleanupCriteria | None = None,
+        *,
+        now: float | None = None,
+        confirm: bool = False,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """直接删除符合条件的会话文件；操作前必须显式确认。"""
 
         if not confirm:
@@ -666,6 +845,7 @@ class HousekeepingMonitor:
             plan.files,
             progress=progress,
             total=plan.count,
+            active_paths=self.active_paths,
         )
         self._invalidate_sessions()
         if plan.count:
@@ -690,10 +870,12 @@ class HousekeepingMonitor:
         if self.archive_dir is None or not self.archive_dir.is_dir():
             return ()
         items: list[dict[str, Any]] = []
-        for archive in sorted(
-            self.archive_dir.glob(f"{_ARCHIVE_PREFIX}-*.tar.gz"),
-            reverse=True,
-        ):
+        archives = {
+            path
+            for prefix in (_ARCHIVE_PREFIX, _LEGACY_ARCHIVE_PREFIX)
+            for path in self.archive_dir.glob(f"{prefix}-*.tar.gz")
+        }
+        for archive in sorted(archives, reverse=True):
             manifest_path = archive.with_name(archive.name + _MANIFEST_SUFFIX)
             entry: dict[str, Any] = {
                 "archive": str(archive),
@@ -716,6 +898,16 @@ class HousekeepingMonitor:
         archive_path: Path,
         destination: Path | None = None,
     ) -> dict[str, Any]:
+        """串行恢复归档，避免与归档或清理交叉执行。"""
+
+        with self._operation_lock:
+            return self._restore(archive_path, destination)
+
+    def _restore(
+        self,
+        archive_path: Path,
+        destination: Path | None = None,
+    ) -> dict[str, Any]:
         """把归档解包回原路径（或指定根目录）。"""
 
         source = Path(archive_path).expanduser()
@@ -725,6 +917,9 @@ class HousekeepingMonitor:
         manifest = _read_manifest(
             source.with_name(source.name + _MANIFEST_SUFFIX)
         )
+        if manifest is not None and manifest.get("archive_sha256"):
+            if _sha256(source) != manifest["archive_sha256"]:
+                raise HousekeepingError("归档摘要校验失败；未恢复任何文件")
         restored = 0
         try:
             with tarfile.open(source, "r:gz") as handle:
@@ -735,6 +930,9 @@ class HousekeepingMonitor:
                 restored = len(members)
         except (OSError, tarfile.TarError) as error:
             raise HousekeepingError(f"恢复归档失败: {error}") from error
+        # 中文注释：恢复改变了会话目录内容，缓存的会话清单必须作废，
+        # 否则紧接着的单会话归档/清理会误判「不在可归档目录内」。
+        self._invalidate_sessions()
         self.logger.info("已从 %s 恢复 %d 个会话文件", source, restored)
         return {
             "action": "restore",
@@ -863,16 +1061,23 @@ class HousekeepingMonitor:
         for stale in ordered[: len(self._tasks) - _MAX_TASKS]:
             self._tasks.pop(stale, None)
 
-    def _archive_paths(self, now: float) -> tuple[Path, Path]:
+    def _archive_paths(
+        self,
+        now: float,
+        name_hint: str | None = None,
+    ) -> tuple[Path, Path]:
         """返回本次归档的文件名，避免同一秒内互相覆盖。"""
 
         assert self.archive_dir is not None
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
-        archive = self.archive_dir / f"{_ARCHIVE_PREFIX}-{stamp}.tar.gz"
+        prefix = (
+            f"{_ARCHIVE_PREFIX}-{name_hint}" if name_hint else _ARCHIVE_PREFIX
+        )
+        archive = self.archive_dir / f"{prefix}-{stamp}.tar.gz"
         counter = 1
         while archive.exists():
             counter += 1
-            archive = self.archive_dir / f"{_ARCHIVE_PREFIX}-{stamp}-{counter}.tar.gz"
+            archive = self.archive_dir / f"{prefix}-{stamp}-{counter}.tar.gz"
         return archive, archive.with_name(archive.name + _MANIFEST_SUFFIX)
 
 
@@ -907,13 +1112,45 @@ def empty_housekeeping_report(
     }
 
 
-def scan_session_files(target: AuditTarget) -> tuple[SessionFile, ...]:
+@dataclass(frozen=True)
+class _SessionSpec:
+    """一种产品的会话文件布局：相对 home 的会话根目录和文件匹配模式。"""
+
+    sessions_dir: str
+    pattern: str
+
+
+_SESSION_SPECS = {
+    "codex": _SessionSpec("sessions", "**/rollout-*.jsonl"),
+    "claude": _SessionSpec("projects", "**/*.jsonl"),
+    "kimi": _SessionSpec("sessions", "**/*"),
+    "grok": _SessionSpec("sessions", "**/*"),
+    "dsh": _SessionSpec("sessions", "**/*"),
+    "command-code": _SessionSpec("projects", "**/*"),
+}
+
+
+def default_sessions_root(product: str, home: Path) -> Path | None:
+    """返回某产品的会话根目录；没有可归档会话布局的产品返回 None。"""
+
+    spec = _SESSION_SPECS.get(product)
+    return home / spec.sessions_dir if spec is not None else None
+
+
+def scan_session_files(
+    target: AuditTarget,
+    *,
+    project_cache: dict[str, tuple[int, float, str]] | None = None,
+) -> tuple[SessionFile, ...]:
     """扫描一个目标目录下可归档/清理的会话文件。"""
 
     if target.sessions_root is None or not target.sessions_root.is_dir():
         return ()
+    spec = _SESSION_SPECS.get(target.product)
+    if spec is None:
+        return ()
     files: list[SessionFile] = []
-    for path in sorted(target.sessions_root.glob(f"**/{_SESSION_GLOB}")):
+    for path in sorted(target.sessions_root.glob(spec.pattern)):
         try:
             stat_result = path.stat()
         except OSError:
@@ -927,10 +1164,238 @@ def scan_session_files(target: AuditTarget) -> tuple[SessionFile, ...]:
                 label=target.label,
                 size=stat_result.st_size,
                 modified_at=stat_result.st_mtime,
-                session_id=session_id_from_path(path),
+                session_id=_resolve_session_id(target, path),
+                project=_resolve_project(target, path, stat_result, project_cache),
             )
         )
     return tuple(files)
+
+
+def _resolve_session_id(target: AuditTarget, path: Path) -> str:
+    """按产品提取会话 ID，失败时退化为文件名。"""
+
+    root = target.sessions_root
+    product = target.product
+    if product == "codex":
+        return session_id_from_path(path)
+    if product == "claude":
+        return claude_session_id(path) or path.stem
+    if product in {"kimi", "grok", "dsh"} and root is not None:
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            return path.stem
+        # 布局：<root>/<项目>/<会话>/...
+        if len(relative.parts) >= 2:
+            return relative.parts[1]
+        return path.stem
+    if product == "command-code":
+        name = path.name
+        for suffix in (".checkpoints.jsonl", ".meta.json", ".jsonl"):
+            if name.endswith(suffix):
+                return name[: -len(suffix)] or path.stem
+    return path.stem
+
+
+def _resolve_project(
+    target: AuditTarget,
+    path: Path,
+    stat_result: os.stat_result,
+    cache: dict[str, tuple[int, float, str]] | None,
+) -> str:
+    """解析会话文件的项目（工作目录），缓存按体积和修改时间失效。"""
+
+    key = str(path)
+    if cache is not None:
+        cached = cache.get(key)
+        if (
+            cached is not None
+            and cached[0] == stat_result.st_size
+            and cached[1] == stat_result.st_mtime
+        ):
+            return cached[2]
+    project = _extract_file_project(target, path) or _UNKNOWN_PROJECT
+    if cache is not None:
+        if len(cache) >= _PROJECT_CACHE_MAX:
+            cache.clear()
+        cache[key] = (stat_result.st_size, stat_result.st_mtime, project)
+    return project
+
+
+def _extract_file_project(target: AuditTarget, path: Path) -> str | None:
+    """按产品从会话头部或目录名解析项目，不读取对话内容。"""
+
+    root = target.sessions_root
+    if root is None:
+        return None
+    product = target.product
+    if product == "codex":
+        return _codex_project(path)
+    if product == "claude":
+        return _claude_project(root, path)
+    if product == "kimi":
+        return _kimi_project(root, path)
+    if product == "grok":
+        return _grok_project(root, path)
+    if product == "dsh":
+        return _dsh_project(target.path, root, path)
+    if product == "command-code":
+        return _commandcode_project(path)
+    return None
+
+
+def _codex_project(path: Path) -> str | None:
+    """从 rollout 文件头部的 session_meta 读取工作目录。"""
+
+    for line in _head_lines(path):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        containers: list[Any] = [event, event.get("payload")]
+        for container in tuple(containers):
+            if isinstance(container, dict):
+                containers.append(container.get("session_meta"))
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            cwd = container.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                return cwd.strip()[:1024]
+    return None
+
+
+def _claude_project(root: Path, path: Path) -> str | None:
+    """Claude 主会话从文件头读 cwd；子代理文件回退到同级主会话。"""
+
+    project = _head_cwd(path)
+    if project is not None:
+        return project
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    parts = relative.parts
+    # 布局：projects/<项目>/<会话>/subagents/**/agent-*.jsonl
+    if len(parts) >= 4 and parts[2] == "subagents":
+        return _head_cwd(root / parts[0] / f"{parts[1]}.jsonl")
+    return None
+
+
+def _kimi_project(root: Path, path: Path) -> str | None:
+    """Kimi 会话的项目写在会话目录的 state.json 里。"""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    parts = relative.parts
+    # 布局：sessions/<工作目录>/<session>/...
+    if len(parts) < 2:
+        return None
+    state_path = root / parts[0] / parts[1] / "state.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    cwd = payload.get("cwd")
+    return cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
+
+
+def _grok_project(root: Path, path: Path) -> str | None:
+    """Grok 的项目直接编码在会话一级目录名里。"""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return decode_grok_project(relative.parts[0])
+
+
+def _dsh_project(home: Path, root: Path, path: Path) -> str | None:
+    """DSH 会话目录名不可逆，项目从 projcache 快照读取。"""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if len(relative.parts) < 2:
+        return None
+    snapshot = read_dsh_projcache(home, relative.parts[1])
+    return snapshot.project if snapshot is not None else None
+
+
+def _commandcode_project(path: Path) -> str | None:
+    """Command Code 的项目写在会话 JSONL 头；meta 文件回退到同名主文件。"""
+
+    info = read_commandcode_session_info(path)
+    if info is not None and info.cwd:
+        return info.cwd
+    name = path.name
+    for suffix in (".meta.json", ".checkpoints.jsonl"):
+        if name.endswith(suffix):
+            sibling = path.with_name(f"{name[: -len(suffix)]}.jsonl")
+            info = read_commandcode_session_info(sibling)
+            return info.cwd if info is not None and info.cwd else None
+    return None
+
+
+def _head_lines(path: Path) -> list[str]:
+    """读取文件头部若干行；失败时返回空列表。"""
+
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(_HEAD_READ_BYTES)
+    except OSError:
+        return []
+    lines = chunk.decode("utf-8", errors="replace").splitlines()
+    return [line for line in lines[:_HEAD_READ_LINES] if line.strip()]
+
+
+def _head_cwd(path: Path) -> str | None:
+    """在文件头部匹配首个 "cwd" 字段（Claude 风格的 JSONL 头）。"""
+
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(_HEAD_READ_BYTES)
+    except OSError:
+        return None
+    match = _CWD_HEAD_PATTERN.search(chunk.decode("utf-8", errors="replace"))
+    return match.group(1) if match is not None else None
+
+
+def _path_is_protected(path: Path, active: set[str]) -> bool:
+    """活动集合既含会话文件也含会话目录；目录下的所有文件都受保护。"""
+
+    text = str(path)
+    if text in active:
+        return True
+    return any(text.startswith(entry + os.sep) for entry in active)
+
+
+def _project_slug(project: str) -> str | None:
+    """把项目路径转成归档文件名里可读的短 slug。"""
+
+    text = project.strip()
+    if not text or text == _UNKNOWN_PROJECT:
+        return None
+    base = text.rstrip("/").rsplit("/", 1)[-1] or text
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-.")
+    return (slug or "project")[:_PROJECT_SLUG_MAX]
+
+
+def _archive_name_hint(criteria: CleanupCriteria) -> str | None:
+    """只在恰好选中一个项目时把项目名写进归档文件名。"""
+
+    if len(criteria.projects) != 1:
+        return None
+    return _project_slug(criteria.projects[0])
 
 
 def _walk_usage(
@@ -993,6 +1458,9 @@ def _delete_files(
     files: Sequence[SessionFile],
     progress: Callable[[dict[str, Any]], None] | None = None,
     total: int | None = None,
+    *,
+    active_paths: Callable[[], set[str]] | None = None,
+    signatures: Mapping[Path, tuple[int, ...]] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     """删除文件，返回成功路径和失败原因。"""
 
@@ -1003,9 +1471,22 @@ def _delete_files(
     bytes_done = 0
     for index, item in enumerate(files, start=1):
         try:
+            # 中文注释：名单读取失败时直接跳过删除，不能把失败当成没有活动会话。
+            if active_paths is not None and _path_is_protected(
+                item.path, active_paths()
+            ):
+                raise HousekeepingError("会话重新开始运行，已保留原文件")
+            signature = _session_file_signature(item.path)
+            expected = signatures.get(item.path) if signatures is not None else None
+            if (
+                (expected is not None and signature != expected)
+                or signature[2] != item.size
+                or item.path.stat().st_mtime != item.modified_at
+            ):
+                raise HousekeepingError("会话文件发生变化，已保留原文件")
             item.path.unlink()
             deleted.append(str(item.path))
-        except OSError as error:
+        except (OSError, HousekeepingError) as error:
             failed.append({"path": str(item.path), "error": str(error)})
         bytes_done += item.size
         _report_progress(
@@ -1017,6 +1498,15 @@ def _delete_files(
             total_bytes=total_bytes,
         )
     return deleted, failed
+
+
+def _session_file_signature(path: Path) -> tuple[int, ...]:
+    """记录文件身份和写入状态；拒绝符号链接及非普通文件。"""
+
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise HousekeepingError("会话路径不是普通文件，已保留原路径")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _report_progress(
@@ -1049,13 +1539,28 @@ def _report_progress(
 def _missing_members(archive: Path, files: Sequence[SessionFile]) -> set[str]:
     """校验归档里是否包含全部待删除文件。"""
 
-    expected = {str(item.path).lstrip("/") for item in files}
+    expected = {str(item.path).lstrip("/"): item.size for item in files}
     try:
         with tarfile.open(archive, "r:gz") as handle:
-            members = {item.name for item in handle.getmembers() if item.isfile()}
+            members: set[str] = set()
+            for item in handle:
+                if not item.isfile() or item.name not in expected:
+                    continue
+                if item.size != expected[item.name]:
+                    continue
+                # 中文注释：完整读取每个成员，检测损坏或截断，不能仅检查文件名。
+                source = handle.extractfile(item)
+                if source is None:
+                    continue
+                with source:
+                    read_bytes = 0
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        read_bytes += len(chunk)
+                if read_bytes == item.size:
+                    members.add(item.name)
     except (OSError, tarfile.TarError) as error:
         raise HousekeepingError(f"无法校验归档: {error}") from error
-    return expected - members
+    return set(expected) - members
 
 
 def _guard_member(name: str) -> None:

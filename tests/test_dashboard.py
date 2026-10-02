@@ -1064,6 +1064,67 @@ class AlertHistoryDashboardTests(unittest.TestCase):
         self.assertTrue(first_page["has_more"])
         self.assertEqual(state["alert_history"]["unread"], 2)
 
+    def test_alert_context_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = self._server(root, self._store(root))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            codex_home = root / ".codex"
+            now = time.time()
+            session = (
+                codex_home
+                / "sessions"
+                / "2026"
+                / "06"
+                / "17"
+                / "rollout-2026-06-17T13-24-00-019ed409-4ff8-7083-98a5-2502125735ce.jsonl"
+            )
+            session.parent.mkdir(parents=True, exist_ok=True)
+
+            def iso(ts: float) -> str:
+                from datetime import datetime, timezone
+
+                return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+            lines = [
+                {"timestamp": iso(now - 60), "type": "session_meta", "payload": {"id": "019ed409-4ff8-7083-98a5-2502125735ce", "cwd": "/home/dev/project"}},
+                {"timestamp": iso(now - 5), "type": "event_msg", "payload": {"type": "user_message", "message": "分析这个大日志"}},
+            ]
+            session.write_text(
+                "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n",
+                encoding="utf-8",
+            )
+            original_home = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                with urlopen(f"{base_url}/api/alerts", timeout=2) as response:
+                    alerts = json.load(response)["alerts"]
+                codex_alert = next(item for item in alerts if item["product"] == "codex")
+                with urlopen(
+                    f"{base_url}/api/alerts/context?id={codex_alert['id']}",
+                    timeout=2,
+                ) as response:
+                    payload = json.load(response)
+                context = payload["context"]
+                self.assertTrue(context["found"])
+                self.assertEqual(context["session"]["path"], str(session))
+                self.assertEqual(
+                    [event["kind"] for event in context["events"]],
+                    ["user"],
+                )
+                with self.assertRaises(HTTPError) as not_found:
+                    urlopen(f"{base_url}/api/alerts/context?id=99999", timeout=2)
+                self.assertEqual(not_found.exception.code, 404)
+                with self.assertRaises(HTTPError) as invalid:
+                    urlopen(f"{base_url}/api/alerts/context?id=abc", timeout=2)
+                self.assertEqual(invalid.exception.code, 400)
+            finally:
+                if original_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = original_home
+                server.close()
+
     def test_api_without_store_reports_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -2873,7 +2934,20 @@ class HousekeepingDashboardTests(unittest.TestCase):
             encoding="utf-8",
         )
         old_session.parent.mkdir(parents=True, exist_ok=True)
-        old_session.write_bytes(b"x" * 4096)
+        # 中文注释：session_meta 带上工作目录，供按项目筛选的测试使用；
+        # 长会话（/home/dev/iota）在另一个项目里。
+        old_session.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-01T01:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"cwd": "/home/dev/alpha"},
+                }
+            )
+            + "\n"
+            + "x" * 4096,
+            encoding="utf-8",
+        )
         stale = time.time() - 100 * 86_400
         os.utime(old_session, (stale, stale))
         aggregator = UsageAggregator(
@@ -3197,6 +3271,237 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertFalse(archived_exists)
         self.assertEqual(outside.exception.code, 400)
 
+    def test_preview_filters_by_project(self) -> None:
+        """GET 带 project 时预览只含该项目文件，并返回项目聚合。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(
+                    f"{base_url}/api/housekeeping?days=30&project=/home/dev/alpha",
+                    timeout=5,
+                ) as response:
+                    filtered = json.load(response)
+                with urlopen(
+                    f"{base_url}/api/housekeeping?days=30",
+                    timeout=5,
+                ) as response:
+                    unfiltered = json.load(response)
+            finally:
+                server.close()
+
+        # 中文注释：可归档的只有 /home/dev/alpha 的旧会话；长会话在活动列表里被跳过。
+        self.assertEqual(filtered["preview"]["count"], 1)
+        self.assertEqual(
+            filtered["preview"]["criteria"]["projects"],
+            ["/home/dev/alpha"],
+        )
+        self.assertEqual(
+            filtered["preview"]["files"][0]["project"],
+            "/home/dev/alpha",
+        )
+        self.assertEqual(unfiltered["preview"]["criteria"]["projects"], [])
+        projects = {item["project"]: item for item in filtered["projects"]}
+        self.assertIn("/home/dev/alpha", projects)
+        self.assertIn("/home/dev/iota", projects)
+        self.assertEqual(projects["/home/dev/alpha"]["files"], 1)
+        self.assertEqual(projects["/home/dev/iota"]["files"], 1)
+        # 中文注释：按当前条件（30 天前、非活动）只有 alpha 的旧会话会被处理；
+        # iota 的长会话在活动列表里，符合当前条件数为 0。
+        self.assertEqual(projects["/home/dev/alpha"]["selected_files"], 1)
+        self.assertEqual(projects["/home/dev/iota"]["selected_files"], 0)
+
+    def test_archive_by_project_only_archives_that_project(self) -> None:
+        """POST 带 project + confirm + async 时只归档该项目的会话。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            # 中文注释：另一个项目里的旧会话，用来证明项目筛选不会误伤。
+            other = (
+                root
+                / ".codex"
+                / "sessions"
+                / "2026"
+                / "07"
+                / "01"
+                / "rollout-2026-07-01T01-00-00-88888888-8888-4888-8888-888888888888.jsonl"
+            )
+            other.parent.mkdir(parents=True, exist_ok=True)
+            other.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-01T01:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"cwd": "/home/dev/iota"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stamp = time.time() - 60 * 86_400
+            os.utime(other, (stamp, stamp))
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with self._post(
+                    f"{base_url}/api/housekeeping",
+                    {
+                        "action": "archive",
+                        "days": 30,
+                        "project": "/home/dev/alpha",
+                        "confirm": True,
+                        "async": True,
+                    },
+                ) as response:
+                    started = json.load(response)
+                task_id = started["task"]["id"]
+                deadline = time.time() + 30
+                status = None
+                while time.time() < deadline:
+                    with urlopen(
+                        f"{base_url}/api/housekeeping?task={task_id}",
+                        timeout=5,
+                    ) as response:
+                        status = json.load(response)
+                    if status["task"]["state"] != "running":
+                        break
+                    time.sleep(0.05)
+            finally:
+                server.close()
+            other_exists = other.exists()
+
+        self.assertEqual(status["task"]["state"], "done")
+        self.assertEqual(status["task"]["result"]["count"], 1)
+        self.assertTrue(other_exists)
+
+    def test_archive_all_project_sessions_ignores_retention_days(self) -> None:
+        """POST all_sessions 时归档项目全部非活动会话，不看保留天数。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            home = root / ".codex"
+            # 中文注释：一天前的会话不满足 30 天保留期，但整项目压缩应带上它；
+            # 刚写入的会话即使在 any_age 模式下也必须跳过。
+            fresh_done = (
+                home
+                / "sessions"
+                / "2026"
+                / "09"
+                / "20"
+                / "rollout-2026-09-20T01-00-00-99999999-9999-4999-8999-999999999999.jsonl"
+            )
+            fresh_done.parent.mkdir(parents=True, exist_ok=True)
+            fresh_done.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-09-20T01:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"cwd": "/home/dev/alpha"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stamp = time.time() - 1 * 86_400
+            os.utime(fresh_done, (stamp, stamp))
+            writing = (
+                home
+                / "sessions"
+                / "2026"
+                / "09"
+                / "21"
+                / "rollout-2026-09-21T01-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+            )
+            writing.parent.mkdir(parents=True, exist_ok=True)
+            writing.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-09-21T01:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"cwd": "/home/dev/alpha"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )  # mtime 是当前时刻，命中 10 分钟写入守卫
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with self._post(
+                    f"{base_url}/api/housekeeping",
+                    {
+                        "action": "archive",
+                        "project": "/home/dev/alpha",
+                        "all_sessions": True,
+                        "confirm": True,
+                        "async": True,
+                    },
+                ) as response:
+                    started = json.load(response)
+                task_id = started["task"]["id"]
+                deadline = time.time() + 30
+                status = None
+                while time.time() < deadline:
+                    with urlopen(
+                        f"{base_url}/api/housekeeping?task={task_id}",
+                        timeout=5,
+                    ) as response:
+                        status = json.load(response)
+                    if status["task"]["state"] != "running":
+                        break
+                    time.sleep(0.05)
+            finally:
+                server.close()
+            writing_exists = writing.exists()
+
+        # 中文注释：整项目模式应归档 2 个（100 天前的旧会话 + 1 天前的）；
+        # 刚写入的与活动的（iota 长会话）仍跳过。
+        self.assertEqual(status["task"]["state"], "done")
+        self.assertEqual(status["task"]["result"]["count"], 2)
+        self.assertTrue(writing_exists)
+
+    def test_get_project_sessions_lists_all_with_archive_state(self) -> None:
+        """GET 带 project 时返回该项目全部会话及归档状态；不带时不返回。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            monitor, aggregator, registry = self._environment(root)
+            server = self._server(root, monitor, aggregator, registry)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(
+                    f"{base_url}/api/housekeeping?days=30&project=/home/dev/alpha",
+                    timeout=5,
+                ) as response:
+                    alpha = json.load(response)
+                with urlopen(
+                    f"{base_url}/api/housekeeping?days=30&project=/home/dev/iota",
+                    timeout=5,
+                ) as response:
+                    iota = json.load(response)
+                with urlopen(
+                    f"{base_url}/api/housekeeping?days=30",
+                    timeout=5,
+                ) as response:
+                    plain = json.load(response)
+            finally:
+                server.close()
+
+        alpha_sessions = alpha["project_sessions"]
+        self.assertEqual(len(alpha_sessions), 1)
+        self.assertEqual(alpha_sessions[0]["project"], "/home/dev/alpha")
+        self.assertTrue(alpha_sessions[0]["archive_state"]["eligible"])
+        iota_sessions = iota["project_sessions"]
+        self.assertEqual(len(iota_sessions), 1)
+        self.assertFalse(iota_sessions[0]["archive_state"]["eligible"])
+        self.assertEqual(iota_sessions[0]["archive_state"]["reason"], "会话仍在运行")
+        self.assertIsNone(plain["project_sessions"])
+
     def test_page_contains_housekeeping_section(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -3213,6 +3518,8 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertIn('id="housekeeping"', html)
         self.assertIn('href="#housekeeping"', html)
         self.assertIn('id="housekeeping-content"', html)
+        self.assertIn('id="housekeeping-project"', html)
+        self.assertIn('id="housekeeping-projects"', html)
         self.assertIn('id="housekeeping-archive-button"', html)
         self.assertIn('id="housekeeping-clean-button"', html)
         self.assertIn("建议开新会话", html)

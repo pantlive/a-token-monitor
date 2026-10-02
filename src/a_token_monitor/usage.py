@@ -21,9 +21,15 @@ from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from .agents import product_label
+from .commandcode import (
+    commandcode_home_for,
+    list_commandcode_transcripts,
+    read_commandcode_account,
+    resolve_commandcode_homes,
+)
 from .grok import (
     GrokSessionInfo,
     grok_unified_log,
@@ -1168,7 +1174,32 @@ class _UsageIndexStore:
             return False
         return True
 
-    def search_groups(
+    def search_groups(self, **criteria: Any) -> tuple[dict[str, Any], ...]:
+        """兼容旧内部调用；页面检索优先使用有界分页入口。"""
+
+        result = self._query_groups(**criteria)
+        assert isinstance(result, tuple)
+        return result
+
+    def search_page(
+        self,
+        *,
+        group: str,
+        sort: str,
+        limit: int,
+        offset: int,
+        **criteria: Any,
+    ) -> dict[str, Any]:
+        """在 SQLite 内分组、排序和分页，仅将当前页与全量合计返回 Python。"""
+
+        result = self._query_groups(**criteria, page=(group, sort, limit, offset))
+        if isinstance(result, dict):
+            return result
+        return UsageAggregator.empty_search(
+            group=group, sort=sort, limit=limit, offset=offset
+        )
+
+    def _query_groups(
         self,
         *,
         since: float | None = None,
@@ -1178,7 +1209,8 @@ class _UsageIndexStore:
         project: str | None = None,
         account: str | None = None,
         keyword: str | None = None,
-    ) -> tuple[dict[str, Any], ...]:
+        page: tuple[str, str, int, int] | None = None,
+    ) -> tuple[dict[str, Any], ...] | dict[str, Any]:
         """在 SQL 里按「日期 + 会话 + 模型 + 长上下文」聚合出 token 分桶。
 
         只返回聚合结果，不把逐条用量读进 Python；成本由调用方用每个分桶的
@@ -1269,6 +1301,10 @@ class _UsageIndexStore:
                     "account_name, account_id, product "
                     "ORDER BY last_at DESC"
                 )
+                if page is not None:
+                    return _sql_search_page(
+                        connection, statement, parameters, file_projects, page
+                    )
                 rows = connection.execute(statement, parameters).fetchall()
                 results: list[dict[str, Any]] = []
                 for row in rows:
@@ -1449,6 +1485,11 @@ class _UsageIndexStore:
                         account_id = excluded.account_id,
                         profile_name = excluded.profile_name,
                         product = excluded.product
+                    WHERE usage_file_account.account_key IS NOT excluded.account_key
+                        OR usage_file_account.account_name IS NOT excluded.account_name
+                        OR usage_file_account.account_id IS NOT excluded.account_id
+                        OR usage_file_account.profile_name IS NOT excluded.profile_name
+                        OR usage_file_account.product IS NOT excluded.product
                     """,
                     rows,
                 )
@@ -1951,6 +1992,155 @@ def _empty_search_totals() -> dict[str, Any]:
     }
 
 
+class _SqlSearchBucket:
+    """SQLite 聚合器：沿用现有计价和标签规则，只保留当前分组的摘要。"""
+
+    def __init__(self) -> None:
+        self.bucket: dict[str, Any] | None = None
+
+    def step(self, payload: str, group: str) -> None:
+        """合并一个按日期、会话、模型及长上下文分好的 SQL 桶。"""
+
+        row = json.loads(payload)
+        path, model, day = (
+            str(row["path"]),
+            str(row["model"] or _UNKNOWN_MODEL),
+            str(row["day"] or ""),
+        )
+        key, name, account_id, product = _account_fields(
+            row.get("account_key"),
+            row.get("account_name"),
+            row.get("account_id"),
+            row.get("product"),
+        )
+        usage = _token_usage_from_row(row)
+        billing = _token_usage_from_row(row, "billing_")
+        pricing = _lookup_pricing(model)
+        estimate = (
+            _estimate_with_pricing(billing, pricing, bool(row["long_context"]))
+            if pricing is not None
+            else _unknown_pricing_estimate()
+        )
+        if self.bucket is None:
+            self.bucket = _new_search_bucket(
+                group,
+                _search_bucket_key(group, day, path, model, key),
+                day,
+                path,
+                model,
+                row.get("project"),
+                float(row["first_at"]),
+                account_key=key,
+                account_name=name,
+                account_id=account_id,
+            )
+        _accumulate_search_bucket(
+            self.bucket,
+            usage=usage,
+            estimate=estimate,
+            model=model,
+            first_at=float(row["first_at"]),
+            last_at=float(row["last_at"]),
+            records=int(row["records"]),
+            project=row.get("project"),
+            account_name=name,
+            product=product,
+        )
+
+    def finalize(self) -> str | None:
+        """只序列化最终摘要，不向请求线程传回全部 SQL 分桶。"""
+
+        return (
+            json.dumps(_search_row_to_dict(self.bucket))
+            if self.bucket is not None
+            else None
+        )
+
+
+def _sql_search_page(
+    connection: sqlite3.Connection,
+    statement: str,
+    parameters: Sequence[Any],
+    projects: Mapping[str, str],
+    page: tuple[str, str, int, int],
+) -> dict[str, Any]:
+    """用临时表复用筛选结果，分别查询完整合计和带 LIMIT/OFFSET 的页面。"""
+
+    group, sort, limit, offset = page
+    # 中文注释：大检索的中间结果由 SQLite 管理，允许落临时文件，避免 Python fetchall。
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.create_function("usage_project", 1, projects.get)
+    connection.create_aggregate("usage_search_bucket", 2, _SqlSearchBucket)
+    connection.execute(
+        "CREATE TEMP TABLE search_base AS SELECT *, usage_project(path) AS project "
+        f"FROM ({statement})",
+        parameters,
+    )
+    columns = [
+        item[0]
+        for item in connection.execute("SELECT * FROM search_base LIMIT 0").description
+    ]
+    row_json = "json_object(" + ",".join(f"'{name}', {name}" for name in columns) + ")"
+    grouping = {
+        "session": "day, path, model",
+        "date": "day",
+        "model": "model",
+        "account": "COALESCE(account_key, '')",
+    }[group]
+    connection.execute(
+        "CREATE TEMP TABLE search_buckets AS "
+        f"SELECT usage_search_bucket({row_json}, ?) AS payload FROM search_base "
+        f"GROUP BY {grouping} ORDER BY MIN(rowid)",
+        (group,),
+    )
+    summary = connection.execute(
+        f"SELECT usage_search_bucket({row_json}, 'all'), SUM(records), "
+        "COUNT(DISTINCT path), COUNT(DISTINCT model), MIN(first_at), MAX(last_at) "
+        "FROM search_base"
+    ).fetchone()
+    matched = int(
+        connection.execute("SELECT COUNT(*) FROM search_buckets").fetchone()[0]
+    )
+    order = {
+        "recent": "json_extract(payload, '$.last_at') DESC, json_extract(payload, '$.total_tokens') DESC",
+        "tokens": "json_extract(payload, '$.total_tokens') DESC, json_extract(payload, '$.last_at') DESC",
+        "cost": "json_extract(payload, '$.estimated_cost_usd') IS NULL, json_extract(payload, '$.estimated_cost_usd') DESC, json_extract(payload, '$.last_at') DESC",
+    }[sort]
+    rows = connection.execute(
+        f"SELECT payload FROM search_buckets ORDER BY {order}, rowid LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    totals = _empty_search_totals()
+    if summary[0] is not None:
+        combined = json.loads(summary[0])
+        totals.update(
+            usage=combined["usage"],
+            total_tokens=combined["total_tokens"],
+            cost_usd=combined["estimated_cost_usd"],
+            api_pricing_known=combined["api_pricing_known"],
+            cache_savings_usd=combined["cache_savings_usd"],
+            records=int(summary[1]),
+            sessions=int(summary[2]),
+            models=int(summary[3]),
+            first_at=summary[4],
+            last_at=summary[5],
+        )
+    totals["rows"] = matched
+    return {
+        "available": True,
+        "group": group,
+        "sort": sort,
+        "limit": limit,
+        "offset": offset,
+        "matched_rows": matched,
+        "has_more": offset + len(rows) < matched,
+        "truncated": False,
+        "scanned_records": totals["records"],
+        "rows": [json.loads(row[0]) for row in rows],
+        "totals": totals,
+    }
+
+
 def _delta_to_row(path: str, kind: str, delta: UsageDelta) -> tuple[object, ...]:
     """把一个 token 增量转换成 SQLite 行。"""
 
@@ -2116,18 +2306,28 @@ class _UsageAggregate:
     model_costs: dict[str, _ModelCost] = field(default_factory=dict)
     projects: dict[str, "_UsageAggregate"] = field(default_factory=dict)
 
-    def add(self, source: _UsageSource, delta: UsageDelta) -> None:
+    def add(
+        self,
+        source: _UsageSource,
+        delta: UsageDelta,
+        estimate: Mapping[str, Any] | None = None,
+    ) -> None:
         """合并一次 JSONL 增量。"""
 
-        self._add_totals(source, delta)
+        self._add_totals(source, delta, estimate)
         project = delta.project or source.project or _UNKNOWN_PROJECT
         project_aggregate = self.projects.setdefault(
             project,
             _UsageAggregate(),
         )
-        project_aggregate._add_totals(source, delta)
+        project_aggregate._add_totals(source, delta, estimate)
 
-    def _add_totals(self, source: _UsageSource, delta: UsageDelta) -> None:
+    def _add_totals(
+        self,
+        source: _UsageSource,
+        delta: UsageDelta,
+        estimate: Mapping[str, Any] | None = None,
+    ) -> None:
         """只更新当前层级的 token 和模型统计，不递归创建项目。"""
 
         self.usage = self.usage.add(delta.usage)
@@ -2137,7 +2337,96 @@ class _UsageAggregate:
         previous = self.models.get(delta.model, TokenUsage())
         self.models[delta.model] = previous.add(delta.usage)
         cost = self.model_costs.setdefault(delta.model, _ModelCost())
-        cost.add(_estimate_usage(delta.billing_usage or delta.usage, delta.model))
+        cost.add(
+            estimate
+            if estimate is not None
+            else _estimate_usage(delta.billing_usage or delta.usage, delta.model)
+        )
+
+
+@dataclass
+class _RollupBin:
+    """同小时、自然日、模型和项目的增量汇总，保留边界请求以精确裁剪窗口。"""
+
+    model: str
+    project: str | None
+    first_at: float = float("inf")
+    last_at: float = float("-inf")
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    cost: _ModelCost = field(default_factory=_ModelCost)
+    items: list[tuple[UsageDelta, Mapping[str, Any]]] = field(default_factory=list)
+
+    def add(self, delta: UsageDelta) -> None:
+        """仅对新请求估价；长上下文和缓存计价保持请求级口径。"""
+
+        estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model)
+        self.items.append((delta, estimate))
+        self.first_at = min(self.first_at, delta.timestamp)
+        self.last_at = max(self.last_at, delta.timestamp)
+        self.usage = self.usage.add(delta.usage)
+        self.cost.add(estimate)
+
+    def entries(
+        self, start: float, end: float
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any]]]:
+        """完整桶直接合并，只有跨越时间窗口边界的桶逐条过滤。"""
+
+        if self.last_at < start or self.first_at > end:
+            return
+        if start <= self.first_at and self.last_at <= end:
+            yield (
+                UsageDelta(self.last_at, self.model, self.usage, project=self.project),
+                {
+                    "estimated_credits": self.cost.estimated_credits,
+                    "estimated_cost_usd": self.cost.estimated_cost_usd,
+                    "cache_savings_usd": self.cost.cache_savings_usd,
+                },
+            )
+        else:
+            yield from (
+                (delta, estimate)
+                for delta, estimate in self.items
+                if start <= delta.timestamp <= end
+            )
+
+
+class _FileRollup:
+    """逐文件维护增量分桶；截断、替换或累计/兜底切换时重建。"""
+
+    def __init__(self) -> None:
+        self.sequence: tuple[UsageDelta, ...] = ()
+        self.bins: dict[tuple[object, ...], _RollupBin] = {}
+
+    def update(self, deltas: tuple[UsageDelta, ...]) -> None:
+        """复用不可变增量对象，追加时只处理新尾部。"""
+
+        if deltas is self.sequence:
+            return
+        previous_count = len(self.sequence)
+        can_append = previous_count <= len(deltas) and (
+            previous_count == 0 or deltas[previous_count - 1] is self.sequence[-1]
+        )
+        if not can_append:
+            self.bins.clear()
+            previous_count = 0
+        for delta in deltas[previous_count:]:
+            key = (
+                int(delta.timestamp // 3600),
+                _local_day(delta.timestamp),
+                delta.model,
+                delta.project,
+            )
+            bucket = self.bins.setdefault(key, _RollupBin(delta.model, delta.project))
+            bucket.add(delta)
+        self.sequence = deltas
+
+    def entries(
+        self, start: float, end: float
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any]]]:
+        """产出指定时间范围内的预计算汇总。"""
+
+        for bucket in self.bins.values():
+            yield from bucket.entries(start, end)
 
 
 @dataclass(frozen=True)
@@ -2188,6 +2477,7 @@ class UsageAggregator:
         kimi_homes: Sequence[Path] | None = None,
         dsh_homes: Sequence[Path] | None = None,
         claude_homes: Sequence[Path] | None = None,
+        commandcode_homes: Sequence[Path] | None = None,
     ) -> None:
         """创建有刷新间隔、持久化检查点和单轮磁盘预算的用量缓存。"""
 
@@ -2221,7 +2511,9 @@ class UsageAggregator:
             resolve_claude_homes(claude_homes) if claude_homes is not None else ()
         )
         self._claude_sidechain_cache: dict[Path, tuple[float, bool]] = {}
+        self._commandcode_homes = resolve_commandcode_homes(commandcode_homes or ())
         self._cache: dict[Path, _CachedFile] = {}
+        self._rollups: dict[Path, _FileRollup] = {}
         self._discovered: dict[Path, tuple[Path, ...]] = {}
         self._discovered_at: dict[Path, float] = {}
         self._snapshot_cache: dict[str, Any] | None = None
@@ -2236,6 +2528,8 @@ class UsageAggregator:
         self._last_indexed_at: float | None = None
         self._last_index_error: str | None = None
         self._lock = threading.RLock()
+        self._snapshot_lock = threading.Lock()
+        self._worker_lock = threading.Lock()
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._job: tuple[
@@ -2261,6 +2555,15 @@ class UsageAggregator:
 
         metadata_by_profile = account_metadata or {}
         scope = self._scope_key(registries, metadata_by_profile)
+        if self.background_indexing and now is None:
+            # 中文注释：HTTP 只读取已发布快照，不等待索引的磁盘读取和聚合锁。
+            with self._snapshot_lock:
+                self._job = (registries, metadata_by_profile, now)
+                cached = self._snapshot_cache
+                cached_scope = self._snapshot_scope
+            self._ensure_worker()
+            if cached is not None and scope == cached_scope:
+                return cached
         with self._lock:
             self._job = (registries, metadata_by_profile, now)
             if self.background_indexing:
@@ -2304,6 +2607,7 @@ class UsageAggregator:
         kimi_homes: Sequence[Path] | None = None,
         dsh_homes: Sequence[Path] | None = None,
         claude_homes: Sequence[Path] | None = None,
+        commandcode_homes: Sequence[Path] | None = None,
     ) -> None:
         """热更新各 provider 的扫描目录；None 保持不变，显式元组（含空）替换。
 
@@ -2313,6 +2617,8 @@ class UsageAggregator:
         """
 
         with self._lock:
+            if commandcode_homes is not None:
+                self._commandcode_homes = resolve_commandcode_homes(commandcode_homes)
             if grok_homes is not None:
                 self._grok_homes = resolve_grok_homes(grok_homes)
                 self._grok_sessions = {
@@ -2346,9 +2652,20 @@ class UsageAggregator:
                     for home, cached in self._claude_sidechain_cache.items()
                     if home in self._claude_homes
                 }
+            # 中文注释：目录变化后立即丢弃展示缓存，不能继续显示旧账号或旧筛选项。
+            with self._snapshot_lock:
+                self._snapshot_scope = None
+                self._facets_cache = None
+                self._search_cache.clear()
 
     def _ensure_worker(self) -> None:
         """启动一次性的后台索引线程。"""
+
+        with self._worker_lock:
+            self._start_worker()
+
+    def _start_worker(self) -> None:
+        """在工作线程创建锁内启动索引器。"""
 
         if self._worker is not None and self._worker.is_alive():
             return
@@ -2522,15 +2839,16 @@ class UsageAggregator:
             "cache_seconds": self.refresh_interval,
             "indexing": indexing,
         }
-        self._snapshot_cache = snapshot
-        self._snapshot_cached_at = time.monotonic()
-        self._snapshot_scope = scope
+        with self._snapshot_lock:
+            self._snapshot_cache = snapshot
+            self._snapshot_cached_at = time.monotonic()
+            self._snapshot_scope = scope
         return snapshot
 
     def cached_snapshot(self, now: float | None = None) -> dict[str, Any]:
         """返回内存中的用量结果，不触碰 CODEX_HOME 历史文件。"""
 
-        with self._lock:
+        with self._snapshot_lock:
             if self._snapshot_cache is not None:
                 return self._snapshot_cache
         return self.empty_snapshot(now=now)
@@ -2638,7 +2956,7 @@ class UsageAggregator:
         """返回索引整体范围，供检索页填充模型下拉和范围提示。"""
 
         observed_at = time.time() if now is None else float(now)
-        with self._lock:
+        with self._snapshot_lock:
             cached = self._facets_cache
             if (
                 cached is not None
@@ -2659,7 +2977,7 @@ class UsageAggregator:
             }
         )
         facets["available"] = store is not None and facets["records"] > 0
-        with self._lock:
+        with self._snapshot_lock:
             self._facets_cache = facets
             self._facets_cached_at = observed_at
         return facets
@@ -2763,98 +3081,10 @@ class UsageAggregator:
     ) -> dict[str, Any]:
         """用 SQL 聚合结果拼装检索视图，成本按分桶的长上下文标记估算。"""
 
-        rows = store.search_groups(
-            since=since,
-            until=until,
-            models=models,
-            session=session,
-            project=project,
-            account=account,
-            keyword=keyword,
-        )
-        truncated = len(rows) > _MAX_SEARCH_ROWS
-        if truncated:
-            rows = rows[:_MAX_SEARCH_ROWS]
-        buckets: dict[tuple[Any, ...], dict[str, Any]] = {}
-        totals_usage = TokenUsage()
-        totals_cost = _ModelCost()
-        session_paths: set[str] = set()
-        model_names: set[str] = set()
-        scanned_records = 0
-        first_at: float | None = None
-        last_at: float | None = None
-        for row in rows:
-            path = str(row["path"])
-            model = str(row["model"] or _UNKNOWN_MODEL)
-            day = str(row["day"] or "")
-            records = int(row["records"] or 0)
-            row_first = float(row["first_at"] or 0.0)
-            row_last = float(row["last_at"] or 0.0)
-            account_key, account_name, account_id, product = _account_fields(
-                row.get("account_key"),
-                row.get("account_name"),
-                row.get("account_id"),
-                row.get("product"),
-            )
-            usage = _token_usage_from_row(row)
-            billing = _token_usage_from_row(row, prefix="billing_")
-            pricing = _lookup_pricing(model)
-            # 中文注释：长上下文标记在建索引时按每条记录算好，这里直接使用，
-            # 不会因为多条短请求相加而误判成长上下文。
-            estimate = (
-                _estimate_with_pricing(billing, pricing, bool(row["long_context"]))
-                if pricing is not None
-                else _unknown_pricing_estimate()
-            )
-            key = _search_bucket_key(group, day, path, model, account_key)
-            bucket = buckets.get(key)
-            if bucket is None:
-                bucket = _new_search_bucket(
-                    group,
-                    key,
-                    day,
-                    path,
-                    model,
-                    row.get("project"),
-                    row_first,
-                    account_key=account_key,
-                    account_name=account_name,
-                    account_id=account_id,
-                )
-                buckets[key] = bucket
-            _accumulate_search_bucket(
-                bucket,
-                usage=usage,
-                estimate=estimate,
-                model=model,
-                first_at=row_first,
-                last_at=row_last,
-                records=records,
-                project=row.get("project"),
-                account_name=account_name,
-                product=product,
-            )
-            scanned_records += records
-            totals_usage = totals_usage.add(usage)
-            totals_cost.add(estimate)
-            session_paths.add(path)
-            model_names.add(model)
-            first_at = row_first if first_at is None else min(first_at, row_first)
-            last_at = row_last if last_at is None else max(last_at, row_last)
-        return self._search_payload(
-            buckets=buckets,
-            totals_usage=totals_usage,
-            totals_cost=totals_cost,
-            session_paths=session_paths,
-            model_names=model_names,
-            scanned_records=scanned_records,
-            first_at=first_at,
-            last_at=last_at,
-            truncated=truncated,
-            group=group,
-            sort=sort,
-            limit=limit,
-            offset=offset,
+        return store.search_page(
+            since=since, until=until, models=models, session=session, project=project,
+            account=account, keyword=keyword, group=group, sort=sort,
+            limit=limit, offset=offset,
         )
 
     def _search_payload(
@@ -2918,7 +3148,7 @@ class UsageAggregator:
         """读取检索结果缓存；过期条目直接丢弃。"""
 
         now = time.monotonic()
-        with self._lock:
+        with self._snapshot_lock:
             entry = self._search_cache.get(key)
             if entry is None:
                 return None
@@ -2934,7 +3164,7 @@ class UsageAggregator:
     ) -> None:
         """写入检索结果缓存，超过上限时丢弃最旧的一半。"""
 
-        with self._lock:
+        with self._snapshot_lock:
             self._search_cache[key] = (time.monotonic(), payload)
             if len(self._search_cache) > _SEARCH_CACHE_MAX:
                 for stale in sorted(
@@ -3084,11 +3314,11 @@ class UsageAggregator:
                 summary = _session_usage_from_rows(path, items)
                 if summary is not None:
                     usages[path] = summary
-        cached_by_path = {str(path): cached for path, cached in self._cache.items()}
         for path in wanted:
             if path in usages:
                 continue
-            cached = cached_by_path.get(str(path))
+            # 中文注释：只查询当前请求的会话，避免每五秒遍历全部文件缓存。
+            cached = self._cache.get(Path(path))
             if cached is None:
                 continue
             summary = _session_usage_from_deltas(path, cached.deltas)
@@ -3123,7 +3353,20 @@ class UsageAggregator:
         grok_scope = tuple(("grok", str(home), "", "") for home in self._grok_homes)
         kimi_scope = tuple(("kimi", str(home), "", "") for home in self._kimi_homes)
         dsh_scope = tuple(("dsh", str(home), "", "") for home in self._dsh_homes)
-        return registry_scope + grok_scope + kimi_scope + dsh_scope
+        claude_scope = tuple(
+            ("claude", str(home), "", "") for home in self._claude_homes
+        )
+        commandcode_scope = tuple(
+            ("command-code", str(home), "", "") for home in self._commandcode_homes
+        )
+        return (
+            registry_scope
+            + grok_scope
+            + kimi_scope
+            + dsh_scope
+            + claude_scope
+            + commandcode_scope
+        )
 
     def _build_sources(
         self,
@@ -3215,6 +3458,15 @@ class UsageAggregator:
                     account_id=account.account_id,
                     codex_home=str(claude_home),
                     product="claude",
+                )
+        for home in self._commandcode_homes:
+            account = read_commandcode_account(home)
+            for path in list_commandcode_transcripts(home):
+                sources[path.resolve()] = _UsageSource(
+                    profile_name=account.profile_name,
+                    account_id=account.account_id,
+                    codex_home=str(home),
+                    product="command-code",
                 )
         return sources
 
@@ -3317,6 +3569,9 @@ class UsageAggregator:
     def _remove_stale_cache(self, sources: Mapping[Path, _UsageSource]) -> None:
         """删除已经不在扫描范围内的缓存，避免长期运行无限增长。"""
 
+        for path in tuple(self._rollups):
+            if path not in sources:
+                del self._rollups[path]
         for path in tuple(self._cache):
             if path not in sources:
                 del self._cache[path]
@@ -3423,6 +3678,8 @@ class UsageAggregator:
                 offset=cached.next_offset,
                 state=cached.state,
                 maximum_bytes=maximum_bytes,
+                commandcode=commandcode_home_for(path, self._commandcode_homes)
+                is not None,
             )
             cached_file = _CachedFile(
                 signature=signature,
@@ -3442,6 +3699,8 @@ class UsageAggregator:
                     previous_timestamp=stat_result.st_mtime,
                 ),
                 maximum_bytes=maximum_bytes,
+                commandcode=commandcode_home_for(path, self._commandcode_homes)
+                is not None,
             )
             cached_file = _CachedFile(
                 signature=signature,
@@ -4002,9 +4261,8 @@ class UsageAggregator:
                 source.account_key,
                 _UsageAggregate(),
             )
-            for delta in deltas:
-                if start <= delta.timestamp <= now:
-                    account.add(source, delta)
+            for delta, estimate in self._rollup_entries(path, deltas, start, now):
+                account.add(source, delta, estimate)
 
         accounts = []
         for account_key, aggregate in sorted(
@@ -4053,10 +4311,8 @@ class UsageAggregator:
             days.append(entry)
             index[key] = entry
         first_start = (today_start - timedelta(days=self._DAILY_TREND_DAYS - 1)).timestamp()
-        for deltas in file_deltas.values():
-            for delta in deltas:
-                if not first_start <= delta.timestamp <= now:
-                    continue
+        for path, deltas in file_deltas.items():
+            for delta, estimate in self._rollup_entries(path, deltas, first_start, now):
                 key = (
                     datetime.fromtimestamp(delta.timestamp)
                     .astimezone()
@@ -4066,10 +4322,6 @@ class UsageAggregator:
                 if entry is None:
                     continue
                 entry["total_tokens"] += delta.usage.total_tokens
-                estimate = _estimate_usage(
-                    delta.billing_usage or delta.usage,
-                    delta.model,
-                )
                 cost = estimate.get("estimated_cost_usd")
                 if cost is None:
                     entry["has_unpriced"] = True
@@ -4078,6 +4330,19 @@ class UsageAggregator:
         for entry in days:
             entry["estimated_cost_usd"] = _round_number(entry["estimated_cost_usd"])
         return days
+
+    def _rollup_entries(
+        self,
+        path: Path,
+        deltas: tuple[UsageDelta, ...],
+        start: float,
+        end: float,
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any]]]:
+        """按文件更新新尾部，再复用各窗口共用的计价分桶。"""
+
+        rollup = self._rollups.setdefault(path, _FileRollup())
+        rollup.update(deltas)
+        yield from rollup.entries(start, end)
 
 
 def _conversation_metrics(
@@ -5052,6 +5317,8 @@ def _parse_usage_chunk(
     offset: int,
     state: _UsageParseState,
     maximum_bytes: int | None = None,
+    *,
+    commandcode: bool = False,
 ) -> _UsageParseResult:
     """从已确认的完整行偏移继续解析 JSONL 追加内容。"""
 
@@ -5071,6 +5338,8 @@ def _parse_usage_chunk(
     bytes_read = 0
     reached_eof = False
     discarding_oversized_line = state.discarding_oversized_line
+    recent_ids = list(state.recent_ids)
+    known_ids = set(recent_ids)
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
@@ -5119,7 +5388,12 @@ def _parse_usage_chunk(
                 reached_eof = reached_physical_eof
 
             for raw_line in complete_content.splitlines(keepends=True):
-                if not _should_parse_usage_line(raw_line):
+                if not _should_parse_usage_line(raw_line) and not (
+                    commandcode and (b'"usage"' in raw_line or (
+                        len(raw_line) <= _MAX_MODEL_LINE_BYTES
+                        and any(hint in raw_line for hint in (b'"session"', b'"model_change"'))
+                    ))
+                ):
                     continue
                 line = raw_line.decode("utf-8", errors="replace")
                 try:
@@ -5136,6 +5410,36 @@ def _parse_usage_chunk(
                 event_timestamp = _event_timestamp(event)
                 if event_timestamp is not None:
                     previous_timestamp = event_timestamp
+                if commandcode:
+                    # 中文注释：官方 sessionStore 将单次请求 usage 写在 assistant 消息外层。
+                    message = event.get("message")
+                    raw_usage = event.get("usage")
+                    if (
+                        event.get("type") != "message"
+                        or not isinstance(message, Mapping)
+                        or message.get("role") != "assistant"
+                        or not isinstance(raw_usage, Mapping)
+                    ):
+                        continue
+                    entry_id = _text_value(event.get("id"))
+                    if entry_id and entry_id in known_ids:
+                        continue
+                    request_usage = TokenUsage.from_mapping({
+                        "input_tokens": raw_usage.get("inputTokens"),
+                        "output_tokens": raw_usage.get("outputTokens"),
+                        "cached_input_tokens": raw_usage.get("cacheReadTokens"),
+                        "cache_write_input_tokens": raw_usage.get("cacheWriteTokens"),
+                    })
+                    if request_usage is not None and not request_usage.is_zero():
+                        has_total_usage = True
+                        total_deltas.append(UsageDelta(
+                            previous_timestamp, current_model, request_usage,
+                            billing_usage=request_usage, project=project,
+                        ))
+                        if entry_id:
+                            known_ids.add(entry_id)
+                            recent_ids.append(entry_id)
+                    continue
                 total_usage = _extract_usage(event, "total_token_usage")
                 last_usage = _extract_usage(event, "last_token_usage")
                 if total_usage is not None:
@@ -5211,6 +5515,7 @@ def _parse_usage_chunk(
             project=project,
             previous_timestamp=previous_timestamp,
             discarding_oversized_line=discarding_oversized_line,
+            recent_ids=tuple(recent_ids[-512:]),
         ),
         bytes_read=bytes_read,
         reached_eof=reached_eof,

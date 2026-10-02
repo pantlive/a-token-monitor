@@ -32,8 +32,9 @@ Grok CLI、Kimi Code、DeepSeek Harness、Command Code、Claude Code、OpenCode 
 - **异常流量监控**：按进程跟踪 agent 的外发 TCP 字节（Linux 用内核
   `tcp_info`），15 秒 / 5 分钟两档阈值分级告警，历史落盘可检索、可标记已读；
   只记录进程、目录、对端和字节数，不读取连接内容。
-- **磁盘与会话管理**：统计各 agent 数据目录占用，超阈值提醒；Codex 会话可
-  打包归档（含 manifest 校验）或清理，支持单会话归档与从归档恢复。
+- **磁盘与会话管理**：统计各 agent 数据目录占用，超阈值提醒；各工具的会话
+  可按项目（工作目录）筛选后压缩归档（tar.gz + manifest 校验）或清理，
+  支持单会话归档与从归档恢复。
 - **设置页**：网页在线管理各 provider 的扫描目录（热重载、不丢索引检查点）和
   历史数据保留天数（清理预览 + 安全清理 + VACUUM 压缩）。
 - **健康检查**：`/healthz`（存活）与 `/readyz`（逐组件就绪状态），Dashboard
@@ -92,7 +93,7 @@ a-token-monitor disk --days 30
 # 会话归档（先预览，加 --yes 才执行）与恢复
 a-token-monitor sessions --archive --older-than 30
 a-token-monitor sessions --archive --older-than 30 --yes
-a-token-monitor sessions --restore ~/.a-token-monitor/archives/codex-sessions-<时间戳>.tar.gz
+a-token-monitor sessions --restore ~/.a-token-monitor/archives/sessions-<时间戳>.tar.gz
 
 # 持续监控多个账号并启动网页 Dashboard
 a-token-monitor \
@@ -140,6 +141,22 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
   和关键词检索，可标记已读或按范围删除。
 - **按需折叠**：「告警历史」「用量检索」「磁盘与会话管理」默认折叠为一行结论，
   展开时才拉取明细，展开状态记在浏览器本地。
+
+告警详情按工作目录和时间窗关联本地会话，展示事件类型、时间与 UTF-8 字节数；
+这是本地活动线索，不能确认实际网络请求的载荷。此功能会按需读取会话日志，
+默认不向页面或 API 返回用户消息、工具参数和搜索词的内容摘要，也不持久化这些内容。
+需要摘要时可为 `daemon` 或 `service install` 添加 `--alert-context-content`：
+仅允许本机监听地址，摘要会先脱敏常见 token、密码和 API Key，再截断显示。
+此开关不适用于 `--dashboard-host 0.0.0.0`。
+
+归档、清理和恢复串行执行；删除原会话前再次检查活动状态及文件签名，
+压缩期间重新写入或恢复活动的文件会保留。归档和 manifest 在删除前落盘，
+恢复时核对 manifest 中的 SHA-256；没有摘要的旧归档仍可恢复。
+扫描目录热更新同时影响额度、活动会话、索引和告警详情。
+
+用量汇总复用按文件增量更新的计价分桶；长上下文与缓存仍按单次请求计算。
+检索由 SQLite 完成分组、排序和分页，当前页和整个筛选范围的合计分别返回。
+Dashboard 合并同时发生的状态刷新，浏览器在慢请求期间不会叠加轮询。
 
 ### 设置页
 
@@ -314,7 +331,7 @@ a-token-monitor service uninstall
 | `service.json` | `service install` 保存的 daemon 配置（三个平台一致） |
 | `scan-dirs.json` | 设置页保存的 Web 扫描目录覆盖配置 |
 | `settings.json` | 设置页保存的 Web 保留天数覆盖配置 |
-| `archives/` | 会话归档：`codex-sessions-*.tar.gz` 及 `.manifest.json` |
+| `archives/` | 会话归档：`sessions-*.tar.gz`（旧命名 `codex-sessions-*` 仍可恢复）及 `.manifest.json` |
 
 Dashboard 除页面和只读接口外，只额外接受少数写接口（`POST /api/alerts`、
 `POST /api/housekeeping`、设置页的扫描目录与历史数据接口），都要求

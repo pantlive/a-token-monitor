@@ -15,14 +15,22 @@ from .accounts import (
     build_additional_account_spec,
 )
 from .alerts import AlertStoreError, TrafficAlertStore
-from .claude import resolve_claude_homes
-from .commandcode import resolve_commandcode_homes
+from .claude import list_claude_active_sessions, resolve_claude_homes
+from .commandcode import (
+    list_commandcode_active_sessions,
+    resolve_commandcode_homes,
+)
 from .dashboard import DashboardConfig, DashboardServer
-from .dsh import resolve_dsh_homes
-from .grok import resolve_grok_homes
+from .dsh import list_dsh_active_sessions, resolve_dsh_homes
+from .grok import list_grok_active_sessions, resolve_grok_homes
 from .health import HealthTracker
-from .housekeeping import AuditTarget, DiskThresholds, HousekeepingMonitor
-from .kimi import resolve_kimi_homes
+from .housekeeping import (
+    AuditTarget,
+    DiskThresholds,
+    HousekeepingMonitor,
+    default_sessions_root,
+)
+from .kimi import list_kimi_active_sessions, resolve_kimi_homes
 from .monitor import MonitorConfig, MultiSessionMonitor
 from .registry import MultiSessionRegistry
 from .retention import HistoryDataManager, RetentionController
@@ -45,6 +53,72 @@ class AccountMonitor:
     account: CodexAccount
     registry: MultiSessionRegistry
     monitor: MultiSessionMonitor
+
+
+def external_active_session_paths(
+    *,
+    grok_homes: Sequence[Path] = (),
+    kimi_homes: Sequence[Path] = (),
+    dsh_homes: Sequence[Path] = (),
+    commandcode_homes: Sequence[Path] = (),
+    claude_homes: Sequence[Path] = (),
+    logger: logging.Logger | None = None,
+) -> set[str]:
+    """返回非 Codex 产品仍在运行的会话路径（文件或会话目录）。
+
+    归档/清理按路径精确匹配或目录前缀跳过这些条目；某个产品的活动探测
+    失败时保护该产品的整个会话目录，不影响其他产品的归档。
+    """
+
+    protected: set[str] = set()
+    log = logger or logging.getLogger(__name__)
+    collectors = (
+        ("claude", claude_homes, list_claude_active_sessions),
+        ("kimi", kimi_homes, list_kimi_active_sessions),
+        ("grok", grok_homes, list_grok_active_sessions),
+        ("dsh", dsh_homes, list_dsh_active_sessions),
+        ("command-code", commandcode_homes, list_commandcode_active_sessions),
+    )
+    for product, homes, lister in collectors:
+        for home in homes:
+            try:
+                sessions = lister(home)
+            except Exception as error:  # noqa: BLE001 - 探测失败只影响保护名单
+                log.debug("活动会话探测失败（%s, %s）: %s", product, home, error)
+                # 中文注释：无法确定哪些会话活跃时，禁止删除该目录下的会话。
+                protected.add(str(default_sessions_root(product, home)))
+                continue
+            for session in sessions:
+                _protect_active_session(protected, product, session.jsonl_path)
+    return protected
+
+
+def _protect_active_session(
+    protected: set[str],
+    product: str,
+    raw_path: str | None,
+) -> None:
+    """把一个活动会话的文件及其同会话的相关文件/目录加入保护名单。"""
+
+    if not raw_path:
+        return
+    path = Path(raw_path)
+    protected.add(str(path))
+    if product == "claude":
+        # 布局：<slug>/<uuid>.jsonl 与 <uuid>/subagents/**；整个 <uuid>/ 目录受保护。
+        protected.add(str(path.with_suffix("")))
+    elif product == "kimi":
+        # wire.jsonl 位于 <session>/agents/<agent>/wire.jsonl，保护整个会话目录。
+        if path.name == "wire.jsonl" and len(path.parents) > 2:
+            protected.add(str(path.parents[2]))
+        else:
+            protected.add(str(path.parent))
+    elif product in {"grok", "dsh"}:
+        # 会话是目录：<session>/{summary.json,session.lock,...}。
+        protected.add(str(path.parent))
+    elif product == "command-code":
+        protected.add(str(path.with_name(f"{path.stem}.meta.json")))
+        protected.add(str(path.with_name(f"{path.stem}.checkpoints.jsonl")))
 
 
 class MultiAccountMonitor:
@@ -212,26 +286,71 @@ class MultiAccountMonitor:
             for item in self.account_monitors
         ]
         for home in self.grok_homes:
-            targets.append(AuditTarget("Grok", "grok", home))
+            targets.append(
+                AuditTarget(
+                    "Grok",
+                    "grok",
+                    home,
+                    sessions_root=default_sessions_root("grok", home),
+                )
+            )
         for home in self.kimi_homes:
-            targets.append(AuditTarget("Kimi Code", "kimi", home))
+            targets.append(
+                AuditTarget(
+                    "Kimi Code",
+                    "kimi",
+                    home,
+                    sessions_root=default_sessions_root("kimi", home),
+                )
+            )
         for home in self.dsh_homes:
-            targets.append(AuditTarget("DeepSeek Harness", "dsh", home))
+            targets.append(
+                AuditTarget(
+                    "DeepSeek Harness",
+                    "dsh",
+                    home,
+                    sessions_root=default_sessions_root("dsh", home),
+                )
+            )
         for home in self.commandcode_homes:
-            targets.append(AuditTarget("Command Code", "command-code", home))
+            targets.append(
+                AuditTarget(
+                    "Command Code",
+                    "command-code",
+                    home,
+                    sessions_root=default_sessions_root("command-code", home),
+                )
+            )
         for home in self.claude_homes:
-            targets.append(AuditTarget("Claude Code", "claude", home))
+            targets.append(
+                AuditTarget(
+                    "Claude Code",
+                    "claude",
+                    home,
+                    sessions_root=default_sessions_root("claude", home),
+                )
+            )
         targets.append(AuditTarget("监控状态目录", "state", self.state_dir))
         return tuple(targets)
 
     def _active_session_paths(self) -> set[str]:
-        """返回仍在运行的会话 JSONL 路径，归档和清理时必须跳过。"""
+        """返回仍在运行的会话路径（文件或会话目录），归档和清理时必须跳过。"""
 
         paths: set[str] = set()
         for item in self.account_monitors:
             for session in item.registry.list_sessions(active_only=True):
                 if session.pids and session.jsonl_path:
                     paths.add(str(Path(session.jsonl_path)))
+        paths.update(
+            external_active_session_paths(
+                grok_homes=self.grok_homes,
+                kimi_homes=self.kimi_homes,
+                dsh_homes=self.dsh_homes,
+                commandcode_homes=self.commandcode_homes,
+                claude_homes=self.claude_homes,
+                logger=self.logger,
+            )
+        )
         return paths
 
     def _should_log_advice(self, key: str, now: float) -> bool:
@@ -262,7 +381,10 @@ class MultiAccountMonitor:
         aggregator = self._advice_aggregator
         if aggregator is None:
             aggregator = UsageAggregator(
-                cache_path=self.state_dir / "usage-index.sqlite3"
+                cache_path=self.state_dir / "usage-index.sqlite3",
+                grok_homes=self.grok_homes, kimi_homes=self.kimi_homes,
+                dsh_homes=self.dsh_homes, claude_homes=self.claude_homes,
+                commandcode_homes=self.commandcode_homes,
             )
             self._advice_aggregator = aggregator
         # 中文注释：没有 Dashboard 时由后台线程保持用量索引可用，
@@ -469,8 +591,16 @@ class MultiAccountMonitor:
                         kimi_homes=self.kimi_homes,
                         dsh_homes=self.dsh_homes,
                         claude_homes=self.claude_homes,
+                        commandcode_homes=self.commandcode_homes,
                     )
             if self._dashboard is not None:
+                self._dashboard.update_homes(
+                    grok_homes=self.grok_homes,
+                    kimi_homes=self.kimi_homes,
+                    dsh_homes=self.dsh_homes,
+                    commandcode_homes=self.commandcode_homes,
+                    claude_homes=self.claude_homes,
+                )
                 self._dashboard.update_accounts(
                     self.registries,
                     self.dashboard_account_metadata,
@@ -613,6 +743,7 @@ class MultiAccountMonitor:
                         kimi_homes=self.kimi_homes,
                         dsh_homes=self.dsh_homes,
                         claude_homes=self.claude_homes,
+                        commandcode_homes=self.commandcode_homes,
                     )
                     self._dashboard_aggregator = usage_aggregator
                     self._dashboard = DashboardServer(
@@ -622,6 +753,7 @@ class MultiAccountMonitor:
                             host=self.config.dashboard_host,
                             port=self.config.dashboard_port,
                             budget_usd=self.config.budget_usd,
+                            alert_context_content=self.config.alert_context_content,
                         ),
                         logger=self.logger,
                         usage_aggregator=usage_aggregator,

@@ -42,8 +42,9 @@ interruption.
   search and read-state tracking; only the process, directory, peer and byte counts are
   recorded, never connection content.
 - **Disk & session management**: usage of every agent data directory with threshold
-  reminders; Codex sessions can be archived (with manifest verification) or cleaned up,
-  one session at a time, and restored from an archive.
+  reminders; sessions from every tool can be filtered by project (working directory),
+  archived as tar.gz (with manifest verification) or cleaned up, one session at a time,
+  and restored from an archive.
 - **Settings page**: manage each provider's scan directories from the web (hot reload,
   index checkpoints preserved) along with history retention days (cleanup preview + safe
   cleanup + VACUUM).
@@ -107,7 +108,7 @@ a-token-monitor disk --days 30
 # Session archiving (preview first, --yes actually runs it) and restore
 a-token-monitor sessions --archive --older-than 30
 a-token-monitor sessions --archive --older-than 30 --yes
-a-token-monitor sessions --restore ~/.a-token-monitor/archives/codex-sessions-<timestamp>.tar.gz
+a-token-monitor sessions --restore ~/.a-token-monitor/archives/sessions-<timestamp>.tar.gz
 
 # Keep monitoring several accounts and start the web Dashboard
 a-token-monitor \
@@ -163,6 +164,25 @@ All of these work on both `daemon` and `service install`.
 - **Collapse on demand**: “Alert history”, “Usage search” and “Disk & session management”
   start collapsed into a single summary line and only fetch details when expanded; the
   expanded state is remembered in the browser.
+
+Alert details correlate local sessions by working directory and time window, showing event
+kinds, timestamps, and UTF-8 byte counts. These are local activity clues, not proof of the
+actual network payload. This feature reads session logs on demand; message, tool argument,
+and search excerpts are hidden from the page and API by default and are never persisted.
+To show excerpts, add `--alert-context-content` to `daemon` or `service install`.
+It requires a loopback listening address, redacts common tokens, passwords, and API keys
+before truncation, and cannot be combined with `--dashboard-host 0.0.0.0`.
+
+Archive, cleanup, and restore operations run serially. Before deleting an original session,
+its activity and file signature are checked again; files changed or resumed during compression
+are preserved. The archive and manifest are saved before deletion, and restore verifies the
+archive SHA-256 recorded in the manifest; legacy archives without a digest remain restorable.
+Directory changes apply to quotas, active sessions, indexing, and alert details.
+
+Usage summaries reuse per-file incremental pricing buckets while keeping cache and long-context
+pricing per request. SQLite performs grouping, sorting, and pagination; each response includes
+the current page and complete filtered totals. Concurrent dashboard refreshes share a state
+snapshot, and browser polling does not overlap slow requests.
 
 ### Settings page
 
@@ -364,7 +384,7 @@ Uninstalling the service never deletes monitoring data. Files in the state direc
 | `service.json` | Daemon configuration saved by `service install` (identical on all three platforms) |
 | `scan-dirs.json` | Web scan-directory overrides saved from the settings page |
 | `settings.json` | Web retention overrides saved from the settings page |
-| `archives/` | Session archives: `codex-sessions-*.tar.gz` plus `.manifest.json` |
+| `archives/` | Session archives: `sessions-*.tar.gz` (legacy `codex-sessions-*` archives still restore) plus `.manifest.json` |
 
 Besides pages and read-only endpoints, the Dashboard accepts only a few write endpoints
 (`POST /api/alerts`, `POST /api/housekeeping`, and the settings page's scan-directory and

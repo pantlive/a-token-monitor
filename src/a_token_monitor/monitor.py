@@ -72,6 +72,7 @@ class MonitorConfig:
     dashboard: bool = False
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
+    alert_context_content: bool = False
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
     upload_burst_danger_mb: float = 32.0
@@ -111,6 +112,10 @@ class MonitorConfig:
             raise ValueError("dashboard_host 不能为空")
         if not 0 <= self.dashboard_port <= 65535:
             raise ValueError("dashboard_port 必须在 0 到 65535 之间")
+        if self.alert_context_content and self.dashboard_host not in {
+            "127.0.0.1", "::1", "localhost",
+        }:
+            raise ValueError("内容摘要只能在本机监听地址启用")
         if self.budget_usd is not None and self.budget_usd <= 0:
             raise ValueError("budget_usd 必须大于 0")
         for name in (
@@ -334,6 +339,7 @@ class MultiSessionMonitor:
                             host=self.config.dashboard_host,
                             port=self.config.dashboard_port,
                             budget_usd=self.config.budget_usd,
+                            alert_context_content=self.config.alert_context_content,
                         ),
                         logger=self.logger,
                         usage_aggregator=UsageAggregator(

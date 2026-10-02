@@ -24,6 +24,8 @@ from .alerts import (
     AlertStoreError,
     TrafficAlertStore,
 )
+from .alert_context import AlertContextRoots, load_alert_context
+from .discovery import default_session_root
 from .i18n import localize_payload, resolve_language, substitute
 from .housekeeping import (
     CleanupCriteria,
@@ -363,7 +365,8 @@ _BASE_CSS = r"""
       background: var(--panel-soft);
     }
     .usage-note { margin-bottom: 12px; color: var(--muted); font-size: 12px; }
-    .usage-table table { min-width: 1180px; }
+    .usage-table table, table.usage-table { min-width: 1180px; }
+    table.usage-table td:first-child { white-space: nowrap; }
     .usage-models { display: grid; gap: 3px; min-width: 180px; }
     .usage-models-toggle { justify-self: start; padding: 1px 7px; font-size: 11px; }
     .usage-model { color: var(--blue); font-family: ui-monospace, SFMono-Regular, monospace; }
@@ -528,6 +531,17 @@ _BASE_CSS = r"""
     table.tight { min-width: 0; }
     table.tight th, table.tight td { padding: 10px 12px; }
     table.tight td { font-size: 12px; }
+    /* 可排序表头：点击切换排序，当前列高亮并带方向箭头。 */
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--muted-strong); }
+    th.sortable.sorted { color: var(--text); }
+    /* 告警上下文：展开行展示告警时间窗内的会话事件明细。 */
+    .alert-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .alert-context-row > td { background: var(--panel-soft); }
+    .alert-context .ctx-event { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; padding: 4px 0; border-bottom: 1px dashed var(--line); font-size: 11px; }
+    .alert-context .ctx-event:last-child { border-bottom: none; }
+    .alert-context .ctx-time { flex-shrink: 0; color: var(--muted); }
+    .alert-context .ctx-body { min-width: 0; overflow-wrap: anywhere; color: var(--muted-strong); }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
     .cell-main { color: var(--muted-strong); font-size: 12px; }
     .cell-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }
@@ -540,11 +554,20 @@ _BASE_CSS = r"""
     .chip-button:hover { text-decoration: underline; }
     /* 目录与归档卡片。 */
     .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-    .mini-card { padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .compact-grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+    .mini-card { display: flex; flex-direction: column; padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .mini-card > .criteria-row { margin-top: auto; padding-top: 12px; }
+    .mini-card .tight th:nth-child(2), .mini-card .tight td:nth-child(2),
+    .mini-card .tight th:nth-child(3), .mini-card .tight td:nth-child(3) { width: 1%; white-space: nowrap; }
+    .mini-card .tight td:first-child { overflow-wrap: anywhere; word-break: break-all; }
     .mini-card-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .mini-card-head > div:first-child { min-width: 0; }
+    .mini-card-actions { display: flex; gap: 6px; margin-top: 10px; }
+    .mini-card-actions .btn { flex: 1; }
     .mini-card-title { color: var(--text); font-size: 13px; font-weight: 700; }
     .mini-card-path { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .criteria-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 12px; }
+    #housekeeping-project { width: 100%; max-width: 300px; }
 """
 
 
@@ -653,7 +676,8 @@ _DASHBOARD_CSS = r"""
     .usage-summary-item { padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); }
     .usage-summary-label { color: var(--muted); font-size: 11px; }
     .usage-summary-value { margin-top: 3px; color: var(--text); font-size: 17px; font-weight: 700; }
-    .usage-table table { min-width: 1180px; }
+    .usage-table table, table.usage-table { min-width: 1180px; }
+    table.usage-table td:first-child { white-space: nowrap; }
     .usage-models { display: grid; gap: 3px; min-width: 180px; }
     .usage-model { color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
     .usage-number { white-space: nowrap; }
@@ -719,7 +743,8 @@ _DASHBOARD_CSS = r"""
     .stat-value.danger { color: var(--red); }
     .stat-value.ok { color: var(--green); }
     .stat-foot { margin-top: 3px; color: var(--muted); font-size: 11px; }
-    .table-actions { display: flex; justify-content: center; margin-top: 12px; }
+    .table-actions { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 12px; }
+    .tight td .btn.mini + .btn.mini { margin-left: 4px; }
     td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .truncate { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row-unread td:first-child { box-shadow: inset 2px 0 0 var(--cyan); }
@@ -1724,7 +1749,7 @@ __THEME_TOGGLE__
           <span class="section-toggle-text">
             <span class="section-kicker">Housekeeping</span>
             <span class="section-toggle-title">磁盘与会话管理</span>
-            <span class="section-description">统计各 agent 数据目录占用，超阈值提醒；可按最后修改时间归档（tar.gz + manifest，可恢复）或清理 Codex 会话，都会跳过运行中的会话。</span>
+            <span class="section-description">统计各 agent 数据目录占用，超阈值提醒；可按最后修改时间归档（tar.gz + manifest，可恢复）或清理会话，支持按项目压缩归档，都会跳过运行中的会话。</span>
             <span class="section-summary" id="housekeeping-summary">展开查看详情</span>
           </span>
         </button>
@@ -1733,9 +1758,11 @@ __THEME_TOGGLE__
       <div class="section-body" id="housekeeping-body">
       <div class="stat-row" id="housekeeping-stats"></div>
       <div id="housekeeping-content"><div class="empty-state"><span class="empty-title">正在统计目录占用…</span></div></div>
+      <div id="housekeeping-projects"></div>
       <div class="criteria-row">
         <label class="field">保留天数<input id="housekeeping-days" type="number" min="1" max="3650" value="30"></label>
         <label class="field">最小体积 MiB<input id="housekeeping-min-size" type="number" min="0" value="0"></label>
+        <label class="field">项目<select id="housekeeping-project"><option value="">全部项目</option></select></label>
         <div class="toolbar-actions">
           <button id="housekeeping-preview-button" class="btn" type="button">预览可归档会话</button>
           <button id="housekeeping-archive-button" class="btn warn" type="button">压缩归档</button>
@@ -1981,9 +2008,12 @@ __THEME_TOGGLE__
   let latestUsageState = null;
   let latestHealthState = null;
   let usagePollTimer = 0;
+  let usagePollSuspended = false;
   let latestInsightsState = null;
   let insightsPollTimer = 0;
+  let insightsPollSuspended = false;
   let insightsPeriodDays = '';
+  let mainRefreshTimer = 0;
   // 低频分区默认折叠：状态记在 localStorage，展开时才加载明细。
   const COLLAPSED_SECTIONS_KEY = 'a-token-monitor-collapsed-sections';
   const DEFAULT_COLLAPSED = ['alert-history', 'usage-search', 'housekeeping'];
@@ -2662,7 +2692,12 @@ __THEME_TOGGLE__
           if (button) {
             button.textContent = `索引中 ${Number(indexing.percent || 0).toFixed(1)}%`;
           }
-          usagePollTimer = window.setTimeout(poll, 1000);
+          // 中文注释：标签页隐藏时暂停轮询，由 visibilitychange 恢复。
+          if (document.hidden) {
+            usagePollSuspended = true;
+          } else {
+            usagePollTimer = window.setTimeout(poll, 1000);
+          }
           return;
         }
         if (button) {
@@ -2791,7 +2826,11 @@ __THEME_TOGGLE__
           if (button) {
             button.textContent = `索引中 ${Number(indexing.percent || 0).toFixed(1)}%`;
           }
-          insightsPollTimer = window.setTimeout(poll, 1000);
+          if (document.hidden) {
+            insightsPollSuspended = true;
+          } else {
+            insightsPollTimer = window.setTimeout(poll, 1000);
+          }
           return;
         }
         if (button) {
@@ -2860,7 +2899,9 @@ __THEME_TOGGLE__
   };
   // 告警历史：读取落盘告警，支持筛选、已读和清理。
   let alertHistoryState = null;
-  let alertHistoryLimit = 50;
+  // 中文注释：每页固定 50 条，alertHistoryPage 是当前页码（0 起）。
+  const ALERT_PAGE_SIZE = 50;
+  let alertHistoryPage = 0;
   const alertFilterValue = (id) => {
     const element = document.getElementById(id);
     return element ? String(element.value || '') : '';
@@ -2877,8 +2918,79 @@ __THEME_TOGGLE__
     if (ack) params.set('ack', ack);
     const keyword = alertFilterValue('alert-keyword-filter').trim();
     if (keyword) params.set('q', keyword);
-    params.set('limit', String(alertHistoryLimit));
+    params.set('limit', String(ALERT_PAGE_SIZE));
+    params.set('offset', String(alertHistoryPage * ALERT_PAGE_SIZE));
     return params.toString();
+  };
+  // 中文注释：告警 → 会话上下文的展开状态与缓存；5 秒自动刷新重渲染时保持展开。
+  const alertContextCache = new Map();
+  const ALERT_CONTEXT_REASONS = {
+    no_session: '告警时间窗内没有匹配该工作目录的会话文件（可能已清理或归档）',
+    unsupported_product: '该 agent 的会话格式暂不支持明细提取',
+    unreadable: '会话文件无法读取',
+  };
+  const ALERT_CONTEXT_KINDS = {
+    user: '用户消息',
+    tool: '工具调用',
+    tool_output: '工具输出',
+    search: '联网搜索',
+    assistant: '助手消息',
+  };
+  const renderAlertContext = (context) => {
+    if (!context || !context.found) {
+      const reason = ALERT_CONTEXT_REASONS[(context && context.reason) || ''] || '未能定位会话';
+      return `<div class="empty-state"><span class="empty-title">未找到可关联的会话</span><span class="empty-hint">${escapeHtml(reason)}</span></div>`;
+    }
+    const session = context.session || {};
+    const totals = context.totals || {};
+    const events = Array.isArray(context.events) ? context.events : [];
+    const items = events.map((event) => {
+      const kindLabel = ALERT_CONTEXT_KINDS[event.kind] || '事件';
+      const size = Number(event.size || 0) > 0 ? ` <span class="muted">${escapeHtml(formatDataSize(event.size))}</span>` : '';
+      const label = event.label ? `<strong>${escapeHtml(event.label)}</strong> ` : '';
+      return `<div class="ctx-event"><span class="ctx-time mono">${escapeHtml(formatTime(event.t))}</span><span class="chip">${escapeHtml(kindLabel)}</span><span class="ctx-body">${label}${escapeHtml(event.detail || '')}${size}</span></div>`;
+    }).join('');
+    const truncated = context.truncated ? `（仅显示前 ${events.length} 条）` : '';
+    const privacyNote = context.content_enabled ? '' : '<br>内容摘要已隐藏，仅显示事件类型和字节数。';
+    const statsNote = context.fallback
+      ? '告警时间窗内该会话没有新事件；以下是告警发生前最近的会话活动——突发上传通常是这些累积内容随后的请求。'
+      : `时间窗内 ${Number(totals.events || 0)} 条事件 · 上行内容 ${escapeHtml(formatDataSize(totals.input_bytes || 0))} · 工具输出 ${escapeHtml(formatDataSize(totals.output_bytes || 0))}${truncated}。用户消息、工具调用与工具输出都会随后续请求上传到 API，这里的大小即当时新增的上行内容。`;
+    return `<div class="alert-context">
+      <div class="usage-note">会话 <span class="mono">${escapeHtml(session.path || '')}</span><br>${statsNote}${privacyNote}</div>
+      ${items || '<div class="empty-state"><span class="empty-hint">时间窗内没有提取到事件明细。</span></div>'}
+    </div>`;
+  };
+  const renderAlertContextRow = (alert) => {
+    const entry = alertContextCache.get(String(alert.id));
+    if (!entry) return '';
+    let body = '';
+    if (entry.status === 'loading') {
+      body = '<div class="empty-state"><span class="empty-title">正在读取会话上下文…</span></div>';
+    } else if (entry.status === 'error') {
+      body = `<div class="empty-state"><span class="empty-title">读取会话上下文失败：${escapeHtml(entry.message)}</span></div>`;
+    } else {
+      body = renderAlertContext(entry.data);
+    }
+    return `<tr class="alert-context-row"><td colspan="8">${body}</td></tr>`;
+  };
+  const toggleAlertContext = async (id) => {
+    if (!id) return;
+    if (alertContextCache.has(id)) {
+      alertContextCache.delete(id);
+      if (alertHistoryState) renderAlertHistory(alertHistoryState);
+      return;
+    }
+    alertContextCache.set(id, { status: 'loading' });
+    if (alertHistoryState) renderAlertHistory(alertHistoryState);
+    try {
+      const response = await fetch(`/api/alerts/context?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      alertContextCache.set(id, { status: 'ok', data: payload.context || {} });
+    } catch (error) {
+      alertContextCache.set(id, { status: 'error', message: error.message });
+    }
+    if (alertHistoryState) renderAlertHistory(alertHistoryState);
   };
   // 告警历史：先给结论（未读/红色/最近），再给可筛选的明细表。
   const renderAlertStats = (stats, payload) => {
@@ -2909,6 +3021,13 @@ __THEME_TOGGLE__
     if (countLabel) {
       countLabel.textContent = `未读 ${Number(stats.unread || 0)} / 共 ${Number(stats.total || 0)} 条`;
     }
+    const totalPages = Math.max(1, Math.ceil(Number(stats.total || 0) / ALERT_PAGE_SIZE));
+    if (alerts.length === 0 && alertHistoryPage > 0 && Number(stats.total || 0) > 0) {
+      // 中文注释：筛选变化或清理后旧页码可能超出范围，收敛到末页重拉。
+      alertHistoryPage = totalPages - 1;
+      refreshAlertHistory();
+      return;
+    }
     if (alerts.length === 0) {
       container.innerHTML = '<div class="empty-state"><span class="empty-title">当前筛选条件下没有历史告警</span><span class="empty-hint">放宽时间范围、级别或已读状态再试。</span></div>';
       return;
@@ -2928,22 +3047,27 @@ __THEME_TOGGLE__
         <td><div class="cell-main">${escapeHtml(formatDataSize(alert.peak_bytes || alert.bytes || 0))}</div><div class="cell-sub">${repeat}${escapeHtml(rule)} · ${escapeHtml(String(Number(alert.window_seconds || 0)))} 秒</div></td>
         <td><span class="mono">${escapeHtml(alert.remote || '—')}</span></td>
         <td><span class="pill ${alert.acknowledged ? 'other' : 'warn'}">${alert.acknowledged ? '已读' : '未读'}</span></td>
-        <td><button class="btn mini" type="button" data-alert-action="${ackAction}" data-alert-id="${escapeHtml(alert.id)}">${ackLabel}</button></td>
-      </tr>`;
+        <td><div class="alert-row-actions"><button class="btn mini" type="button" data-alert-context="${escapeHtml(alert.id)}">上下文</button><button class="btn mini" type="button" data-alert-action="${ackAction}" data-alert-id="${escapeHtml(alert.id)}">${ackLabel}</button></div></td>
+      </tr>${renderAlertContextRow(alert)}`;
     }).join('');
-    const more = payload.has_more
-      ? `<div class="table-actions"><button id="alert-load-more-button" class="btn" type="button">加载更多（已显示 ${alerts.length} / ${Number(stats.total || alerts.length)} 条）</button></div>`
+    const pager = totalPages > 1
+      ? `<div class="table-actions"><button class="btn" type="button" data-alert-page="-1" ${alertHistoryPage === 0 ? 'disabled' : ''}>上一页</button><span class="muted">第 ${alertHistoryPage + 1} / ${totalPages} 页 · 共 ${escapeHtml(formatNumber(stats.total || 0))} 条</span><button class="btn" type="button" data-alert-page="1" ${alertHistoryPage >= totalPages - 1 ? 'disabled' : ''}>下一页</button></div>`
       : '';
     container.innerHTML = `<div class="table-wrap"><table class="tight alert-history-table">
         <thead><tr><th>时间</th><th>级别</th><th>Agent / 进程</th><th>工作目录</th><th>外发峰值 / 规则</th><th>主要对端</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table></div>${more}`;
+      </table></div>${pager}`;
     container.querySelectorAll('[data-alert-action]').forEach((button) => {
       button.addEventListener('click', () => mutateAlerts(button.dataset.alertAction, { ids: [Number(button.dataset.alertId)] }));
     });
-    document.getElementById('alert-load-more-button')?.addEventListener('click', () => {
-      alertHistoryLimit += 50;
-      refreshAlertHistory();
+    container.querySelectorAll('[data-alert-context]').forEach((button) => {
+      button.addEventListener('click', () => toggleAlertContext(button.dataset.alertContext || ''));
+    });
+    container.querySelectorAll('[data-alert-page]').forEach((button) => {
+      button.addEventListener('click', () => {
+        alertHistoryPage += Number(button.dataset.alertPage || 0);
+        refreshAlertHistory();
+      });
     });
   };
   const refreshAlertHistory = async () => {
@@ -2996,7 +3120,9 @@ __THEME_TOGGLE__
   // 用量检索：按日期、模型和会话查询已索引的 token 历史。
   let usageSearchState = null;
   let usageSearchGroup = 'session';
-  let usageSearchLimit = 50;
+  // 中文注释：每页固定 30 行，usageSearchPage 是当前页码（0 起）。
+  const usageSearchLimit = 30;
+  let usageSearchPage = 0;
   const usageSearchValue = (id) => {
     const element = document.getElementById(id);
     return element ? String(element.value || '') : '';
@@ -3020,6 +3146,7 @@ __THEME_TOGGLE__
     params.set('group', usageSearchGroup);
     params.set('sort', usageSearchValue('usage-search-sort') || 'recent');
     params.set('limit', String(usageSearchLimit));
+    params.set('offset', String(usageSearchPage * usageSearchLimit));
     return params.toString();
   };
   const fillUsageSearchModels = (models) => {
@@ -3084,18 +3211,32 @@ __THEME_TOGGLE__
     if (countLabel) {
       countLabel.textContent = `${formatNumber(search.matched_rows)} 行 · ${formatNumber(totals.total_tokens)} token`;
     }
+    const totalPages = Math.max(1, Math.ceil(Number(search.matched_rows || 0) / usageSearchLimit));
+    if (rows.length === 0 && usageSearchPage > 0 && Number(search.matched_rows || 0) > 0) {
+      // 中文注释：筛选变化后旧页码可能超出范围，收敛到末页重拉。
+      usageSearchPage = totalPages - 1;
+      refreshUsageSearch();
+      return;
+    }
     if (rows.length === 0) {
       container.innerHTML = '<div class="empty-state"><span class="empty-title">没有符合条件的用量记录</span><span class="empty-hint">若刚产生用量，索引可能仍在写入，可稍后重试。</span></div>';
       return;
     }
     const group = search.group || usageSearchGroup;
+    // 中文注释：时间/合计/金额三列对应服务端排序（recent/tokens/cost），点表头即切换。
+    const currentSort = usageSearchValue('usage-search-sort') || 'recent';
+    const usSortHeader = (label, key, numeric) => {
+      const active = currentSort === key;
+      const classes = `${numeric ? 'num ' : ''}sortable${active ? ' sorted' : ''}`;
+      return `<th class="${classes}" data-us-sort="${key}">${label}${active ? ' ▼' : ''}</th>`;
+    };
     const header = group === 'date'
-      ? '<tr><th>日期</th><th>会话 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
+      ? `<tr>${usSortHeader('日期', 'recent')}<th>会话 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th>${usSortHeader('合计 token', 'tokens', true)}${usSortHeader('估算金额', 'cost', true)}<th class="num">记录</th></tr>`
       : group === 'model'
-        ? '<tr><th>模型</th><th>会话</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
+        ? `<tr><th>模型</th><th>会话</th><th class="num">输入（缓存）</th><th class="num">输出</th>${usSortHeader('合计 token', 'tokens', true)}${usSortHeader('估算金额', 'cost', true)}<th class="num">记录</th></tr>`
         : group === 'account'
-          ? '<tr><th>账号</th><th>产品 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>'
-          : '<tr><th>时间</th><th>会话</th><th>模型</th><th>项目 / 工作目录</th><th class="num">输入（缓存）</th><th class="num">输出</th><th class="num">合计 token</th><th class="num">估算金额</th><th class="num">记录</th></tr>';
+          ? `<tr><th>账号</th><th>产品 / 模型</th><th class="num">输入（缓存）</th><th class="num">输出</th>${usSortHeader('合计 token', 'tokens', true)}${usSortHeader('估算金额', 'cost', true)}<th class="num">记录</th></tr>`
+          : `<tr>${usSortHeader('时间', 'recent')}<th>会话</th><th>模型</th><th>项目 / 工作目录</th><th class="num">输入（缓存）</th><th class="num">输出</th>${usSortHeader('合计 token', 'tokens', true)}${usSortHeader('估算金额', 'cost', true)}<th class="num">记录</th></tr>`;
     const body = rows.map((row) => {
       const usage = row.usage || {};
       const cost = row.estimated_cost_usd === null || row.estimated_cost_usd === undefined
@@ -3104,7 +3245,6 @@ __THEME_TOGGLE__
       const tokens = `${escapeHtml(formatNumber(usage.input_tokens))}<div class="cell-sub">缓存 ${escapeHtml(formatNumber(usage.cached_input_tokens))}</div>`;
       const output = `${escapeHtml(formatNumber(usage.output_tokens))}<div class="cell-sub">推理 ${escapeHtml(formatNumber(usage.reasoning_output_tokens))}</div>`;
       const total = `${escapeHtml(formatNumber(row.total_tokens))}`;
-      const models = (row.models || []).map((model) => `<span class="chip">${escapeHtml(model)}</span>`).join(' ');
       if (group === 'date') {
         return `<tr>
           <td><div class="cell-main">${escapeHtml(row.date)}</div><div class="cell-sub">最近 ${escapeHtml(formatTime(row.last_at))}</div></td>
@@ -3128,34 +3268,51 @@ __THEME_TOGGLE__
         </tr>`;
       }
       const sessionLabel = row.session_id || (row.session_path || '').split('/').pop() || '未知会话';
+      // 中文注释：账号可能是很长的 account_id（UUID），截断单行显示，完整值放 title。
+      const accountCell = row.account
+        ? `<div class="cell-sub truncate" title="${escapeHtml(row.account)}">${escapeHtml(row.account)} · ${escapeHtml(formatNumber(row.records))} 条</div>`
+        : `<div class="cell-sub">${escapeHtml(formatNumber(row.records))} 条</div>`;
+      // 中文注释：模型列已显示主模型，项目列的模型 chip 只补充其余模型，避免重复。
+      const extraModels = (row.models || []).filter((model) => model && model !== row.model);
+      const extraChips = extraModels.map((model) => `<span class="chip">${escapeHtml(model)}</span>`).join(' ');
       return `<tr>
         <td><div class="cell-main">${escapeHtml(formatTime(row.last_at))}</div><div class="cell-sub">${escapeHtml(row.date)}</div></td>
-        <td><button class="chip-button" type="button" data-usage-session="${escapeHtml(row.session_id || '')}" title="下钻到该会话">${escapeHtml(String(sessionLabel).slice(0, 12))}</button><div class="cell-sub">${escapeHtml(row.account ? `${row.account} · ` : '')}${escapeHtml(formatNumber(row.records))} 条</div></td>
+        <td><button class="chip-button" type="button" data-usage-session="${escapeHtml(row.session_id || '')}" title="下钻到该会话">${escapeHtml(String(sessionLabel).slice(0, 12))}</button>${accountCell}</td>
         <td>${escapeHtml(row.model || '—')}</td>
-        <td><span class="truncate" title="${escapeHtml(row.project || '')}">${escapeHtml(row.project || '未知目录')}</span>${models ? `<div class="cell-sub">${models}</div>` : ''}</td>
+        <td><span class="truncate" title="${escapeHtml(row.project || '')}">${escapeHtml(row.project || '未知目录')}</span>${extraChips ? `<div class="cell-sub">${extraChips}</div>` : ''}</td>
         <td class="num">${tokens}</td><td class="num">${output}</td><td class="num">${total}</td><td class="num">${cost}</td><td class="num">${escapeHtml(formatNumber(row.records))}</td>
       </tr>`;
     }).join('');
-    const more = search.has_more
-      ? `<div class="table-actions"><button id="usage-search-more-button" class="btn" type="button">加载更多（已显示 ${rows.length} / ${formatNumber(search.matched_rows)} 行）</button></div>`
+    const pager = totalPages > 1
+      ? `<div class="table-actions"><button class="btn" type="button" data-us-page="-1" ${usageSearchPage === 0 ? 'disabled' : ''}>上一页</button><span class="muted">第 ${usageSearchPage + 1} / ${totalPages} 页 · 共 ${escapeHtml(formatNumber(search.matched_rows || 0))} 行</span><button class="btn" type="button" data-us-page="1" ${usageSearchPage >= totalPages - 1 ? 'disabled' : ''}>下一页</button></div>`
       : '';
     container.innerHTML = `<div class="table-wrap"><table class="tight usage-table">
         <thead>${header}</thead>
         <tbody>${body}</tbody>
-      </table></div>${more}`;
+      </table></div>${pager}`;
     container.querySelectorAll('[data-usage-session]').forEach((button) => {
       button.addEventListener('click', () => {
         const value = button.dataset.usageSession || '';
         if (!value) return;
         const input = document.getElementById('usage-search-keyword');
         if (input) input.value = value;
-        usageSearchLimit = 50;
+        usageSearchPage = 0;
         refreshUsageSearch();
       });
     });
-    document.getElementById('usage-search-more-button')?.addEventListener('click', () => {
-      usageSearchLimit += 50;
-      refreshUsageSearch();
+    container.querySelectorAll('[data-us-page]').forEach((button) => {
+      button.addEventListener('click', () => {
+        usageSearchPage += Number(button.dataset.usPage || 0);
+        refreshUsageSearch();
+      });
+    });
+    container.querySelectorAll('[data-us-sort]').forEach((header) => {
+      header.addEventListener('click', () => {
+        const select = document.getElementById('usage-search-sort');
+        if (select) select.value = header.dataset.usSort || 'recent';
+        usageSearchPage = 0;
+        refreshUsageSearch();
+      });
     });
   };
   const refreshUsageSearch = async () => {
@@ -3180,6 +3337,13 @@ __THEME_TOGGLE__
   };
   // 磁盘与会话管理：目录占用、归档与清理。
   let housekeepingState = null;
+  // 中文注释：项目卡片默认只看前 5 个，展开状态跨刷新保持。
+  let housekeepingProjectsExpanded = false;
+  // 中文注释：会话表格的当前页码；切换筛选条件时归零，刷新时按总页数收敛。
+  let housekeepingTablePage = 0;
+  // 中文注释：会话表格的列排序；空值表示保持后端「体积 × 闲置时长」的默认顺序。
+  let housekeepingSortKey = '';
+  let housekeepingSortDir = -1;
   const housekeepingValue = (id, fallback) => {
     const element = document.getElementById(id);
     if (!element) return fallback;
@@ -3188,10 +3352,15 @@ __THEME_TOGGLE__
     const number = Number(raw);
     return Number.isFinite(number) ? number : fallback;
   };
-  const housekeepingCriteria = () => ({
-    days: Math.max(1, Math.round(housekeepingValue('housekeeping-days', 30))),
-    min_size_mb: Math.max(0, housekeepingValue('housekeeping-min-size', 0))
-  });
+  const housekeepingCriteria = () => {
+    const projectElement = document.getElementById('housekeeping-project');
+    const project = projectElement ? String(projectElement.value || '').trim() : '';
+    return {
+      days: Math.max(1, Math.round(housekeepingValue('housekeeping-days', 30))),
+      min_size_mb: Math.max(0, housekeepingValue('housekeeping-min-size', 0)),
+      project
+    };
+  };
   const renderHousekeepingStats = (summary, payload) => {
     const container = document.getElementById('housekeeping-stats');
     if (!container) return;
@@ -3202,7 +3371,7 @@ __THEME_TOGGLE__
     const singleWarn = (summary.thresholds || {}).single_warn_bytes || 0;
     container.innerHTML = [
       `<div class="stat"><div class="stat-label">目录合计</div><div class="stat-value">${escapeHtml(formatDataSize(totals.bytes || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.directories || 0))} 个目录 · ${escapeHtml(formatNumber(totals.files || 0))} 个文件</div></div>`,
-      `<div class="stat"><div class="stat-label">会话文件</div><div class="stat-value">${escapeHtml(formatDataSize(totals.session_bytes || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.session_files || 0))} 个 Codex session</div></div>`,
+      `<div class="stat"><div class="stat-label">会话文件</div><div class="stat-value">${escapeHtml(formatDataSize(totals.session_bytes || 0))}</div><div class="stat-foot">${escapeHtml(formatNumber(totals.session_files || 0))} 个会话文件</div></div>`,
       `<div class="stat"><div class="stat-label">可归档 / 清理</div><div class="stat-value ${Number(preview.count || 0) > 0 ? 'warn' : 'ok'}">${escapeHtml(formatNumber(preview.count || 0))} 个</div><div class="stat-foot">约 ${escapeHtml(formatDataSize(preview.bytes || 0))} · 跳过活动 ${escapeHtml(formatNumber(preview.skipped_active || 0))} 个</div></div>`,
       `<div class="stat"><div class="stat-label">已有归档</div><div class="stat-value">${escapeHtml(formatNumber(archives.length))} 份</div><div class="stat-foot">${escapeHtml(summary.archive_dir ? String(summary.archive_dir).split('/').slice(-2).join('/') : '未配置归档目录')}</div></div>`,
       `<div class="stat"><div class="stat-label">单目录阈值</div><div class="stat-value ${reminderCount ? 'danger' : 'ok'}" style="font-size:17px">${escapeHtml(formatDataSize(singleWarn || 0))}</div><div class="stat-foot">${reminderCount ? `${escapeHtml(formatNumber(reminderCount))} 条磁盘提醒` : '当前未超阈值'}</div></div>`
@@ -3255,9 +3424,14 @@ __THEME_TOGGLE__
     const scanNote = summary.observed_at
       ? `上次扫描 ${escapeHtml(formatTime(summary.observed_at))}`
       : '尚未完成扫描';
+    // 中文注释：按项目筛选时提示因此被跳过的其他项目文件数。
+    const skippedProjectNote = Number(preview.skipped_project || 0) > 0
+      ? `<div class="usage-note">按项目筛选：另有 ${escapeHtml(formatNumber(preview.skipped_project))} 个文件因属于其他项目被跳过。</div>`
+      : '';
     container.innerHTML = `${reminderBanners}
-      <div class="usage-note">${scanNote}。按当前条件（${escapeHtml(String(preview.criteria ? preview.criteria.older_than_days : 30))} 天前、非活动）可归档或清理 ${escapeHtml(formatNumber(preview.count || 0))} 个文件，约 ${escapeHtml(formatDataSize(preview.bytes || 0))}；过新跳过 ${escapeHtml(formatNumber(preview.skipped_recent || 0))} 个。</div>
-      ${cards ? `<div class="card-grid">${cards}</div>` : '<div class="empty-state"><span class="empty-title">没有需要统计的目录</span></div>'}`;
+      <div class="usage-note">按当前条件（${escapeHtml(String(preview.criteria ? preview.criteria.older_than_days : 30))} 天前、非活动）可归档或清理 ${escapeHtml(formatNumber(preview.count || 0))} 个文件，约 ${escapeHtml(formatDataSize(preview.bytes || 0))}；过新跳过 ${escapeHtml(formatNumber(preview.skipped_recent || 0))} 个。</div>
+      ${skippedProjectNote}
+      ${cards ? `<div class="account-subtitle"><span>按目录统计</span><span class="muted">${scanNote}</span></div><div class="card-grid">${cards}</div>` : '<div class="empty-state"><span class="empty-title">没有需要统计的目录</span></div>'}`;
   };
   const renderHousekeepingActions = () => {
     const container = document.getElementById('housekeeping-actions');
@@ -3270,12 +3444,72 @@ __THEME_TOGGLE__
     const preview = payload.preview || {};
     const files = Array.isArray(preview.files) ? preview.files : [];
     const archives = Array.isArray(payload.archives) ? payload.archives : [];
-    const previewRows = files.slice(0, 8);
-    const rows = previewRows.map((item) => `<tr>
+    // 中文注释：选中项目时展示该项目的全部会话（含状态与行级操作），
+    // 否则只列出符合当前条件、可批量处理的会话。
+    const projectSessions = Array.isArray(payload.project_sessions) ? payload.project_sessions : null;
+    const selectedProject = housekeepingCriteria().project;
+    const sessionButtons = (path) => `<button class="btn mini" type="button" data-hk-action="archive" data-hk-session="${escapeHtml(path)}">归档</button> <button class="btn mini danger" type="button" data-hk-action="clean" data-hk-session="${escapeHtml(path)}">清理</button>`;
+    let tableTitle = '待处理会话';
+    let tableMeta = `${escapeHtml(formatNumber(preview.count || 0))} 个 · ${escapeHtml(formatDataSize(preview.bytes || 0))}`;
+    let table = '';
+    // 中文注释：两个列表共用一个分页器；默认保持后端「体积 × 闲置时长」降序，
+    // 点击表头后在前端按列排序（原始数组不动，取消排序可回到默认顺序）。
+    const rawSource = projectSessions || files;
+    const source = housekeepingSortKey
+      ? [...rawSource].sort((left, right) => {
+          let result = 0;
+          if (housekeepingSortKey === 'modified') result = Number(left.modified_at || 0) - Number(right.modified_at || 0);
+          else if (housekeepingSortKey === 'size') result = Number(left.size || 0) - Number(right.size || 0);
+          else if (housekeepingSortKey === 'project') result = String(left.project || '').localeCompare(String(right.project || ''));
+          else if (housekeepingSortKey === 'path') result = String(left.path || '').localeCompare(String(right.path || ''));
+          return result * housekeepingSortDir;
+        })
+      : rawSource;
+    // 中文注释：可排序表头；当前排序列带箭头，数字列保持右对齐。
+    const hkSortHeader = (label, key, numeric) => {
+      const active = housekeepingSortKey === key;
+      const classes = `${numeric ? 'num ' : ''}sortable${active ? ' sorted' : ''}`;
+      const arrow = active ? (housekeepingSortDir === 1 ? ' ▲' : ' ▼') : '';
+      return `<th class="${classes}" data-hk-sort="${key}">${label}${arrow}</th>`;
+    };
+    const pageSize = 10;
+    const maxPage = Math.max(0, Math.ceil(source.length / pageSize) - 1);
+    housekeepingTablePage = Math.min(Math.max(0, housekeepingTablePage), maxPage);
+    const pageItems = source.slice(housekeepingTablePage * pageSize, (housekeepingTablePage + 1) * pageSize);
+    const pager = source.length > pageSize
+      ? `<div class="table-actions"><button class="btn" type="button" data-hk-page="-1" ${housekeepingTablePage === 0 ? 'disabled' : ''}>上一页</button><span class="muted">第 ${housekeepingTablePage + 1} / ${maxPage + 1} 页 · 共 ${escapeHtml(formatNumber(source.length))} 个</span><button class="btn" type="button" data-hk-page="1" ${housekeepingTablePage >= maxPage ? 'disabled' : ''}>下一页</button></div>`
+      : '';
+    if (projectSessions) {
+      tableTitle = `项目 ${selectedProject} 的会话`;
+      tableMeta = `共 ${escapeHtml(formatNumber(projectSessions.length))} 个 · 符合当前条件 ${escapeHtml(formatNumber(preview.count || 0))} 个`;
+      const projectRows = pageItems.map((item) => {
+        const state = item.archive_state || {};
+        const status = state.eligible
+          ? '<span class="pill ok">可归档</span>'
+          : `<span class="pill other">${escapeHtml(state.reason || '暂不可归档')}</span>`;
+        return `<tr>
       <td><div class="cell-main">${escapeHtml(formatTime(item.modified_at))}</div><div class="cell-sub">${escapeHtml(String(item.session_id || '').slice(0, 12))}</div></td>
       <td><span class="truncate" title="${escapeHtml(item.path || '')}">${escapeHtml(item.path || '')}</span></td>
       <td class="num">${escapeHtml(formatDataSize(item.size || 0))}</td>
+      <td>${status}</td>
+      <td>${state.eligible ? sessionButtons(item.path || '') : ''}</td>
+    </tr>`;
+      }).join('');
+      table = projectRows
+        ? `<div class="table-wrap"><table class="tight"><thead><tr>${hkSortHeader('最后修改', 'modified')}${hkSortHeader('会话文件', 'path')}${hkSortHeader('大小', 'size', true)}<th>状态</th><th>操作</th></tr></thead><tbody>${projectRows}</tbody></table></div>${pager}`
+        : '<div class="empty-state"><span class="empty-title">该项目下没有会话文件</span></div>';
+    } else {
+      const rows = pageItems.map((item) => `<tr>
+      <td><div class="cell-main">${escapeHtml(formatTime(item.modified_at))}</div><div class="cell-sub">${escapeHtml(String(item.session_id || '').slice(0, 12))}</div></td>
+      <td><span class="truncate" title="${escapeHtml(item.project || '')}">${escapeHtml(item.project || '未知项目')}</span></td>
+      <td><span class="truncate" title="${escapeHtml(item.path || '')}">${escapeHtml(item.path || '')}</span></td>
+      <td class="num">${escapeHtml(formatDataSize(item.size || 0))}</td>
+      <td>${sessionButtons(item.path || '')}</td>
     </tr>`).join('');
+      table = rows
+        ? `<div class="table-wrap"><table class="tight"><thead><tr>${hkSortHeader('最后修改', 'modified')}${hkSortHeader('项目', 'project')}${hkSortHeader('会话文件', 'path')}${hkSortHeader('大小', 'size', true)}<th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>${pager}`
+        : '<div class="empty-state"><span class="empty-title">当前条件下没有可处理的会话</span><span class="empty-hint">放宽保留天数或降低体积下限再试。</span></div>';
+    }
     const archiveCards = archives.map((item) => `<article class="mini-card">
       <div class="mini-card-head">
         <div><div class="mini-card-title">${escapeHtml(String(item.archive || '').split('/').pop() || '')}</div><div class="mini-card-path">${escapeHtml(item.created_at ? formatTime(item.created_at) : '时间未知')}</div></div>
@@ -3286,16 +3520,104 @@ __THEME_TOGGLE__
         <div><div class="metric-label">归档大小</div><div class="metric-value">${escapeHtml(formatDataSize(item.bytes || 0))}</div></div>
       </div>
     </article>`).join('');
-    container.innerHTML = `<div class="account-subtitle"><span>待处理会话</span><span class="muted">${escapeHtml(formatNumber(preview.count || 0))} 个 · ${escapeHtml(formatDataSize(preview.bytes || 0))}</span></div>
-      <div class="usage-note">归档会先打包 tar.gz 并写 manifest，校验通过后才删除原文件，可随时恢复；直接清理不可撤销。活动会话、10 分钟内改动过的文件会始终跳过。</div>
-      ${rows ? `<div class="table-wrap"><table class="tight"><thead><tr><th>最后修改</th><th>会话文件</th><th class="num">大小</th></tr></thead><tbody>${rows}</tbody></table></div>${files.length > previewRows.length ? `<div class="usage-note">仅列出前 ${previewRows.length} 个，共 ${escapeHtml(formatNumber(preview.count || files.length))} 个待处理文件。</div>` : ''}` : '<div class="empty-state"><span class="empty-title">当前条件下没有可处理的会话</span><span class="empty-hint">放宽保留天数或降低体积下限再试。</span></div>'}
-      ${archives.length ? `<div class="account-subtitle"><span>已有归档</span><span class="muted">${escapeHtml(formatNumber(archives.length))} 份</span></div><div class="card-grid">${archiveCards}</div>` : ''}`;
+    container.innerHTML = `<div class="account-subtitle"><span>${escapeHtml(tableTitle)}</span><span class="muted">${tableMeta}</span></div>
+      <div class="usage-note">归档会先打包 tar.gz 并写 manifest，校验通过后才删除原文件，可随时恢复；直接清理不可撤销。活动会话、10 分钟内改动过的文件会始终跳过。<br>列表按体积 × 闲置时长排序，最久未用且占用最大的排在最前。</div>
+      ${table}
+      ${archives.length ? `<div class="account-subtitle"><span>已有归档</span><span class="muted">${escapeHtml(formatNumber(archives.length))} 份</span></div><div class="card-grid compact-grid">${archiveCards}</div>` : ''}`;
+    container.querySelectorAll('[data-hk-session]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const path = button.dataset.hkSession || '';
+        const action = button.dataset.hkAction || 'archive';
+        if (!path) return;
+        if (action === 'clean') {
+          if (!window.confirm(`确认直接删除这个会话文件？删除不可撤销，建议先归档。\n${path}`)) return;
+        } else if (!window.confirm(`确认把这个会话压缩归档（tar.gz）并删除原文件？可在「磁盘与会话管理」里恢复。\n${path}`)) return;
+        manageSession(action, path);
+      });
+    });
+    container.querySelectorAll('[data-hk-page]').forEach((button) => {
+      button.addEventListener('click', () => {
+        housekeepingTablePage += Number(button.dataset.hkPage || 0);
+        renderHousekeepingActions();
+      });
+    });
+    container.querySelectorAll('[data-hk-sort]').forEach((header) => {
+      header.addEventListener('click', () => {
+        const key = header.dataset.hkSort || '';
+        if (housekeepingSortKey === key) {
+          housekeepingSortDir = -housekeepingSortDir;
+        } else {
+          housekeepingSortKey = key;
+          // 中文注释：时间/大小默认降序（最新、最大在前），文本列默认升序。
+          housekeepingSortDir = key === 'project' || key === 'path' ? 1 : -1;
+        }
+        housekeepingTablePage = 0;
+        renderHousekeepingActions();
+      });
+    });
     container.querySelectorAll('[data-housekeeping-restore]').forEach((button) => {
       button.addEventListener('click', () => {
         const name = button.dataset.housekeepingRestore || '';
         if (!window.confirm(`确认从归档 ${name} 恢复会话文件到原始路径？`)) return;
         mutateHousekeeping('restore', { archive: name });
       });
+    });
+  };
+  // 中文注释：按项目聚合的归档入口 + 项目筛选下拉；响应里没有 projects 字段时保持现状。
+  const renderHousekeepingProjects = (projects) => {
+    if (!Array.isArray(projects)) return;
+    const select = document.getElementById('housekeeping-project');
+    if (select) {
+      const current = select.value;
+      select.innerHTML = '<option value="">全部项目</option>' + projects.map((item) => (
+        `<option value="${escapeHtml(item.project)}">${escapeHtml(item.project)} — ${escapeHtml(formatNumber(item.files || 0))} 个文件 / ${escapeHtml(formatDataSize(item.bytes || 0))}</option>`
+      )).join('');
+      // 中文注释：刷新后保留选中值；项目已消失则回退「全部项目」。
+      select.value = projects.some((item) => item.project === current) ? current : '';
+    }
+    const container = document.getElementById('housekeeping-projects');
+    if (!container) return;
+    if (!projects.length) {
+      container.innerHTML = '';
+      return;
+    }
+    // 中文注释：默认只展示占用最大的前 5 个项目，其余折叠。
+    const visible = housekeepingProjectsExpanded ? projects : projects.slice(0, 5);
+    const cards = visible.map((item) => `<article class="mini-card">
+      <div class="mini-card-head">
+        <div><div class="mini-card-title truncate" title="${escapeHtml(item.project)}">${escapeHtml(item.project)}</div><div class="mini-card-path">${escapeHtml(formatTime(item.oldest_at))} → ${escapeHtml(formatTime(item.newest_at))}</div></div>
+      </div>
+      <div class="mini-card-metrics">
+        <div><div class="metric-label">会话文件</div><div class="metric-value">${escapeHtml(formatNumber(item.files || 0))}</div></div>
+        <div><div class="metric-label">占用</div><div class="metric-value">${escapeHtml(formatDataSize(item.bytes || 0))}</div></div>
+        ${item.selected_files !== undefined ? `<div><div class="metric-label">符合当前条件</div><div class="metric-value">${escapeHtml(formatNumber(item.selected_files))}<div class="cell-sub">${escapeHtml(formatDataSize(item.selected_bytes || 0))}</div></div></div>` : ''}
+      </div>
+      <div class="mini-card-actions"><button class="btn mini warn" type="button" data-housekeeping-project="${escapeHtml(item.project)}">压缩归档</button><button class="btn mini danger" type="button" data-housekeeping-project-clean="${escapeHtml(item.project)}">直接清理</button></div>
+    </article>`).join('');
+    const hiddenCount = projects.length - visible.length;
+    const toggle = projects.length > 5
+      ? `<div class="table-actions"><button id="housekeeping-projects-toggle" class="btn" type="button">${housekeepingProjectsExpanded ? '收起其余项目' : `展开其余 ${escapeHtml(formatNumber(hiddenCount))} 个项目`}</button></div>`
+      : '';
+    container.innerHTML = `<div class="account-subtitle"><span>按项目归档</span><span class="muted">${escapeHtml(formatNumber(projects.length))} 个项目</span></div><div class="card-grid compact-grid">${cards}</div>${toggle}`;
+    container.querySelectorAll('[data-housekeeping-project]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const project = button.dataset.housekeepingProject || '';
+        if (!project) return;
+        if (!window.confirm(housekeepingProjectAllConfirm('archive', project))) return;
+        mutateHousekeeping('archive', { project, all_sessions: true });
+      });
+    });
+    container.querySelectorAll('[data-housekeeping-project-clean]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const project = button.dataset.housekeepingProjectClean || '';
+        if (!project) return;
+        if (!window.confirm(housekeepingProjectAllConfirm('clean', project))) return;
+        mutateHousekeeping('clean', { project, all_sessions: true });
+      });
+    });
+    document.getElementById('housekeeping-projects-toggle')?.addEventListener('click', () => {
+      housekeepingProjectsExpanded = !housekeepingProjectsExpanded;
+      renderHousekeepingProjects(projects);
     });
   };
   const refreshHousekeeping = async () => {
@@ -3306,9 +3628,11 @@ __THEME_TOGGLE__
       button.classList.add('is-spinning');
     }
     try {
-      const response = await fetch(`/api/housekeeping?days=${criteria.days}&min_size_mb=${criteria.min_size_mb}&refresh=1`, { cache: 'no-store' });
+      const projectQuery = criteria.project ? `&project=${encodeURIComponent(criteria.project)}` : '';
+      const response = await fetch(`/api/housekeeping?days=${criteria.days}&min_size_mb=${criteria.min_size_mb}&refresh=1${projectQuery}`, { cache: 'no-store' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       housekeepingState = await response.json();
+      renderHousekeepingProjects(housekeepingState.projects);
       if (latestState) renderHousekeeping(latestState);
       renderHousekeepingActions();
       refresh();
@@ -3390,7 +3714,7 @@ __THEME_TOGGLE__
       const response = await fetch('/api/housekeeping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, days: criteria.days, min_size_mb: criteria.min_size_mb, confirm: true, async: background, ...body })
+        body: JSON.stringify({ action, days: criteria.days, min_size_mb: criteria.min_size_mb, project: criteria.project || undefined, confirm: true, async: background, ...body })
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
@@ -3402,6 +3726,7 @@ __THEME_TOGGLE__
       const changed = (payload.result && payload.result.count) || 0;
       const freed = (payload.result && payload.result.bytes) || 0;
       housekeepingState = { ...payload };
+      renderHousekeepingProjects(housekeepingState.projects);
       if (latestState) renderHousekeeping(latestState);
       renderHousekeepingActions();
       housekeepingNote(
@@ -3411,6 +3736,48 @@ __THEME_TOGGLE__
       );
     } catch (error) {
       if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">操作失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
+  // 中文注释：归档/清理的确认文案按是否选中项目分整句，便于整句翻译（词序不同）。
+  const housekeepingConfirm = (action, criteria) => {
+    if (action === 'archive') {
+      return criteria.project
+        ? `确认把项目 ${criteria.project} 下、${criteria.days} 天前、非活动的会话压缩归档（tar.gz）并删除原文件？归档在后台执行，可在本页恢复。`
+        : `确认把 ${criteria.days} 天前、非活动的会话压缩归档（tar.gz）并删除原文件？归档在后台执行，可在本页恢复。`;
+    }
+    return criteria.project
+      ? `确认直接删除项目 ${criteria.project} 下、${criteria.days} 天前、非活动的会话文件？删除在后台执行且不可撤销，建议先归档。`
+      : `确认直接删除 ${criteria.days} 天前、非活动的会话文件？删除在后台执行且不可撤销，建议先归档。`;
+  };
+  const requestHousekeepingArchive = () => {
+    const criteria = housekeepingCriteria();
+    if (!window.confirm(housekeepingConfirm('archive', criteria))) return;
+    mutateHousekeeping('archive');
+  };
+  // 中文注释：项目卡片的一键操作覆盖该项目全部非活动会话，不看保留天数与体积下限。
+  const housekeepingProjectAllConfirm = (action, project) => (
+    action === 'archive'
+      ? `确认把项目 ${project} 下的全部非活动会话压缩归档（tar.gz）并删除原文件？不看保留天数与体积下限；活动会话与 10 分钟内写入的文件仍会跳过。归档在后台执行，可在本页恢复。`
+      : `确认直接删除项目 ${project} 下的全部非活动会话文件？不看保留天数与体积下限；活动会话与 10 分钟内写入的文件仍会跳过。删除在后台执行且不可撤销，建议先归档。`
+  );
+  // 中文注释：磁盘与会话管理表格里的行级归档/清理，进度提示写回本区域。
+  const manageSession = async (action, path) => {
+    housekeepingNote(action === 'archive' ? '正在归档会话…' : '正在清理会话…');
+    try {
+      const response = await fetch('/api/housekeeping', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, session: path, confirm: true, async: true })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      if (payload.task) {
+        await pollHousekeepingTask(payload.task.id, action);
+        return;
+      }
+      await refreshHousekeeping();
+    } catch (error) {
+      housekeepingNote(action === 'archive' ? `归档该会话失败：${error.message}` : `清理该会话失败：${error.message}`);
     }
   };
   // 单会话归档的进度显示在页面顶部关注区，折叠的磁盘分区里看不到提示。
@@ -3572,14 +3939,20 @@ __THEME_TOGGLE__
       }
     }
   };
+  let refreshInFlight = false;
   const refresh = async () => {
+    // 中文注释：慢请求期间不叠加轮询，避免旧响应覆盖新状态。
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
     const refreshButton = document.getElementById('refresh-button');
     if (refreshButton) {
       refreshButton.disabled = true;
       refreshButton.classList.add('is-spinning');
     }
     try {
-      const response = await fetch('/api/state', { cache: 'no-store' });
+      const response = await fetch('/api/state', { cache: 'no-store', signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const state = await response.json();
       latestState = state;
@@ -3617,6 +3990,8 @@ __THEME_TOGGLE__
       document.getElementById('service-sync').textContent = '同步失败';
       document.querySelectorAll('.status-dot').forEach((dot) => dot.classList.add('error'));
     } finally {
+      window.clearTimeout(timeout);
+      refreshInFlight = false;
       if (refreshButton) {
         refreshButton.disabled = false;
         refreshButton.classList.remove('is-spinning');
@@ -3642,65 +4017,64 @@ __THEME_TOGGLE__
   document.getElementById('usage-load-button')?.addEventListener('click', refreshUsage);
   document.getElementById('insights-load-button')?.addEventListener('click', refreshInsights);
   document.getElementById('alert-history-load-button')?.addEventListener('click', () => {
-    alertHistoryLimit = 50;
+    alertHistoryPage = 0;
     refreshAlertHistory();
   });
   ['alert-range-filter', 'alert-level-filter', 'alert-kind-filter', 'alert-ack-filter'].forEach((id) => {
     document.getElementById(id)?.addEventListener('change', () => {
-      alertHistoryLimit = 50;
+      alertHistoryPage = 0;
       refreshAlertHistory();
     });
   });
   document.getElementById('alert-keyword-filter')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
-      alertHistoryLimit = 50;
+      alertHistoryPage = 0;
       refreshAlertHistory();
     }
   });
   document.getElementById('alert-ack-all-button')?.addEventListener('click', () => mutateAlerts('ack', { all: true }));
   document.getElementById('alert-clear-button')?.addEventListener('click', clearAlertHistory);
   document.getElementById('usage-search-load-button')?.addEventListener('click', () => {
-    usageSearchLimit = 50;
+    usageSearchPage = 0;
     refreshUsageSearch();
   });
   document.getElementById('usage-search-refresh-button')?.addEventListener('click', () => {
-    usageSearchLimit = 50;
+    usageSearchPage = 0;
     refreshUsageSearch();
   });
   document.querySelectorAll('[data-usage-search-group]').forEach((tab) => {
     tab.addEventListener('click', () => {
       usageSearchGroup = tab.dataset.usageSearchGroup || 'session';
       document.querySelectorAll('[data-usage-search-group]').forEach((item) => item.classList.toggle('selected', item === tab));
-      usageSearchLimit = 50;
+      usageSearchPage = 0;
       refreshUsageSearch();
     });
   });
   ['usage-search-range', 'usage-search-model', 'usage-search-account', 'usage-search-sort', 'usage-search-from', 'usage-search-to'].forEach((id) => {
     document.getElementById(id)?.addEventListener('change', () => {
-      usageSearchLimit = 50;
+      usageSearchPage = 0;
       refreshUsageSearch();
     });
   });
   document.getElementById('usage-search-keyword')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
-      usageSearchLimit = 50;
+      usageSearchPage = 0;
       refreshUsageSearch();
     }
   });
   document.getElementById('housekeeping-scan-button')?.addEventListener('click', refreshHousekeeping);
   document.getElementById('housekeeping-preview-button')?.addEventListener('click', refreshHousekeeping);
-  document.getElementById('housekeeping-archive-button')?.addEventListener('click', () => {
-    const criteria = housekeepingCriteria();
-    if (!window.confirm(`确认把 ${criteria.days} 天前、非活动的 Codex 会话压缩归档（tar.gz）并删除原文件？归档在后台执行，可在本页恢复。`)) return;
-    mutateHousekeeping('archive');
-  });
+  document.getElementById('housekeeping-archive-button')?.addEventListener('click', requestHousekeepingArchive);
   document.getElementById('housekeeping-clean-button')?.addEventListener('click', () => {
     const criteria = housekeepingCriteria();
-    if (!window.confirm(`确认直接删除 ${criteria.days} 天前、非活动的 Codex 会话文件？删除在后台执行且不可撤销，建议先归档。`)) return;
+    if (!window.confirm(housekeepingConfirm('clean', criteria))) return;
     mutateHousekeeping('clean');
   });
-  ['housekeeping-days', 'housekeeping-min-size'].forEach((id) => {
-    document.getElementById(id)?.addEventListener('change', refreshHousekeeping);
+  ['housekeeping-days', 'housekeeping-min-size', 'housekeeping-project'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+      housekeepingTablePage = 0;
+      refreshHousekeeping();
+    });
   });
   document.querySelectorAll('[data-insights-days]').forEach((tab) => {
     tab.addEventListener('click', () => {
@@ -3727,7 +4101,37 @@ __THEME_TOGGLE__
 __THEME_SCRIPT__
   refresh();
   ['alert-history', 'usage-search', 'housekeeping'].forEach(ensureSectionLoaded);
-  window.setInterval(refresh, 5000);
+  mainRefreshTimer = window.setInterval(refresh, 5000);
+  // 中文注释：标签页隐藏时暂停自动刷新和索引轮询，回到前台立即补一次刷新。
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (mainRefreshTimer) {
+        window.clearInterval(mainRefreshTimer);
+        mainRefreshTimer = 0;
+      }
+      if (usagePollTimer) {
+        window.clearTimeout(usagePollTimer);
+        usagePollTimer = 0;
+        usagePollSuspended = true;
+      }
+      if (insightsPollTimer) {
+        window.clearTimeout(insightsPollTimer);
+        insightsPollTimer = 0;
+        insightsPollSuspended = true;
+      }
+      return;
+    }
+    if (!mainRefreshTimer) mainRefreshTimer = window.setInterval(refresh, 5000);
+    refresh();
+    if (usagePollSuspended) {
+      usagePollSuspended = false;
+      refreshUsage();
+    }
+    if (insightsPollSuspended) {
+      insightsPollSuspended = false;
+      refreshInsights();
+    }
+  });
 </script>
 </body>
 </html>
@@ -4119,6 +4523,7 @@ class DashboardConfig:
     host: str = "127.0.0.1"
     port: int = 8765
     budget_usd: float | None = None
+    alert_context_content: bool = False
 
     def __post_init__(self) -> None:
         """校验监听地址和端口。"""
@@ -4127,6 +4532,12 @@ class DashboardConfig:
             raise ValueError("dashboard host 不能为空")
         if not 0 <= self.port <= 65535:
             raise ValueError("dashboard port 必须在 0 到 65535 之间")
+        if self.alert_context_content and self.host not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise ValueError("内容摘要只能在本机监听地址启用")
         if self.budget_usd is not None and self.budget_usd <= 0:
             raise ValueError("budget_usd 必须大于 0")
 
@@ -4149,6 +4560,39 @@ class _AccountSet:
         self._lock = Lock()
         self._registries = dict(registries)
         self._account_metadata = dict(account_metadata)
+        self._provider_homes: dict[str, tuple[Path, ...]] = {}
+        self._revision = 0
+
+    def configuration(
+        self,
+    ) -> tuple[
+        dict[str, MultiSessionRegistry],
+        dict[str, Mapping[str, str | None]],
+        dict[str, tuple[Path, ...]],
+        int,
+    ]:
+        """原子读取账号和 provider 目录，供状态缓存判定配置是否变化。"""
+
+        with self._lock:
+            return (
+                dict(self._registries),
+                dict(self._account_metadata),
+                dict(self._provider_homes),
+                self._revision,
+            )
+
+    def provider_homes(self) -> dict[str, tuple[Path, ...]]:
+        """读取非 Codex 数据目录的当前快照，避免请求闭包保留启动配置。"""
+
+        with self._lock:
+            return dict(self._provider_homes)
+
+    def update_homes(self, homes: Mapping[str, Sequence[Path]]) -> None:
+        """原子替换所有 provider 的目录集合。"""
+
+        with self._lock:
+            self._provider_homes = {key: tuple(value) for key, value in homes.items()}
+            self._revision += 1
 
     def snapshot(
         self,
@@ -4171,6 +4615,7 @@ class _AccountSet:
         with self._lock:
             self._registries = dict(registries)
             self._account_metadata = dict(account_metadata or {})
+            self._revision += 1
 
 
 class DashboardServer:
@@ -4227,6 +4672,7 @@ class DashboardServer:
             kimi_homes=self.kimi_homes,
             dsh_homes=self.dsh_homes,
             claude_homes=self.claude_homes,
+            commandcode_homes=self.commandcode_homes,
         )
         # 中文注释：handler 闭包只持有这个容器；扫描目录变化导致账号增减时
         # 由 update_accounts 热替换内容，无需重启 HTTP 服务。
@@ -4270,6 +4716,7 @@ class DashboardServer:
             self.commandcode_homes,
             self.claude_homes,
             budget_usd=self.config.budget_usd,
+            alert_context_content=self.config.alert_context_content,
             traffic_monitor=self.traffic_monitor,
             alert_store=self.alert_store,
             housekeeping=self.housekeeping,
@@ -4290,6 +4737,32 @@ class DashboardServer:
             daemon=True,
         )
         self._thread.start()
+
+    def update_homes(
+        self,
+        *,
+        grok_homes: Sequence[Path],
+        kimi_homes: Sequence[Path],
+        dsh_homes: Sequence[Path],
+        commandcode_homes: Sequence[Path],
+        claude_homes: Sequence[Path],
+    ) -> None:
+        """热更新额度、活动会话和告警详情请求使用的数据目录。"""
+
+        self.grok_homes = resolve_grok_homes(grok_homes)
+        self.kimi_homes = resolve_kimi_homes(kimi_homes)
+        self.dsh_homes = resolve_dsh_homes(dsh_homes)
+        self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
+        self.claude_homes = resolve_claude_homes(claude_homes)
+        self._accounts.update_homes(
+            {
+                "grok": self.grok_homes,
+                "kimi": self.kimi_homes,
+                "dsh": self.dsh_homes,
+                "commandcode": self.commandcode_homes,
+                "claude": self.claude_homes,
+            }
+        )
 
     def close(self) -> None:
         """停止 HTTP 服务并等待请求线程退出。"""
@@ -5259,11 +5732,16 @@ def _housekeeping_arguments(raw_query: str) -> dict[str, Any]:
     days = _bounded_int(single("days"), maximum=3650) or 30
     min_size_mb = _bounded_float(single("min_size_mb"), maximum=1_000_000) or 0.0
     task = single("task")
+    project = single("project")
+    if project is not None and len(project) > 512:
+        # 中文注释：项目来自查询串，限制长度避免构造异常大的筛选条件。
+        project = project[:512]
     return {
         "days": days,
         "min_bytes": int(min_size_mb * 1024 * 1024),
         "refresh": single("refresh") not in {None, "0", "false"},
         "task": task if task and task.isalnum() else None,
+        "project": project or None,
     }
 
 
@@ -5423,6 +5901,7 @@ def _make_handler(
     commandcode_homes: Sequence[Path] | None = None,
     claude_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
+    alert_context_content: bool = False,
     traffic_monitor: TrafficMonitor | None = None,
     alert_store: TrafficAlertStore | None = None,
     housekeeping: HousekeepingMonitor | None = None,
@@ -5439,6 +5918,13 @@ def _make_handler(
     """
 
     thresholds_in_use = session_thresholds or SessionSwitchThresholds()
+    accounts.update_homes({
+        "grok": grok_homes or (), "kimi": kimi_homes or (),
+        "dsh": dsh_homes or (), "commandcode": commandcode_homes or (),
+        "claude": claude_homes or (),
+    })
+    state_cache_lock = Lock()
+    state_cache: dict[str, Any] = {}
 
     def alert_stats() -> dict[str, Any]:
         """返回落盘告警的统计；数据库不可用时降级为空统计。"""
@@ -5465,6 +5951,42 @@ def _make_handler(
                 "last_alert_at": None,
             }
 
+    def state_payload() -> dict[str, Any]:
+        """合并并发刷新，只构建一次状态；目录热更新立即使缓存失效。"""
+
+        registries, metadata, homes, revision = accounts.configuration()
+        with state_cache_lock:
+            moment = time.monotonic()
+            if state_cache.get("revision") == revision and moment < state_cache.get(
+                "expires", 0
+            ):
+                return state_cache["payload"]
+            state = build_multi_dashboard_state(
+                registries,
+                account_metadata=metadata,
+                grok_homes=homes["grok"],
+                kimi_homes=homes["kimi"],
+                dsh_homes=homes["dsh"],
+                commandcode_homes=homes["commandcode"],
+                claude_homes=homes["claude"],
+                budget_usd=budget_usd,
+                traffic=traffic_monitor.latest()
+                if traffic_monitor is not None
+                else None,
+                health=health,
+            )
+            state["alert_history"] = alert_stats()
+            _attach_session_advice(state, usage_aggregator, thresholds_in_use)
+            _attach_session_archive(state, housekeeping)
+            state["housekeeping"] = _housekeeping_summary(housekeeping)
+            state["usage_index"] = _usage_index_summary(usage_aggregator)
+            state["health"] = health.snapshot() if health is not None else None
+            # 中文注释：TTL 从构建完成后计算，慢查询也不会使排队请求重复扫描。
+            state_cache.update(
+                revision=revision, expires=time.monotonic() + 2, payload=state
+            )
+            return state
+
     class DashboardRequestHandler(BaseHTTPRequestHandler):
         """处理 Dashboard 页面、只读状态和告警历史请求。"""
 
@@ -5474,6 +5996,9 @@ def _make_handler(
             """返回静态页面或当前监控状态。"""
 
             path = urlsplit(self.path).path
+            # 中文注释：每次请求读取热更新后的目录，额度、会话、详情采用同一份快照。
+            homes = accounts.provider_homes()
+            kimi_homes, claude_homes = homes["kimi"], homes["claude"]
             if path == "/":
                 page = _localize_page(_DASHBOARD_HTML, self._request_language())
                 self._send_bytes(
@@ -5510,41 +6035,14 @@ def _make_handler(
                 self._send_json(status=status, payload=payload)
                 return
             if path == "/api/state":
-                current_registries, current_metadata = accounts.snapshot()
                 try:
-                    state = build_multi_dashboard_state(
-                        current_registries,
-                        account_metadata=current_metadata,
-                        grok_homes=grok_homes,
-                        kimi_homes=kimi_homes,
-                        dsh_homes=dsh_homes,
-                        commandcode_homes=commandcode_homes,
-                        claude_homes=claude_homes,
-                        budget_usd=budget_usd,
-                        traffic=(
-                            traffic_monitor.latest()
-                            if traffic_monitor is not None
-                            else None
-                        ),
-                        health=health,
-                    )
+                    state = state_payload()
                 except RegistryError:
                     logger.exception("Dashboard 读取状态失败")
                     self._send_json(
-                        status=503,
-                        payload={"error": "monitor_state_unavailable"},
+                        status=503, payload={"error": "monitor_state_unavailable"},
                     )
                     return
-                state["alert_history"] = alert_stats()
-                _attach_session_advice(
-                    state,
-                    usage_aggregator,
-                    thresholds_in_use,
-                )
-                _attach_session_archive(state, housekeeping)
-                state["housekeeping"] = _housekeeping_summary(housekeeping)
-                state["usage_index"] = _usage_index_summary(usage_aggregator)
-                state["health"] = health.snapshot() if health is not None else None
                 self._send_json(status=200, payload=state)
                 return
             if path == "/api/alerts":
@@ -5582,6 +6080,74 @@ def _make_handler(
                         "has_more": has_more,
                         "limit": criteria.limit,
                         "offset": criteria.offset,
+                    },
+                )
+                return
+            if path == "/api/alerts/context":
+                if alert_store is None:
+                    self._send_json(
+                        status=200,
+                        payload={
+                            "updated_at": time.time(),
+                            "available": False,
+                            "context": None,
+                        },
+                    )
+                    return
+                raw_id = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
+                try:
+                    alert_id = int(raw_id)
+                except ValueError:
+                    self._send_json(
+                        status=400,
+                        payload={"error": "invalid_alert_id", "message": "id 必须是整数"},
+                    )
+                    return
+                try:
+                    alert = alert_store.get(alert_id)
+                except AlertStoreError as error:
+                    self._send_json(
+                        status=500,
+                        payload={"error": "alert_store_error", "message": str(error)},
+                    )
+                    return
+                if alert is None:
+                    self._send_json(
+                        status=404,
+                        payload={"error": "alert_not_found", "message": f"告警 #{alert_id} 不存在"},
+                    )
+                    return
+                # 中文注释：多账号各自有独立 CODEX_HOME，会话分散在每个 home 的
+                # sessions/ 下；从当前生效的账号元数据收集全部根目录，再补上
+                # 默认 home 兜底（例如只跑了默认账号的独立部署）。
+                _, metadata_map = accounts.snapshot()
+                codex_roots = []
+                for meta in metadata_map.values():
+                    home = (meta or {}).get("codex_home")
+                    if home:
+                        codex_roots.append(Path(str(home)).expanduser() / "sessions")
+                # 中文注释：配置控制器显式禁用 Codex 时不能再扫描默认主目录。
+                if scan_dirs is None and not codex_roots:
+                    codex_roots.append(default_session_root())
+                context = load_alert_context(
+                    alert,
+                    AlertContextRoots(
+                        codex_sessions=tuple(codex_roots),
+                        claude_projects=tuple(
+                            home / "projects" for home in (claude_homes or ())
+                        ),
+                        kimi_sessions=tuple(
+                            home / "sessions" for home in (kimi_homes or ())
+                        ),
+                    ),
+                    include_content=alert_context_content,
+                )
+                self._send_json(
+                    status=200,
+                    payload={
+                        "updated_at": time.time(),
+                        "available": True,
+                        "context": context,
                     },
                 )
                 return
@@ -5689,6 +6255,8 @@ def _make_handler(
                             "available": False,
                             "report": empty_housekeeping_payload(),
                             "preview": None,
+                            "projects": [],
+                            "project_sessions": None,
                             "archives": [],
                         },
                     )
@@ -5709,9 +6277,36 @@ def _make_handler(
                     criteria = CleanupCriteria(
                         older_than_days=arguments["days"],
                         min_bytes=arguments["min_bytes"],
+                        projects=(
+                            (arguments["project"],) if arguments["project"] else ()
+                        ),
                     )
                     report = housekeeping.refresh(force=arguments["refresh"])
                     preview = housekeeping.preview(criteria)
+                    # 中文注释：选中项目时返回该项目的全部会话文件及归档资格，
+                    # 供前端逐个管理；未选中项目时不携带，避免大清单拖慢轮询。
+                    project_sessions: list[dict[str, Any]] | None = None
+                    if arguments["project"]:
+                        rows = [
+                            item
+                            for item in housekeeping.sessions()
+                            if item.project == arguments["project"]
+                        ]
+                        rows.sort(
+                            key=lambda item: item.size
+                            * max(0.0, time.time() - item.modified_at),
+                            reverse=True,
+                        )
+                        states = housekeeping.session_archive_state(
+                            [str(item.path) for item in rows[:200]]
+                        )
+                        project_sessions = [
+                            {
+                                **item.to_dict(),
+                                "archive_state": states.get(str(item.path)),
+                            }
+                            for item in rows[:200]
+                        ]
                 except (HousekeepingError, ValueError) as error:
                     self._send_json(
                         status=400,
@@ -5728,6 +6323,8 @@ def _make_handler(
                         "available": True,
                         "report": report,
                         "preview": preview,
+                        "projects": list(housekeeping.projects(criteria)),
+                        "project_sessions": project_sessions,
                         "archives": list(housekeeping.restores()),
                         "tasks": list(housekeeping.tasks()),
                     },
@@ -5809,47 +6406,15 @@ def _make_handler(
                 self._send_json(status=status, payload=payload, include_body=False)
                 return
             if path == "/api/state":
-                current_registries, current_metadata = accounts.snapshot()
                 try:
-                    state = build_multi_dashboard_state(
-                        current_registries,
-                        account_metadata=current_metadata,
-                        grok_homes=grok_homes,
-                        kimi_homes=kimi_homes,
-                        dsh_homes=dsh_homes,
-                        commandcode_homes=commandcode_homes,
-                        claude_homes=claude_homes,
-                        budget_usd=budget_usd,
-                        traffic=(
-                            traffic_monitor.latest()
-                            if traffic_monitor is not None
-                            else None
-                        ),
-                        health=health,
-                    )
+                    state = state_payload()
                 except RegistryError:
                     logger.exception("Dashboard 读取状态失败")
                     self._send_json(
-                        status=503,
-                        payload={"error": "monitor_state_unavailable"},
-                        include_body=False,
+                        status=503, payload={"error": "monitor_state_unavailable"}, include_body=False,
                     )
                     return
-                state["alert_history"] = alert_stats()
-                _attach_session_advice(
-                    state,
-                    usage_aggregator,
-                    thresholds_in_use,
-                )
-                _attach_session_archive(state, housekeeping)
-                state["housekeeping"] = _housekeeping_summary(housekeeping)
-                state["usage_index"] = _usage_index_summary(usage_aggregator)
-                state["health"] = health.snapshot() if health is not None else None
-                self._send_json(
-                    status=200,
-                    payload=state,
-                    include_body=False,
-                )
+                self._send_json(status=200, payload=state, include_body=False)
                 return
             if path == "/api/alerts":
                 # 中文注释：HEAD 只用于健康检查，不返回告警明细。
@@ -5930,6 +6495,8 @@ def _make_handler(
                             else empty_housekeeping_payload()
                         ),
                         "preview": None,
+                        "projects": [],
+                        "project_sessions": None,
                         "archives": [],
                     },
                     include_body=False,
@@ -6014,6 +6581,12 @@ def _make_handler(
                     float(body.get("min_size_mb") or 0) * 1024 * 1024
                 )
                 session_path = str(body.get("session") or "").strip()
+                # 中文注释：项目筛选按字符串原样接收（strip、限长），
+                # 具体会话优先于项目筛选。
+                project = str(body.get("project") or "").strip()[:512] or None
+                # 中文注释：项目卡片的「压缩归档」压缩整个项目的全部非活动会话，
+                # 不看保留天数和体积下限；活动会话与过新文件仍由后端跳过。
+                all_sessions = bool(body.get("all_sessions")) and bool(project)
                 if session_path:
                     # 中文注释：单个会话先确认它确实在自己的可归档目录里，
                     # 不接受网页传来的任意路径。
@@ -6023,10 +6596,16 @@ def _make_handler(
                         reason = (entry or {}).get("reason") or "会话不存在"
                         raise HousekeepingError(f"该会话当前不能归档：{reason}")
                     criteria = CleanupCriteria(paths=(session_path,))
+                elif all_sessions:
+                    criteria = CleanupCriteria(
+                        projects=(project,),
+                        any_age=True,
+                    )
                 else:
                     criteria = CleanupCriteria(
                         older_than_days=days,
                         min_bytes=max(0, min_bytes),
+                        projects=(project,) if project else (),
                     )
                 if action == "archive" and body.get("async") is True:
                     if body.get("confirm") is not True:
@@ -6091,6 +6670,7 @@ def _make_handler(
                     "result": result,
                     "report": report,
                     "preview": monitor.preview(criteria),
+                    "projects": list(monitor.projects(criteria)),
                     "archives": list(monitor.restores()),
                 },
             )

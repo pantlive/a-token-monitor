@@ -1031,7 +1031,10 @@ class CliTests(unittest.TestCase):
             state_dir = root / "state"
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(buffer),
+            ):
                 previewed = main(
                     [
                         "--state-dir",
@@ -1049,7 +1052,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(session.exists())
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(buffer),
+            ):
                 archived = main(
                     [
                         "--state-dir",
@@ -1072,7 +1078,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(archive.is_file())
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(buffer),
+            ):
                 restored = main(
                     [
                         "--state-dir",
@@ -1104,7 +1113,10 @@ class CliTests(unittest.TestCase):
             session = _write_stale_session(home, 100)
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(buffer),
+            ):
                 code = main(
                     [
                         "--state-dir",
@@ -1141,7 +1153,10 @@ class CliTests(unittest.TestCase):
             session_id = target.name.split("-", 6)[-1].removesuffix(".jsonl")
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(buffer),
+            ):
                 previewed = main(
                     [
                         "--state-dir",
@@ -1164,7 +1179,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(other.exists())
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(buffer),
+            ):
                 archived = main(
                     [
                         "--state-dir",
@@ -1196,18 +1214,19 @@ class CliTests(unittest.TestCase):
             home = root / ".codex"
             _write_stale_session(home, 100)
 
-            code = main(
-                [
-                    "--state-dir",
-                    str(root / "state"),
-                    "--codex-home",
-                    str(home),
-                    "sessions",
-                    "--archive",
-                    "--session",
-                    "not-a-real-session",
-                ]
-            )
+            with mock.patch.dict(os.environ, _missing_provider_env(root)):
+                code = main(
+                    [
+                        "--state-dir",
+                        str(root / "state"),
+                        "--codex-home",
+                        str(home),
+                        "sessions",
+                        "--archive",
+                        "--session",
+                        "not-a-real-session",
+                    ]
+                )
 
         self.assertEqual(code, 2)
 

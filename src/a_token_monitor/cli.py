@@ -33,6 +33,7 @@ from .housekeeping import (
     DiskThresholds,
     HousekeepingError,
     HousekeepingMonitor,
+    default_sessions_root,
 )
 from .alerts import (
     DEFAULT_RETENTION_DAYS,
@@ -62,7 +63,7 @@ from .kimi import (
 )
 from .app_server import AppServerClient, AppServerConfig, AppServerError
 from .discovery import ProcessScanner
-from .multi_account import MultiAccountMonitor
+from .multi_account import MultiAccountMonitor, external_active_session_paths
 from .monitor import MonitorConfig
 from .multi_models import (
     DetectionConfidence,
@@ -681,6 +682,11 @@ def _add_daemon_options(parser: argparse.ArgumentParser) -> None:
         type=_port,
         default=8765,
         help="Dashboard 监听端口（默认: 8765）",
+    )
+    parser.add_argument(
+        "--alert-context-content",
+        action="store_true",
+        help="显示脱敏后的告警内容摘要（仅允许本机监听地址）",
     )
     parser.add_argument(
         "--budget-usd",
@@ -1620,6 +1626,7 @@ def _enrich_session_summaries(
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
         claude_homes=_effective_scan_dirs(args).homes("claude"),
+        commandcode_homes=_effective_scan_dirs(args).homes("commandcode"),
     )
     try:
         aggregator.refresh_index(
@@ -1882,6 +1889,7 @@ def _show_usage_search(args: argparse.Namespace) -> int:
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
         claude_homes=_effective_scan_dirs(args).homes("claude"),
+        commandcode_homes=_effective_scan_dirs(args).homes("commandcode"),
     )
     since, until = _usage_search_bounds(args)
     search = aggregator.search(
@@ -1982,15 +1990,50 @@ def _housekeeping_targets(args: argparse.Namespace) -> tuple[AuditTarget, ...]:
         )
     effective_dirs = _effective_scan_dirs(args)
     for home in effective_dirs.homes("grok"):
-        targets.append(AuditTarget("Grok", "grok", home))
+        targets.append(
+            AuditTarget(
+                "Grok",
+                "grok",
+                home,
+                sessions_root=default_sessions_root("grok", home),
+            )
+        )
     for home in effective_dirs.homes("kimi"):
-        targets.append(AuditTarget("Kimi Code", "kimi", home))
+        targets.append(
+            AuditTarget(
+                "Kimi Code",
+                "kimi",
+                home,
+                sessions_root=default_sessions_root("kimi", home),
+            )
+        )
     for home in effective_dirs.homes("dsh"):
-        targets.append(AuditTarget("DeepSeek Harness", "dsh", home))
+        targets.append(
+            AuditTarget(
+                "DeepSeek Harness",
+                "dsh",
+                home,
+                sessions_root=default_sessions_root("dsh", home),
+            )
+        )
     for home in effective_dirs.homes("commandcode"):
-        targets.append(AuditTarget("Command Code", "command-code", home))
+        targets.append(
+            AuditTarget(
+                "Command Code",
+                "command-code",
+                home,
+                sessions_root=default_sessions_root("command-code", home),
+            )
+        )
     for home in effective_dirs.homes("claude"):
-        targets.append(AuditTarget("Claude Code", "claude", home))
+        targets.append(
+            AuditTarget(
+                "Claude Code",
+                "claude",
+                home,
+                sessions_root=default_sessions_root("claude", home),
+            )
+        )
     targets.append(
         AuditTarget("监控状态目录", "state", args.state_dir.expanduser())
     )
@@ -2016,6 +2059,7 @@ def _housekeeping_monitor(args: argparse.Namespace) -> HousekeepingMonitor:
             ),
         ),
         archive_dir=state_dir / "archives",
+        active_paths=_active_session_paths(args),
         logger=logging.getLogger(__name__),
     )
 
@@ -2076,7 +2120,6 @@ def _session_housekeeping(args: argparse.Namespace) -> int:
     """执行会话归档、清理或恢复，并保证默认只预览。"""
 
     monitor = _housekeeping_monitor(args)
-    monitor.active_paths = _active_session_paths(args)
     if args.restore is not None:
         result = monitor.restore(args.restore, destination=args.to)
         if args.json:
@@ -2224,6 +2267,15 @@ def _active_session_paths(
             for session in item.registry.list_sessions(active_only=True):
                 if session.pids and session.jsonl_path:
                     paths.add(str(Path(session.jsonl_path)))
+        paths.update(
+            external_active_session_paths(
+                grok_homes=effective_dirs.homes("grok"),
+                kimi_homes=effective_dirs.homes("kimi"),
+                dsh_homes=effective_dirs.homes("dsh"),
+                commandcode_homes=effective_dirs.homes("commandcode"),
+                claude_homes=effective_dirs.homes("claude"),
+            )
+        )
         return paths
 
     return collect
@@ -2253,6 +2305,7 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         dashboard_host=args.dashboard_host,
         dashboard_port=args.dashboard_port,
         budget_usd=args.budget_usd,
+        alert_context_content=getattr(args, "alert_context_content", False),
         upload_burst_warn_mb=args.upload_warn_mb,
         upload_burst_danger_mb=args.upload_alert_mb,
         upload_window_warn_mb=args.upload_window_warn_mb,
@@ -2302,6 +2355,7 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
         dashboard_host=args.dashboard_host,
         dashboard_port=args.dashboard_port,
         budget_usd=args.budget_usd,
+        alert_context_content=getattr(args, "alert_context_content", False),
         upload_burst_warn_mb=args.upload_warn_mb,
         upload_burst_danger_mb=args.upload_alert_mb,
         upload_window_warn_mb=args.upload_window_warn_mb,

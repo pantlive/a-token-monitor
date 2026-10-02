@@ -111,6 +111,30 @@ class CommandCodeSessionInfo:
     started_at: float | None
 
 
+def list_commandcode_transcripts(home: Path) -> tuple[Path, ...]:
+    """仅发现主会话 JSONL，排除 checkpoints 等重复或非消息 sidecar。"""
+
+    root = Path(home).expanduser() / "projects"
+    if not root.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            path
+            for path in root.glob("*/*.jsonl")
+            if path.is_file() and _session_id_from_filename(path.name) is not None
+        )
+    )
+
+
+def commandcode_home_for(path: Path, homes: Sequence[Path]) -> Path | None:
+    """确认一个主会话是否属于配置的数据目录。"""
+
+    for home in homes:
+        if _commandcode_session_id_from_path(path, home / "projects") is not None:
+            return home
+    return None
+
+
 def default_commandcode_home() -> Path:
     """返回 Command Code 默认主目录。
 

@@ -299,6 +299,11 @@ class AccountTests(unittest.TestCase):
                     accounts=accounts,
                     state_dir=root / "state",
                     config=MonitorConfig(auto_resume=False),
+                    grok_homes=(),
+                    kimi_homes=(),
+                    dsh_homes=(),
+                    commandcode_homes=(),
+                    claude_homes=(),
                 )
                 monitor.account_monitors[0].registry.upsert_session(
                     TrackedSession(

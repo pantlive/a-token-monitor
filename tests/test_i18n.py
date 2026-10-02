@@ -193,7 +193,7 @@ class CliLocalizationTests(unittest.TestCase):
         import os
         from unittest import mock
 
-        with mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8"}, clear=False):
+        with mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8", "LC_ALL": "", "LC_MESSAGES": ""}, clear=False):
             output = self._run(["--help"])
         leftover = [
             run for run in i18n.iter_text_runs(output) if i18n.contains_cjk(run)
@@ -204,7 +204,7 @@ class CliLocalizationTests(unittest.TestCase):
         import os
         from unittest import mock
 
-        with mock.patch.dict(os.environ, {"LANG": "zh_CN.UTF-8"}, clear=False):
+        with mock.patch.dict(os.environ, {"LANG": "zh_CN.UTF-8", "LC_ALL": "", "LC_MESSAGES": ""}, clear=False):
             output = self._run(["--help"])
         self.assertTrue(i18n.contains_cjk(output))
 

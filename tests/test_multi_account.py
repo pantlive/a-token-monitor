@@ -79,6 +79,12 @@ class _FakeDashboard:
 
     def __init__(self) -> None:
         self.calls: list[tuple[object, object]] = []
+        self.homes: dict[str, object] = {}
+
+    def update_homes(self, **kwargs: object) -> None:
+        """记录各 provider 的目录热更新。"""
+
+        self.homes = kwargs
 
     def update_accounts(self, registries, account_metadata) -> None:  # noqa: ANN001, ANN202
         self.calls.append((registries, account_metadata))

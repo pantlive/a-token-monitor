@@ -70,6 +70,7 @@ class ServiceConfig:
     dsh_homes: tuple[Path, ...] = ()
     commandcode_homes: tuple[Path, ...] = ()
     claude_homes: tuple[Path, ...] = ()
+    alert_context_content: bool = False
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
     upload_burst_danger_mb: float = 32.0
@@ -143,6 +144,7 @@ class ServiceConfig:
             dashboard_host=self.dashboard_host,
             dashboard_port=self.dashboard_port,
             budget_usd=self.budget_usd,
+            alert_context_content=self.alert_context_content,
             upload_burst_warn_mb=self.upload_burst_warn_mb,
             upload_burst_danger_mb=self.upload_burst_danger_mb,
             upload_window_warn_mb=self.upload_window_warn_mb,
@@ -188,6 +190,7 @@ class ServiceConfig:
             ],
             "claude_homes": [str(path) for path in self.claude_homes],
             "budget_usd": self.budget_usd,
+            "alert_context_content": self.alert_context_content,
             "upload_burst_warn_mb": self.upload_burst_warn_mb,
             "upload_burst_danger_mb": self.upload_burst_danger_mb,
             "upload_window_warn_mb": self.upload_window_warn_mb,
@@ -278,6 +281,7 @@ class ServiceConfig:
             ),
             claude_homes=_optional_path_tuple(raw_payload, "claude_homes"),
             budget_usd=_optional_float(raw_payload, "budget_usd"),
+            alert_context_content=raw_payload.get("alert_context_content") is True,
             upload_burst_warn_mb=_optional_float(
                 raw_payload, "upload_burst_warn_mb"
             )
@@ -354,6 +358,7 @@ class ServiceConfig:
             dashboard_host=self.dashboard_host,
             dashboard_port=self.dashboard_port,
             budget_usd=self.budget_usd,
+            alert_context_content=self.alert_context_content,
             upload_burst_warn_mb=self.upload_burst_warn_mb,
             upload_burst_danger_mb=self.upload_burst_danger_mb,
             upload_window_warn_mb=self.upload_window_warn_mb,
