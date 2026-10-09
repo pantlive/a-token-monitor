@@ -330,7 +330,7 @@ class _UsageQueryMixin(_AggregatorState):
             if delta is None:
                 continue
             scanned_records += 1
-            estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model)
+            estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model, delta.timestamp)
             date_key = _local_day(delta.timestamp)
             account_key, account_name, account_id, product = _account_fields(
                 row.account_key,

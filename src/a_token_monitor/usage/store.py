@@ -13,6 +13,7 @@ from ..local_time import local_day_key
 from .pricing import (
     _is_long_context,
     _lookup_pricing,
+    price_period,
 )
 from .records import (
     TokenUsage,
@@ -70,10 +71,19 @@ def _sql_local_day_function() -> Callable[[float | None], str | None]:
 
 
 
+
+def _sql_price_period(model: object, timestamp: object) -> int:
+    """SQLite 回调：用量所处的价格时段，见 pricing.price_period。"""
+
+    if not isinstance(model, str) or not isinstance(timestamp, (int, float)):
+        return 0
+    return price_period(model, float(timestamp))
+
 # 中文注释：长上下文计价规则的版本。修改 pricing.py 里任何模型的长上下文阈值或
 # 分档方式时加 1，已索引的标记会在下次打开索引时按新规则重算。
 # 2：Claude 改按官方规则（4.6+ 不分档、Haiku 5.5 超过 100K ×5、Sonnet 4/4.5 超过 200K）。
-_LONG_CONTEXT_RULES_VERSION = 2
+# 3：新增 gpt-5.3-codex / codex-auto-review 单价，并按用量发生时间取价。
+_LONG_CONTEXT_RULES_VERSION = 3
 
 class _UsageIndexStore:
     """把已解析的偏移和 token 增量保存到轻量 SQLite 索引。"""
@@ -104,6 +114,11 @@ class _UsageIndexStore:
         # 侧的按天汇总会对不上；按天分组统一走 local_time，保证两边日界线一致。
         connection.create_function(
             "usage_local_day", 1, _sql_local_day_function(), deterministic=True
+        )
+        # 中文注释：检索按价格时段分组，调价（如 codex-auto-review 转免费）前后的
+        # 用量不会落进同一个聚合桶、被同一个单价计价。
+        connection.create_function(
+            "usage_price_period", 2, _sql_price_period, deterministic=True
         )
         return connection
 
@@ -611,6 +626,7 @@ class _UsageIndexStore:
                 statement = (
                     "SELECT usage_local_day(timestamp) "
                     "AS day, path, model, COALESCE(long_context, 0) AS long_context, "
+                    "usage_price_period(model, timestamp) AS price_period, "
                     "accounts.account_key AS account_key, "
                     "accounts.account_name AS account_name, "
                     "accounts.account_id AS account_id, "
@@ -642,7 +658,7 @@ class _UsageIndexStore:
                     f"FROM usage_delta LEFT JOIN ({_FILE_ACCOUNT_VIEW}) AS accounts "
                     "ON accounts.account_path = usage_delta.path"
                     f"{where} "
-                    "GROUP BY day, path, model, long_context, account_key, "
+                    "GROUP BY day, path, model, long_context, price_period, account_key, "
                     "account_name, account_id, product "
                     "ORDER BY last_at DESC"
                 )
@@ -855,14 +871,18 @@ def _delta_to_row(path: str, kind: str, delta: UsageDelta) -> tuple[object, ...]
         json.dumps(delta.usage.to_dict(), separators=(",", ":")),
         json.dumps(billing_usage.to_dict(), separators=(",", ":")),
         delta.project,
-        _long_context_flag(billing_usage, delta.model),
+        _long_context_flag(billing_usage, delta.model, delta.timestamp),
     )
 
 
-def _long_context_flag(usage: TokenUsage, model: str) -> int:
+def _long_context_flag(
+    usage: TokenUsage,
+    model: str,
+    timestamp: float | None = None,
+) -> int:
     """判断一次用量是否按长上下文计价，结果随行落盘供聚合查询分组。"""
 
-    pricing = _lookup_pricing(model)
+    pricing = _lookup_pricing(model, timestamp)
     if pricing is None:
         return 0
     return 1 if _is_long_context(usage.input_tokens, pricing) else 0
@@ -884,10 +904,10 @@ def _backfill_long_context(connection: sqlite3.Connection) -> int:
     """给旧索引行补齐长上下文标记，只做一次。"""
 
     rows = connection.execute(
-        "SELECT rowid, model, billing_usage_json, usage_json FROM usage_delta"
+        "SELECT rowid, model, billing_usage_json, usage_json, timestamp FROM usage_delta"
     ).fetchall()
     updates: list[tuple[int, int]] = []
-    for row_id, model, billing_json, usage_json in rows:
+    for row_id, model, billing_json, usage_json, timestamp in rows:
         if not isinstance(model, str):
             continue
         payload = billing_json if isinstance(billing_json, str) else usage_json
@@ -899,7 +919,8 @@ def _backfill_long_context(connection: sqlite3.Connection) -> int:
             continue
         if usage is None:
             continue
-        updates.append((_long_context_flag(usage, model), int(row_id)))
+        when = float(timestamp) if isinstance(timestamp, (int, float)) else None
+        updates.append((_long_context_flag(usage, model, when), int(row_id)))
     if updates:
         connection.executemany(
             "UPDATE usage_delta SET long_context = ? WHERE rowid = ?",

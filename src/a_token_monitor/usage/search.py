@@ -197,7 +197,7 @@ def _session_usage_from_deltas(
     cost = _ModelCost()
     for delta in deltas:
         totals = totals.add(delta.usage)
-        cost.add(_estimate_usage(delta.billing_usage or delta.usage, delta.model))
+        cost.add(_estimate_usage(delta.billing_usage or delta.usage, delta.model, delta.timestamp))
     last = max(deltas, key=lambda item: item.timestamp)
     return SessionUsage(
         path=path,
@@ -546,7 +546,8 @@ class _SqlSearchBucket:
         )
         usage = _token_usage_from_row(row)
         billing = _token_usage_from_row(row, "billing_")
-        pricing = _lookup_pricing(model)
+        # 中文注释：SQL 已按价格时段分组，桶内任一时间点都落在同一时段。
+        pricing = _lookup_pricing(model, row.get("first_at"))
         estimate = (
             _estimate_with_pricing(billing, pricing, bool(row["long_context"]))
             if pricing is not None

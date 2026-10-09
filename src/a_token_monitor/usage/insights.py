@@ -58,7 +58,7 @@ def _conversation_metrics(
         totals = totals.add(delta.usage)
         previous = model_usage.get(delta.model, TokenUsage())
         model_usage[delta.model] = previous.add(delta.usage)
-        estimate = _estimate_usage(billing, delta.model)
+        estimate = _estimate_usage(billing, delta.model, delta.timestamp)
         value = estimate.get("estimated_cost_usd")
         if value is None:
             # 中文注释：未定价模型只丢掉自己的金额，保留对话其余可计价部分。
@@ -71,7 +71,7 @@ def _conversation_metrics(
             current = model_costs[delta.model]
             if current is not None:
                 model_costs[delta.model] = current + float(value)
-        pricing = _lookup_pricing(delta.model)
+        pricing = _lookup_pricing(delta.model, delta.timestamp)
         if pricing is not None and pricing.input_usd is not None:
             write_premium += (
                 billing.cache_write_input_tokens

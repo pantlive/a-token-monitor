@@ -127,7 +127,7 @@ class _UsageAggregate:
         cost.add(
             estimate
             if estimate is not None
-            else _estimate_usage(delta.billing_usage or delta.usage, delta.model)
+            else _estimate_usage(delta.billing_usage or delta.usage, delta.model, delta.timestamp)
         )
 
 
@@ -146,7 +146,7 @@ class _RollupBin:
     def add(self, delta: UsageDelta) -> None:
         """仅对新请求估价；长上下文和缓存计价保持请求级口径。"""
 
-        estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model)
+        estimate = _estimate_usage(delta.billing_usage or delta.usage, delta.model, delta.timestamp)
         self.items.append((delta, estimate))
         self.first_at = min(self.first_at, delta.timestamp)
         self.last_at = max(self.last_at, delta.timestamp)

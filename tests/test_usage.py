@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from a_token_monitor.local_time import local_day_key
 from a_token_monitor.registry import MultiSessionRegistry
+from a_token_monitor.usage.pricing import price_period
 from a_token_monitor.usage import (
     calendar_day_start,
     SessionSwitchThresholds,
@@ -2055,7 +2056,9 @@ class UsageSearchAggregationTests(unittest.TestCase):
             # 长上下文：单条就超过模型阈值
             self._usage_event("2026-08-27T03:00:00Z", "gpt-5.6-luna", 700_000, 750_000),
             # 未定价模型
-            self._usage_event("2026-08-27T04:00:00Z", "codex-auto-review", 800_000, 810_000),
+            self._usage_event(
+                "2026-08-27T04:00:00Z", "local-experimental-model-xyz", 800_000, 810_000
+            ),
         ]
         session.write_text(
             "\n".join(json.dumps(event) for event in events) + "\n",
@@ -2078,6 +2081,85 @@ class UsageSearchAggregationTests(unittest.TestCase):
             now=_timestamp("2026-08-27T12:00:00Z"),
         )
         return aggregator
+
+    def test_price_change_splits_sql_buckets_by_period(self) -> None:
+        """codex-auto-review 2026-10-08 00:00 UTC 起免费：前后两条用量各按当时价格计。
+
+        两条记录在 UTC+8 下同属 10-08、同一会话同一模型；SQL 若不按价格时段分组，
+        会把免费那条也按收费价算进去（合计 $0.539 而不是 $0.189）。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".codex"
+            session = (
+                home
+                / "sessions"
+                / "2026"
+                / "10"
+                / "08"
+                / "rollout-2026-10-08T03-00-00-88888888-8888-4888-8888-888888888888.jsonl"
+            )
+            session.parent.mkdir(parents=True, exist_ok=True)
+            events = [
+                {
+                    "timestamp": "2026-10-07T19:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"cwd": "/home/dev/review"},
+                },
+                self._usage_event("2026-10-07T20:00:00Z", "codex-auto-review", 100_000, 0),
+                self._usage_event("2026-10-08T02:00:00Z", "codex-auto-review", 300_000, 0),
+            ]
+            session.write_text(
+                "\n".join(json.dumps(event) for event in events) + "\n",
+                encoding="utf-8",
+            )
+            aggregator = UsageAggregator(
+                discovery_interval=0.01,
+                refresh_interval=0.01,
+                cache_path=root / "state" / "usage-index.sqlite3",
+            )
+            aggregator.snapshot(
+                {"codex": MultiSessionRegistry(root / "state")},
+                account_metadata={
+                    "codex": {
+                        "account_id": "account-personal",
+                        "profile_name": "codex",
+                        "codex_home": str(home),
+                    }
+                },
+                now=_timestamp("2026-10-08T03:00:00Z"),
+            )
+            store = aggregator._persistent
+            assert store is not None
+            grouped = aggregator.search(group="model")
+            scanned = aggregator._search_scan(store, group="model")
+            by_session = aggregator.search(group="session")
+
+        # 中文注释：收费那条 10 万输入 + 1000 输出 = 0.175 + 0.014；免费那条 20 万输入 = 0。
+        self.assertEqual([row["estimated_cost_usd"] for row in grouped["rows"]], [0.189])
+        self.assertEqual([row["estimated_cost_usd"] for row in scanned["rows"]], [0.189])
+        self.assertEqual(grouped["totals"]["usage"]["input_tokens"], 300_000)
+        self.assertEqual(
+            sum(row["estimated_cost_usd"] for row in by_session["rows"]),
+            0.189,
+        )
+
+    def test_lookup_pricing_follows_price_changes(self) -> None:
+        free_from = _timestamp("2026-10-08T00:00:00Z")
+        paid = _lookup_pricing("codex-auto-review", free_from - 1)
+        free = _lookup_pricing("codex-auto-review", free_from)
+
+        self.assertEqual((paid.input_usd, paid.cached_input_usd, paid.output_usd), (1.75, 0.175, 14))
+        self.assertEqual((free.input_usd, free.cached_input_usd, free.output_usd), (0, 0, 0))
+        # 中文注释：不给时间时取原价，没有调价记录的模型不受时间影响。
+        self.assertEqual(_lookup_pricing("codex-auto-review").input_usd, 1.75)
+        self.assertEqual(price_period("codex-auto-review", free_from), 1)
+        self.assertEqual(price_period("gpt-5.3-codex", free_from), 0)
+        # 中文注释：免费期算「有单价、金额为 0」，不是未定价。
+        usage = TokenUsage(input_tokens=100_000, output_tokens=100_000, total_tokens=200_000)
+        self.assertEqual(_estimate_usage(usage, "codex-auto-review", free_from)["estimated_cost_usd"], 0.0)
+        self.assertEqual(_estimate_usage(usage, "codex-auto-review", free_from - 1)["estimated_cost_usd"], 1.575)
 
     @staticmethod
     def _usage_event(
