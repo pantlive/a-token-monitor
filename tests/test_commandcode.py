@@ -64,7 +64,7 @@ def _write_session(
 ) -> Path:
     """写入一份最小会话 JSONL 和 meta.json。"""
 
-    directory = home / "projects" / "workspace-demo"
+    directory = home / "projects" / _commandcode_project_slug(cwd)
     directory.mkdir(parents=True, exist_ok=True)
     messages = directory / f"{session_id}.jsonl"
     messages.write_text(
@@ -591,14 +591,18 @@ class CommandCodeProjectFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             home = _make_commandcode_home(root)
-            messages = _write_session(home, self.SESSION_ID, cwd="/workspace/demo")
+            # 中文注释：工作目录用真实存在的目录；写死的 POSIX 路径在 Windows 上
+            # 解析时会补上盘符，和会话头里的 cwd 对不上。
+            workspace = root / "workspace" / "demo"
+            workspace.mkdir(parents=True)
+            messages = _write_session(home, self.SESSION_ID, cwd=str(workspace))
             proc_root = root / "proc"
             _write_process(
                 proc_root,
                 pid=80,
                 comm="MainThread",
                 command=("node", "/usr/bin/command-code"),
-                cwd="/workspace/demo",
+                cwd=str(workspace),
             )
 
             sessions = list_commandcode_active_sessions(
@@ -611,7 +615,7 @@ class CommandCodeProjectFallbackTests(unittest.TestCase):
         session = sessions[0]
         self.assertEqual(session.session_id, self.SESSION_ID)
         self.assertEqual(session.pids, (80,))
-        self.assertEqual(session.cwd, "/workspace/demo")
+        self.assertEqual(session.cwd, str(workspace))
         # 目录推断出来的证据等级要低于句柄证据。
         self.assertEqual(session.confidence, DetectionConfidence.RECENT_FILE)
         self.assertEqual(
