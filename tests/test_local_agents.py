@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -28,6 +29,7 @@ from a_token_monitor.local_agents import (
 )
 from a_token_monitor.local_time import to_local
 from a_token_monitor.multi_account import external_active_session_paths
+from a_token_monitor.providers import PROVIDER_SPECS
 from a_token_monitor.scan_dirs import validate_directory
 from a_token_monitor.usage import UsageAggregator
 
@@ -164,7 +166,7 @@ class OpenCodeUsageTests(unittest.TestCase):
             self.assertEqual(event.project, "/work/app")
             self.assertEqual(event.timestamp, _MOMENT)
 
-            aggregator = UsageAggregator(opencode_homes=(home,))
+            aggregator = UsageAggregator(homes={"opencode": (home,)})
             snapshot = aggregator.snapshot({}, now=_MOMENT)
             account = _today_account(snapshot)
             self.assertEqual(account["total_tokens"], 20)
@@ -219,7 +221,7 @@ class CursorUsageTests(unittest.TestCase):
                 encoding="utf-8",
             )
             os.utime(path, (_MOMENT, _MOMENT))
-            aggregator = UsageAggregator(cursor_homes=(home,))
+            aggregator = UsageAggregator(homes={"cursor": (home,)})
             snapshot = aggregator.snapshot({}, now=_MOMENT)
             account = _today_account(snapshot)
             self.assertEqual(account["input_tokens"], 12)
@@ -314,7 +316,9 @@ class GeminiQwenUsageTests(unittest.TestCase):
                 encoding="utf-8",
             )
             aggregator = UsageAggregator(
-                gemini_homes=(home,),
+                homes={
+                    "gemini": (home,),
+                },
                 read_budget_bytes=4096,
             )
             snapshot = aggregator.snapshot({}, now=_MOMENT)
@@ -354,7 +358,7 @@ class GeminiQwenUsageTests(unittest.TestCase):
                 },
             )
             chat.write_text(json.dumps(record) + "\n", encoding="utf-8")
-            aggregator = UsageAggregator(qwen_homes=(home,))
+            aggregator = UsageAggregator(homes={"qwen": (home,)})
             snapshot = aggregator.snapshot({}, now=_MOMENT)
             account = _today_account(snapshot)
             self.assertEqual(account["total_tokens"], 125)
@@ -583,7 +587,9 @@ class AiderUsageTests(unittest.TestCase):
             path = home / ".aider.chat.history.md"
             path.write_text(history, encoding="utf-8")
             aggregator = UsageAggregator(
-                aider_homes=(home,),
+                homes={
+                    "aider": (home,),
+                },
                 read_budget_bytes=1024,
                 discovery_interval=30,
             )
@@ -619,11 +625,16 @@ class ActiveChatSessionTests(unittest.TestCase):
                 [item.jsonl_path for item in sessions],
                 [str(transcript.resolve())],
             )
-            with mock.patch(
-                "a_token_monitor.multi_account.list_cursor_active_sessions",
-                return_value=sessions,
+            with mock.patch.dict(
+                PROVIDER_SPECS,
+                {
+                    "cursor": replace(
+                        PROVIDER_SPECS["cursor"],
+                        active_sessions=lambda _home: sessions,
+                    )
+                },
             ):
-                protected = external_active_session_paths(cursor_homes=(home,))
+                protected = external_active_session_paths(homes={"cursor": (home,)})
             self.assertEqual(protected, {str(transcript.resolve())})
 
     def test_no_process_means_no_cursor_session(self) -> None:

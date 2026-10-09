@@ -101,7 +101,9 @@ class DshUsageTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             aggregator = UsageAggregator(
                 discovery_interval=0.01,
-                dsh_homes=(home,),
+                homes={
+                    "dsh": (home,),
+                },
             )
             state = aggregator.snapshot({"codex": registry}, now=1_789_872_559.0)
 

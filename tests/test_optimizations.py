@@ -141,29 +141,35 @@ class DashboardReloadTests(unittest.TestCase):
             monitor = MultiAccountMonitor(
                 (),
                 state_dir=root / "state",
-                grok_homes=(old,),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (old,),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             aggregator = UsageAggregator()
             server = DashboardServer(
                 config=DashboardConfig(port=0),
                 usage_aggregator=aggregator,
-                grok_homes=(old,),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (old,),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             monitor._dashboard = server
             server.start()
@@ -180,10 +186,10 @@ class DashboardReloadTests(unittest.TestCase):
                         f"http://{host}:{port}/api/state", timeout=3
                     ) as response:
                         response.read()
-                    self.assertEqual(build.call_args.kwargs["grok_homes"], (new,))
-                    self.assertEqual(build.call_args.kwargs["kimi_homes"], (new,))
-                    self.assertEqual(build.call_args.kwargs["claude_homes"], (new,))
-                    self.assertEqual(build.call_args.kwargs["commandcode_homes"], ())
+                    self.assertEqual(build.call_args.kwargs["homes"]["grok"], (new,))
+                    self.assertEqual(build.call_args.kwargs["homes"]["kimi"], (new,))
+                    self.assertEqual(build.call_args.kwargs["homes"]["claude"], (new,))
+                    self.assertEqual(build.call_args.kwargs["homes"]["commandcode"], ())
                     with urlopen(
                         Request(f"http://{host}:{port}/api/state", method="HEAD"),
                         timeout=3,
@@ -192,15 +198,18 @@ class DashboardReloadTests(unittest.TestCase):
                     self.assertEqual(build.call_count, 1)
                     # 中文注释：缓存有效期内再次改目录，HEAD 也必须立刻看到新配置。
                     server.update_homes(
-                        grok_homes=(old,),
-                        kimi_homes=(),
-                        dsh_homes=(),
-                        commandcode_homes=(new,),
-                        claude_homes=(),
-                        opencode_homes=(),
-                        cursor_homes=(),
-                        gemini_homes=(),
-                        qwen_homes=(), aider_homes=(),
+                        homes={
+                            "grok": (old,),
+                            "kimi": (),
+                            "dsh": (),
+                            "commandcode": (new,),
+                            "claude": (),
+                            "opencode": (),
+                            "cursor": (),
+                            "gemini": (),
+                            "qwen": (),
+                            "aider": (),
+                        },
                     )
                     with urlopen(
                         Request(f"http://{host}:{port}/api/state", method="HEAD"),
@@ -208,9 +217,9 @@ class DashboardReloadTests(unittest.TestCase):
                     ) as response:
                         self.assertEqual(response.status, 200)
                     self.assertEqual(build.call_count, 2)
-                    self.assertEqual(build.call_args.kwargs["grok_homes"], (old,))
+                    self.assertEqual(build.call_args.kwargs["homes"]["grok"], (old,))
                     self.assertEqual(
-                        build.call_args.kwargs["commandcode_homes"], (new,)
+                        build.call_args.kwargs["homes"]["commandcode"], (new,)
                     )
             finally:
                 monitor.close()
@@ -303,15 +312,18 @@ class DashboardReloadTests(unittest.TestCase):
                     account_metadata={"test": {"codex_home": str(root)}},
                     usage_aggregator=UsageAggregator(),
                     alert_store=store,
-                    grok_homes=(),
-                    kimi_homes=(),
-                    dsh_homes=(),
-                    commandcode_homes=(),
-                    claude_homes=(),
-                    opencode_homes=(),
-                    cursor_homes=(),
-                    gemini_homes=(),
-                    qwen_homes=(), aider_homes=(),
+                    homes={
+                        "grok": (),
+                        "kimi": (),
+                        "dsh": (),
+                        "commandcode": (),
+                        "claude": (),
+                        "opencode": (),
+                        "cursor": (),
+                        "gemini": (),
+                        "qwen": (),
+                        "aider": (),
+                    },
                 ) as server:
                     host, port = server.address
                     with urlopen(

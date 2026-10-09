@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from _platform_support import requires_proc
 from a_token_monitor.accounts import build_account_specs
 from a_token_monitor.grok import resolve_grok_homes
 from a_token_monitor.monitor import MonitorConfig
 from a_token_monitor.multi_account import AccountMonitor, MultiAccountMonitor
+from a_token_monitor.providers import PROVIDER_SPECS, home_keys
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.retention import RetentionError
 
@@ -70,8 +72,8 @@ class _FakeAggregator:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def update_homes(self, **kwargs: object) -> None:
-        self.calls.append(kwargs)
+    def update_homes(self, homes: dict[str, object]) -> None:
+        self.calls.append(dict(homes))
 
 
 class _FakeDashboard:
@@ -81,10 +83,10 @@ class _FakeDashboard:
         self.calls: list[tuple[object, object]] = []
         self.homes: dict[str, object] = {}
 
-    def update_homes(self, **kwargs: object) -> None:
+    def update_homes(self, homes: dict[str, object]) -> None:
         """记录各 provider 的目录热更新。"""
 
-        self.homes = kwargs
+        self.homes = dict(homes)
 
     def update_accounts(self, registries, account_metadata) -> None:  # noqa: ANN001, ANN202
         self.calls.append((registries, account_metadata))
@@ -98,15 +100,7 @@ def _build_monitor(root: Path, homes: tuple[Path, ...], **kwargs: object):
         "accounts": accounts,
         "state_dir": root / "state",
         "config": MonitorConfig(auto_resume=False),
-        "grok_homes": (),
-        "kimi_homes": (),
-        "dsh_homes": (),
-        "commandcode_homes": (),
-        "claude_homes": (),
-        "opencode_homes": (),
-        "cursor_homes": (),
-        "gemini_homes": (),
-        "qwen_homes": (), "aider_homes": (),
+        "homes": {key: () for key in home_keys()},
     }
     options.update(kwargs)
     return MultiAccountMonitor(**options)
@@ -230,7 +224,7 @@ class ApplyScanDirsTests(unittest.TestCase):
                         "claude": (),
                     }
                 )
-                swapped = monitor.grok_homes
+                swapped = monitor.homes["grok"]
                 labels_after_add = {
                     target.label for target in monitor.housekeeping.targets
                 }
@@ -244,7 +238,7 @@ class ApplyScanDirsTests(unittest.TestCase):
                         "claude": (),
                     }
                 )
-                disabled = monitor.grok_homes
+                disabled = monitor.homes["grok"]
                 labels_after_disable = {
                     target.label for target in monitor.housekeeping.targets
                 }
@@ -318,7 +312,7 @@ class ApplyScanDirsTests(unittest.TestCase):
 
         self.assertEqual(len(dashboard_aggregator.calls), 1)
         self.assertEqual(
-            dashboard_aggregator.calls[0]["grok_homes"],
+            dashboard_aggregator.calls[0]["grok"],
             (grok,),
         )
         self.assertEqual(advice_aggregator.calls, dashboard_aggregator.calls)
@@ -348,51 +342,59 @@ class ConstructorSemanticsTests(unittest.TestCase):
     def test_empty_tuple_disables_provider_without_autodetect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
-            with patch(
-                "a_token_monitor.multi_account.resolve_grok_homes",
-                wraps=resolve_grok_homes,
-            ) as mocked:
+            mocked = Mock(wraps=resolve_grok_homes)
+            with patch.dict(
+                PROVIDER_SPECS,
+                {"grok": replace(PROVIDER_SPECS["grok"], resolver=mocked)},
+            ):
                 monitor = MultiAccountMonitor(
                     accounts=(),
                     state_dir=root / "state",
-                    grok_homes=(),
-                    kimi_homes=(),
-                    dsh_homes=(),
-                    commandcode_homes=(),
-                    claude_homes=(),
-                    opencode_homes=(),
-                    cursor_homes=(),
-                    gemini_homes=(),
-                    qwen_homes=(), aider_homes=(),
+                    homes={
+                        "grok": (),
+                        "kimi": (),
+                        "dsh": (),
+                        "commandcode": (),
+                        "claude": (),
+                        "opencode": (),
+                        "cursor": (),
+                        "gemini": (),
+                        "qwen": (),
+                        "aider": (),
+                    },
                 )
 
         # 显式空元组必须原样传给解析器，禁止回退成自动探测。
         self.assertEqual(mocked.call_args.args[0], ())
-        self.assertEqual(monitor.grok_homes, ())
+        self.assertEqual(monitor.homes["grok"], ())
 
     def test_none_still_autodetects(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
-            with patch(
-                "a_token_monitor.multi_account.resolve_grok_homes",
-                wraps=resolve_grok_homes,
-            ) as mocked:
+            mocked = Mock(wraps=resolve_grok_homes)
+            with patch.dict(
+                PROVIDER_SPECS,
+                {"grok": replace(PROVIDER_SPECS["grok"], resolver=mocked)},
+            ):
                 monitor = MultiAccountMonitor(
                     accounts=(),
                     state_dir=root / "state",
-                    grok_homes=None,
-                    kimi_homes=(),
-                    dsh_homes=(),
-                    commandcode_homes=(),
-                    claude_homes=(),
-                    opencode_homes=(),
-                    cursor_homes=(),
-                    gemini_homes=(),
-                    qwen_homes=(), aider_homes=(),
+                    homes={
+                        "grok": None,
+                        "kimi": (),
+                        "dsh": (),
+                        "commandcode": (),
+                        "claude": (),
+                        "opencode": (),
+                        "cursor": (),
+                        "gemini": (),
+                        "qwen": (),
+                        "aider": (),
+                    },
                 )
 
         self.assertIsNone(mocked.call_args.args[0])
-        self.assertEqual(monitor.grok_homes, resolve_grok_homes(None))
+        self.assertEqual(monitor.homes["grok"], resolve_grok_homes(None))
 
     def test_scan_dirs_controller_is_stored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -401,15 +403,18 @@ class ConstructorSemanticsTests(unittest.TestCase):
             monitor = MultiAccountMonitor(
                 accounts=(),
                 state_dir=root / "state",
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
                 scan_dirs_controller=controller,
             )
 

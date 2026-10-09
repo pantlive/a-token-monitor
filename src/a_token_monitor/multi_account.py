@@ -15,14 +15,7 @@ from .accounts import (
     build_additional_account_spec,
 )
 from .alerts import AlertStoreError, TrafficAlertStore
-from .claude import list_claude_active_sessions, resolve_claude_homes
-from .commandcode import (
-    list_commandcode_active_sessions,
-    resolve_commandcode_homes,
-)
 from .dashboard import DashboardConfig, DashboardServer
-from .dsh import list_dsh_active_sessions, resolve_dsh_homes
-from .grok import list_grok_active_sessions, resolve_grok_homes
 from .health import HealthTracker
 from .housekeeping import (
     AuditTarget,
@@ -30,19 +23,14 @@ from .housekeeping import (
     HousekeepingMonitor,
     default_sessions_root,
 )
-from .kimi import list_kimi_active_sessions, resolve_kimi_homes
-from .local_agents import (
-    list_aider_active_sessions,
-    list_cursor_active_sessions,
-    list_gemini_active_sessions,
-    list_qwen_active_sessions,
-    resolve_aider_homes,
-    resolve_cursor_homes,
-    resolve_gemini_homes,
-    resolve_opencode_homes,
-    resolve_qwen_homes,
-)
 from .monitor import MonitorConfig, MultiSessionMonitor
+from .providers import (
+    ProviderHomes,
+    ProviderHomesInput,
+    home_keys,
+    home_providers,
+    resolve_provider_homes,
+)
 from .registry import MultiSessionRegistry
 from .retention import HistoryDataManager, RetentionController
 from .scan_dirs import ScanDirsController
@@ -67,16 +55,8 @@ class AccountMonitor:
 
 
 def external_active_session_paths(
+    homes: ProviderHomes | None = None,
     *,
-    grok_homes: Sequence[Path] = (),
-    kimi_homes: Sequence[Path] = (),
-    dsh_homes: Sequence[Path] = (),
-    commandcode_homes: Sequence[Path] = (),
-    claude_homes: Sequence[Path] = (),
-    cursor_homes: Sequence[Path] = (),
-    gemini_homes: Sequence[Path] = (),
-    qwen_homes: Sequence[Path] = (),
-    aider_homes: Sequence[Path] = (),
     logger: logging.Logger | None = None,
 ) -> set[str]:
     """返回非 Codex 产品仍在运行的会话路径（文件或会话目录）。
@@ -87,19 +67,12 @@ def external_active_session_paths(
 
     protected: set[str] = set()
     log = logger or logging.getLogger(__name__)
-    collectors = (
-        ("claude", claude_homes, list_claude_active_sessions),
-        ("kimi", kimi_homes, list_kimi_active_sessions),
-        ("grok", grok_homes, list_grok_active_sessions),
-        ("dsh", dsh_homes, list_dsh_active_sessions),
-        ("command-code", commandcode_homes, list_commandcode_active_sessions),
-        ("cursor", cursor_homes, list_cursor_active_sessions),
-        ("gemini", gemini_homes, list_gemini_active_sessions),
-        ("qwen", qwen_homes, list_qwen_active_sessions),
-        ("aider", aider_homes, list_aider_active_sessions),
-    )
-    for product, homes, lister in collectors:
-        for home in homes:
+    for spec in home_providers():
+        lister = spec.active_sessions
+        if lister is None:
+            continue
+        product = spec.product_id
+        for home in (homes or {}).get(spec.key, ()):
             try:
                 sessions = lister(home)
             except Exception as error:  # noqa: BLE001 - 探测失败只影响保护名单
@@ -149,22 +122,13 @@ class MultiAccountMonitor:
         config: MonitorConfig | None = None,
         state_dir: Path | None = None,
         logger: logging.Logger | None = None,
-        grok_homes: tuple[Path, ...] | None = None,
-        kimi_homes: tuple[Path, ...] | None = None,
-        dsh_homes: tuple[Path, ...] | None = None,
-        commandcode_homes: tuple[Path, ...] | None = None,
-        claude_homes: tuple[Path, ...] | None = None,
-        opencode_homes: tuple[Path, ...] | None = None,
-        cursor_homes: tuple[Path, ...] | None = None,
-        gemini_homes: tuple[Path, ...] | None = None,
-        qwen_homes: tuple[Path, ...] | None = None,
-        aider_homes: tuple[Path, ...] | None = None,
+        homes: ProviderHomesInput | None = None,
         scan_dirs_controller: ScanDirsController | None = None,
     ) -> None:
         """创建多个单账号监控器。
 
-        各 provider 的 ``*_homes`` 遵循同一约定：None 表示自动探测默认目录，
-        显式空元组表示禁用该 provider。
+        ``homes`` 按 provider key 给出数据目录：未给出或为 None 表示自动探测
+        默认目录，显式空元组表示禁用该 provider。
         """
 
         # 中文注释：没有 Codex 账号也是合法配置——daemon 仍要监控流量、
@@ -184,18 +148,7 @@ class MultiAccountMonitor:
         self.account_monitors = tuple(
             self._create_account_monitor(account) for account in accounts
         )
-        # 中文注释：原样透传，None = 自动探测，() = 显式禁用；
-        # resolve_*_homes 已实现这一约定。
-        self.grok_homes = resolve_grok_homes(grok_homes)
-        self.kimi_homes = resolve_kimi_homes(kimi_homes)
-        self.dsh_homes = resolve_dsh_homes(dsh_homes)
-        self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
-        self.claude_homes = resolve_claude_homes(claude_homes)
-        self.opencode_homes = resolve_opencode_homes(opencode_homes)
-        self.cursor_homes = resolve_cursor_homes(cursor_homes)
-        self.gemini_homes = resolve_gemini_homes(gemini_homes)
-        self.qwen_homes = resolve_qwen_homes(qwen_homes)
-        self.aider_homes = resolve_aider_homes(aider_homes)
+        self.homes = resolve_provider_homes(homes, auto_detect=True)
         self.scan_dirs_controller = scan_dirs_controller
         self.alert_store = TrafficAlertStore(
             self.state_dir,
@@ -316,90 +269,16 @@ class MultiAccountMonitor:
             )
             for item in self.account_monitors
         ]
-        for home in self.grok_homes:
-            targets.append(
-                AuditTarget(
-                    "Grok",
-                    "grok",
-                    home,
-                    sessions_root=default_sessions_root("grok", home),
+        for spec in home_providers():
+            for home in self.homes[spec.key]:
+                targets.append(
+                    AuditTarget(
+                        spec.display_name,
+                        spec.product_id,
+                        home,
+                        sessions_root=default_sessions_root(spec.product_id, home),
+                    )
                 )
-            )
-        for home in self.kimi_homes:
-            targets.append(
-                AuditTarget(
-                    "Kimi Code",
-                    "kimi",
-                    home,
-                    sessions_root=default_sessions_root("kimi", home),
-                )
-            )
-        for home in self.dsh_homes:
-            targets.append(
-                AuditTarget(
-                    "DeepSeek Harness",
-                    "dsh",
-                    home,
-                    sessions_root=default_sessions_root("dsh", home),
-                )
-            )
-        for home in self.commandcode_homes:
-            targets.append(
-                AuditTarget(
-                    "Command Code",
-                    "command-code",
-                    home,
-                    sessions_root=default_sessions_root("command-code", home),
-                )
-            )
-        for home in self.claude_homes:
-            targets.append(
-                AuditTarget(
-                    "Claude Code",
-                    "claude",
-                    home,
-                    sessions_root=default_sessions_root("claude", home),
-                )
-            )
-        for home in self.opencode_homes:
-            # 单个数据库保存全部会话，只统计占用，不纳入可删除会话。
-            targets.append(AuditTarget("OpenCode", "opencode", home))
-        for home in self.cursor_homes:
-            targets.append(
-                AuditTarget(
-                    "Cursor",
-                    "cursor",
-                    home,
-                    sessions_root=default_sessions_root("cursor", home),
-                )
-            )
-        for home in self.gemini_homes:
-            targets.append(
-                AuditTarget(
-                    "Gemini CLI",
-                    "gemini",
-                    home,
-                    sessions_root=default_sessions_root("gemini", home),
-                )
-            )
-        for home in self.qwen_homes:
-            targets.append(
-                AuditTarget(
-                    "Qwen Code",
-                    "qwen",
-                    home,
-                    sessions_root=default_sessions_root("qwen", home),
-                )
-            )
-        for home in self.aider_homes:
-            targets.append(
-                AuditTarget(
-                    "Aider",
-                    "aider",
-                    home,
-                    sessions_root=default_sessions_root("aider", home),
-                )
-            )
         targets.append(AuditTarget("监控状态目录", "state", self.state_dir))
         return tuple(targets)
 
@@ -413,15 +292,7 @@ class MultiAccountMonitor:
                     paths.add(str(Path(session.jsonl_path)))
         paths.update(
             external_active_session_paths(
-                grok_homes=self.grok_homes,
-                kimi_homes=self.kimi_homes,
-                dsh_homes=self.dsh_homes,
-                commandcode_homes=self.commandcode_homes,
-                claude_homes=self.claude_homes,
-                cursor_homes=self.cursor_homes,
-                gemini_homes=self.gemini_homes,
-                qwen_homes=self.qwen_homes,
-                aider_homes=self.aider_homes,
+                homes=self.homes,
                 logger=self.logger,
             )
         )
@@ -456,16 +327,7 @@ class MultiAccountMonitor:
         if aggregator is None:
             aggregator = UsageAggregator(
                 cache_path=self.state_dir / "usage-index.sqlite3",
-                grok_homes=self.grok_homes,
-                kimi_homes=self.kimi_homes,
-                dsh_homes=self.dsh_homes,
-                claude_homes=self.claude_homes,
-                commandcode_homes=self.commandcode_homes,
-                opencode_homes=self.opencode_homes,
-                cursor_homes=self.cursor_homes,
-                gemini_homes=self.gemini_homes,
-                qwen_homes=self.qwen_homes,
-                aider_homes=self.aider_homes,
+                homes=self.homes,
             )
             self._advice_aggregator = aggregator
         # 中文注释：没有 Dashboard 时由后台线程保持用量索引可用，
@@ -585,22 +447,12 @@ class MultiAccountMonitor:
         """
 
         with self._scan_lock:
-            # 中文注释：effective 由控制器给出全部 provider；透传给
-            # resolve_*_homes 做规范化去重，空元组保持显式禁用。
-            self.grok_homes = resolve_grok_homes(effective.get("grok") or ())
-            self.kimi_homes = resolve_kimi_homes(effective.get("kimi") or ())
-            self.dsh_homes = resolve_dsh_homes(effective.get("dsh") or ())
-            self.commandcode_homes = resolve_commandcode_homes(
-                effective.get("commandcode") or ()
+            # 中文注释：effective 由控制器给出全部 provider；逐个 resolver
+            # 规范化去重，缺失或空元组都保持显式禁用。
+            self.homes = resolve_provider_homes(
+                {key: effective.get(key) or () for key in home_keys()},
+                auto_detect=False,
             )
-            self.claude_homes = resolve_claude_homes(effective.get("claude") or ())
-            self.opencode_homes = resolve_opencode_homes(
-                effective.get("opencode") or ()
-            )
-            self.cursor_homes = resolve_cursor_homes(effective.get("cursor") or ())
-            self.gemini_homes = resolve_gemini_homes(effective.get("gemini") or ())
-            self.qwen_homes = resolve_qwen_homes(effective.get("qwen") or ())
-            self.aider_homes = resolve_aider_homes(effective.get("aider") or ())
 
             desired_homes: list[Path] = []
             seen_homes: set[Path] = set()
@@ -675,29 +527,11 @@ class MultiAccountMonitor:
             ):
                 if aggregator is not None:
                     aggregator.update_homes(
-                        grok_homes=self.grok_homes,
-                        kimi_homes=self.kimi_homes,
-                        dsh_homes=self.dsh_homes,
-                        claude_homes=self.claude_homes,
-                        commandcode_homes=self.commandcode_homes,
-                        opencode_homes=self.opencode_homes,
-                        cursor_homes=self.cursor_homes,
-                        gemini_homes=self.gemini_homes,
-                        qwen_homes=self.qwen_homes,
-                        aider_homes=self.aider_homes,
+                        homes=self.homes,
                     )
             if self._dashboard is not None:
                 self._dashboard.update_homes(
-                    grok_homes=self.grok_homes,
-                    kimi_homes=self.kimi_homes,
-                    dsh_homes=self.dsh_homes,
-                    commandcode_homes=self.commandcode_homes,
-                    claude_homes=self.claude_homes,
-                    opencode_homes=self.opencode_homes,
-                    cursor_homes=self.cursor_homes,
-                    gemini_homes=self.gemini_homes,
-                    qwen_homes=self.qwen_homes,
-                    aider_homes=self.aider_homes,
+                    homes=self.homes,
                 )
                 self._dashboard.update_accounts(
                     self.registries,
@@ -837,16 +671,7 @@ class MultiAccountMonitor:
                     usage_aggregator = UsageAggregator(
                         cache_path=self.state_dir / "usage-index.sqlite3",
                         background_indexing=True,
-                        grok_homes=self.grok_homes,
-                        kimi_homes=self.kimi_homes,
-                        dsh_homes=self.dsh_homes,
-                        claude_homes=self.claude_homes,
-                        commandcode_homes=self.commandcode_homes,
-                        opencode_homes=self.opencode_homes,
-                        cursor_homes=self.cursor_homes,
-                        gemini_homes=self.gemini_homes,
-                        qwen_homes=self.qwen_homes,
-                        aider_homes=self.aider_homes,
+                        homes=self.homes,
                     )
                     self._dashboard_aggregator = usage_aggregator
                     self._dashboard = DashboardServer(
@@ -860,16 +685,7 @@ class MultiAccountMonitor:
                         ),
                         logger=self.logger,
                         usage_aggregator=usage_aggregator,
-                        grok_homes=self.grok_homes,
-                        kimi_homes=self.kimi_homes,
-                        dsh_homes=self.dsh_homes,
-                        commandcode_homes=self.commandcode_homes,
-                        claude_homes=self.claude_homes,
-                        opencode_homes=self.opencode_homes,
-                        cursor_homes=self.cursor_homes,
-                        gemini_homes=self.gemini_homes,
-                        qwen_homes=self.qwen_homes,
-                        aider_homes=self.aider_homes,
+                        homes=self.homes,
                         traffic_monitor=self.traffic_monitor,
                         alert_store=self.alert_store,
                         housekeeping=self.housekeeping,

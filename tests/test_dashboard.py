@@ -55,6 +55,7 @@ from a_token_monitor.multi_models import (
     TrackedSession,
 )
 from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.providers import home_keys
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.scan_dirs import ScanDirsController
 from a_token_monitor.traffic import TrafficAlert
@@ -384,15 +385,18 @@ class DashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=registry,
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             host, port = server.address
@@ -479,15 +483,18 @@ class DashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=registry,
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(kimi_home,),
-                dsh_homes=(),
-                commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (kimi_home,),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             host, port = server.address
@@ -555,10 +562,12 @@ class DashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=registry,
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(home,),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (home,),
+                },
             )
             server.start()
             host, port = server.address
@@ -645,15 +654,18 @@ class DashboardTests(unittest.TestCase):
                 config=DashboardConfig(port=0),
                 account_metadata=metadata,
                 usage_aggregator=aggregator,
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             host, port = server.address
@@ -745,15 +757,18 @@ class DashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=registry,
                 config=DashboardConfig(port=0, budget_usd=50.0),
-                grok_homes=(),
-                kimi_homes=(kimi_home,),
-                dsh_homes=(),
-                commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (kimi_home,),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             host, port = server.address
@@ -828,15 +843,18 @@ class DashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=registry,
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(kimi_home,),
-                dsh_homes=(),
-                commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (kimi_home,),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             host, port = server.address
@@ -970,8 +988,10 @@ class DashboardTests(unittest.TestCase):
             ):
                 state = build_multi_dashboard_state(
                     {"personal": registry},
-                    kimi_homes=(kimi_home,),
-                    dsh_homes=(dsh_home,),
+                    homes={
+                        "kimi": (kimi_home,),
+                        "dsh": (dsh_home,),
+                    },
                 )
 
         products = {session.get("product") for session in state["sessions"]}
@@ -992,15 +1012,18 @@ class DashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=registry,
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             host, port = server.address
@@ -1125,15 +1148,18 @@ class AlertHistoryDashboardTests(unittest.TestCase):
         server = DashboardServer(
             registry=MultiSessionRegistry(root / "monitor-state"),
             config=DashboardConfig(port=0),
-            grok_homes=(),
-            kimi_homes=(),
-            dsh_homes=(),
-            commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+            homes={
+                "grok": (),
+                "kimi": (),
+                "dsh": (),
+                "commandcode": (),
+                "claude": (),
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
             alert_store=alert_store,
         )
         server.start()
@@ -1371,15 +1397,18 @@ class AlertHistoryDashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registry=MultiSessionRegistry(root / "monitor-state"),
                 config=DashboardConfig(port=0),
-                grok_homes=(grok_home,),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(commandcode_home,),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (grok_home,),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (commandcode_home,),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
                 alert_store=store,
             )
             server.start()
@@ -1569,11 +1598,13 @@ class GrokSessionDashboardTests(unittest.TestCase):
             ):
                 state = build_multi_dashboard_state(
                     {"personal": registry},
-                    grok_homes=(grok_home,),
-                    kimi_homes=(),
-                    dsh_homes=(),
-                    commandcode_homes=(),
-                    claude_homes=(),
+                    homes={
+                        "grok": (grok_home,),
+                        "kimi": (),
+                        "dsh": (),
+                        "commandcode": (),
+                        "claude": (),
+                    },
                 )
 
         grok_entries = [
@@ -1610,11 +1641,13 @@ class NoCodexDashboardTests(unittest.TestCase):
     def _missing_homes(self, root: Path) -> dict[str, object]:
         missing = root / "missing"
         return {
-            "grok_homes": (missing / "grok",),
-            "kimi_homes": (missing / "kimi",),
-            "dsh_homes": (missing / "dsh",),
-            "commandcode_homes": (missing / "commandcode",),
-            "claude_homes": (missing / "claude",),
+            "homes": {
+                "grok": (missing / "grok",),
+                "kimi": (missing / "kimi",),
+                "dsh": (missing / "dsh",),
+                "commandcode": (missing / "commandcode",),
+                "claude": (missing / "claude",),
+            },
         }
 
     def test_state_without_any_account_is_empty(self) -> None:
@@ -1633,15 +1666,18 @@ class NoCodexDashboardTests(unittest.TestCase):
             server = DashboardServer(
                 registries={},
                 config=DashboardConfig(port=0),
-                grok_homes=(root / "missing" / "grok",),
-                kimi_homes=(root / "missing" / "kimi",),
-                dsh_homes=(root / "missing" / "dsh",),
-                commandcode_homes=(root / "missing" / "commandcode",),
-                claude_homes=(root / "missing" / "claude",),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (root / "missing" / "grok",),
+                    "kimi": (root / "missing" / "kimi",),
+                    "dsh": (root / "missing" / "dsh",),
+                    "commandcode": (root / "missing" / "commandcode",),
+                    "claude": (root / "missing" / "claude",),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
@@ -1681,11 +1717,13 @@ class NoCodexDashboardTests(unittest.TestCase):
             ):
                 state = build_multi_dashboard_state(
                     {},
-                    grok_homes=(grok_home,),
-                    kimi_homes=(root / "missing" / "kimi",),
-                    dsh_homes=(root / "missing" / "dsh",),
-                    commandcode_homes=(root / "missing" / "commandcode",),
-                    claude_homes=(claude_home,),
+                    homes={
+                        "grok": (grok_home,),
+                        "kimi": (root / "missing" / "kimi",),
+                        "dsh": (root / "missing" / "dsh",),
+                        "commandcode": (root / "missing" / "commandcode",),
+                        "claude": (claude_home,),
+                    },
                 )
 
         products = [item.get("product") for item in state["accounts"]]
@@ -1735,11 +1773,13 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
             ):
                 state = build_multi_dashboard_state(
                     {"personal": registry},
-                    grok_homes=(root / "missing" / "grok",),
-                    kimi_homes=(root / "missing" / "kimi",),
-                    dsh_homes=(root / "missing" / "dsh",),
-                    commandcode_homes=(root / "missing" / "commandcode",),
-                    claude_homes=(claude_home,),
+                    homes={
+                        "grok": (root / "missing" / "grok",),
+                        "kimi": (root / "missing" / "kimi",),
+                        "dsh": (root / "missing" / "dsh",),
+                        "commandcode": (root / "missing" / "commandcode",),
+                        "claude": (claude_home,),
+                    },
                 )
 
         entries = [
@@ -1990,15 +2030,18 @@ class StylesheetIntegrityTests(unittest.TestCase):
                     "codex": MultiSessionRegistry(Path(temporary_directory) / "state")
                 },
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             base = f"http://{server.address[0]}:{server.address[1]}"
@@ -2048,15 +2091,18 @@ class StylesheetIntegrityTests(unittest.TestCase):
             server = DashboardServer(
                 registries={"codex": MultiSessionRegistry(state_dir)},
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             base = f"http://{server.address[0]}:{server.address[1]}"
@@ -2285,11 +2331,13 @@ class SubscriptionPlanTests(unittest.TestCase):
                         "codex_home": str(home),
                     }
                 },
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                },
             )
 
         self.assertEqual(state["quotas"][0]["plan_type"], "plus")
@@ -2331,11 +2379,13 @@ class SubscriptionPlanTests(unittest.TestCase):
                         "plan_type": "prolite",
                     },
                 },
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                },
             )
 
         plans = {
@@ -2400,11 +2450,13 @@ class SubscriptionPlanTests(unittest.TestCase):
                         "codex_home": str(homes["work"]),
                     },
                 },
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                },
             )
 
         self.assertEqual(
@@ -2439,11 +2491,13 @@ class SubscriptionPlanTests(unittest.TestCase):
                         "plan_type": "prolite",
                     }
                 },
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                },
             )
 
         self.assertEqual(state["accounts"][0]["plan_type"], "plus")
@@ -2474,11 +2528,13 @@ class SubscriptionPlanTests(unittest.TestCase):
                         "plan_type": "prolite",
                     }
                 },
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                },
             )
 
         self.assertEqual(state["accounts"][0]["plan_type"], "prolite")
@@ -2929,15 +2985,18 @@ class FaviconTests(unittest.TestCase):
             server = DashboardServer(
                 registries={"codex": MultiSessionRegistry(root / "state")},
                 config=DashboardConfig(port=0),
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
@@ -3034,15 +3093,18 @@ class UsageSearchDashboardTests(unittest.TestCase):
         server = DashboardServer(
             registry=MultiSessionRegistry(root / "monitor-state"),
             config=DashboardConfig(port=0),
-            grok_homes=(),
-            kimi_homes=(),
-            dsh_homes=(),
-            commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+            homes={
+                "grok": (),
+                "kimi": (),
+                "dsh": (),
+                "commandcode": (),
+                "claude": (),
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
             usage_aggregator=aggregator,
         )
         server.start()
@@ -3318,15 +3380,18 @@ class HousekeepingDashboardTests(unittest.TestCase):
         server = DashboardServer(
             registry=registry,
             config=DashboardConfig(port=0),
-            grok_homes=(),
-            kimi_homes=(),
-            dsh_homes=(),
-            commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+            homes={
+                "grok": (),
+                "kimi": (),
+                "dsh": (),
+                "commandcode": (),
+                "claude": (),
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
             usage_aggregator=aggregator,
             housekeeping=monitor,
         )
@@ -3884,15 +3949,18 @@ class ScanDirsDashboardTests(unittest.TestCase):
         server = DashboardServer(
             registries={},
             config=DashboardConfig(port=0),
-            grok_homes=(),
-            kimi_homes=(),
-            dsh_homes=(),
-            commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+            homes={
+                "grok": (),
+                "kimi": (),
+                "dsh": (),
+                "commandcode": (),
+                "claude": (),
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
             scan_dirs=controller,
         )
         server.start()
@@ -4198,15 +4266,18 @@ class ScanDirsDashboardTests(unittest.TestCase):
                         "profile_name": "codex",
                     }
                 },
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
-                opencode_homes=(),
-                cursor_homes=(),
-                gemini_homes=(),
-                qwen_homes=(), aider_homes=(),
+                homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                    "opencode": (),
+                    "cursor": (),
+                    "gemini": (),
+                    "qwen": (),
+                    "aider": (),
+                },
             )
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
@@ -4247,15 +4318,7 @@ class HealthEndpointTests(unittest.TestCase):
         options = {
             "registries": {},
             "config": DashboardConfig(port=0),
-            "grok_homes": (),
-            "kimi_homes": (),
-            "dsh_homes": (),
-            "commandcode_homes": (),
-            "claude_homes": (),
-            "opencode_homes": (),
-            "cursor_homes": (),
-            "gemini_homes": (),
-            "qwen_homes": (), "aider_homes": (),
+            "homes": {key: () for key in home_keys()},
             "health": health,
         }
         options.update(kwargs)
@@ -4437,7 +4500,10 @@ class HealthEndpointTests(unittest.TestCase):
             grok_home = root / ".grok"
             grok_home.mkdir()
             tracker = HealthTracker()
-            server = self._server(health=tracker, grok_homes=(grok_home,))
+            server = self._server(
+                health=tracker,
+                homes={**{key: () for key in home_keys()}, "grok": (grok_home,)},
+            )
             base_url = f"http://{server.address[0]}:{server.address[1]}"
             try:
                 with (
@@ -4566,15 +4632,18 @@ class HistoryDashboardTests(unittest.TestCase):
         server = DashboardServer(
             registries={},
             config=DashboardConfig(port=0),
-            grok_homes=(),
-            kimi_homes=(),
-            dsh_homes=(),
-            commandcode_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+            homes={
+                "grok": (),
+                "kimi": (),
+                "dsh": (),
+                "commandcode": (),
+                "claude": (),
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
             history=manager,
             retention=controller,
         )

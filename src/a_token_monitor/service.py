@@ -17,7 +17,7 @@ import sys
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
 from typing import Any, ClassVar
@@ -28,6 +28,7 @@ from .alerts import DEFAULT_RETENTION_DAYS as DEFAULT_ALERT_RETENTION_DAYS
 from .housekeeping import DEFAULT_SINGLE_WARN_GIB, DEFAULT_TOTAL_WARN_GIB
 from .monitor import MonitorConfig
 from .multi_account import MultiAccountMonitor
+from .providers import home_keys, home_providers
 from .retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
@@ -65,16 +66,9 @@ class ServiceConfig:
     dashboard: bool
     dashboard_host: str
     dashboard_port: int
-    grok_homes: tuple[Path, ...]
-    kimi_homes: tuple[Path, ...] = ()
-    dsh_homes: tuple[Path, ...] = ()
-    commandcode_homes: tuple[Path, ...] = ()
-    claude_homes: tuple[Path, ...] = ()
-    opencode_homes: tuple[Path, ...] = ()
-    cursor_homes: tuple[Path, ...] = ()
-    gemini_homes: tuple[Path, ...] = ()
-    qwen_homes: tuple[Path, ...] = ()
-    aider_homes: tuple[Path, ...] = ()
+    # 中文注释：除 Codex 外各 provider 的数据目录，键为 provider key；
+    # service.json 里仍按 ``<key>_homes`` 分字段保存，空元组表示「未配置」。
+    provider_homes: Mapping[str, tuple[Path, ...]] = field(default_factory=dict)
     alert_context_content: bool = False
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
@@ -98,43 +92,19 @@ class ServiceConfig:
             "codex_homes",
             tuple(_absolute_path(path) for path in self.codex_homes),
         )
+        unknown = set(self.provider_homes) - set(home_keys())
+        if unknown:
+            raise ValueError(f"未知的 provider: {', '.join(sorted(unknown))}")
         object.__setattr__(
             self,
-            "grok_homes",
-            tuple(_absolute_path(path) for path in self.grok_homes),
+            "provider_homes",
+            {
+                key: tuple(
+                    _absolute_path(path) for path in self.provider_homes.get(key, ())
+                )
+                for key in home_keys()
+            },
         )
-        object.__setattr__(
-            self,
-            "kimi_homes",
-            tuple(_absolute_path(path) for path in self.kimi_homes),
-        )
-        object.__setattr__(
-            self,
-            "dsh_homes",
-            tuple(_absolute_path(path) for path in self.dsh_homes),
-        )
-        object.__setattr__(
-            self,
-            "commandcode_homes",
-            tuple(_absolute_path(path) for path in self.commandcode_homes),
-        )
-        object.__setattr__(
-            self,
-            "claude_homes",
-            tuple(_absolute_path(path) for path in self.claude_homes),
-        )
-        for name in (
-            "opencode_homes",
-            "cursor_homes",
-            "gemini_homes",
-            "qwen_homes",
-            "aider_homes",
-        ):
-            object.__setattr__(
-                self,
-                name,
-                tuple(_absolute_path(path) for path in getattr(self, name)),
-            )
         if self.session_root is not None:
             object.__setattr__(
                 self,
@@ -199,18 +169,12 @@ class ServiceConfig:
             "dashboard": self.dashboard,
             "dashboard_host": self.dashboard_host,
             "dashboard_port": self.dashboard_port,
-            "grok_homes": [str(path) for path in self.grok_homes],
-            "kimi_homes": [str(path) for path in self.kimi_homes],
-            "dsh_homes": [str(path) for path in self.dsh_homes],
-            "commandcode_homes": [
-                str(path) for path in self.commandcode_homes
-            ],
-            "claude_homes": [str(path) for path in self.claude_homes],
-            "opencode_homes": [str(path) for path in self.opencode_homes],
-            "cursor_homes": [str(path) for path in self.cursor_homes],
-            "gemini_homes": [str(path) for path in self.gemini_homes],
-            "qwen_homes": [str(path) for path in self.qwen_homes],
-            "aider_homes": [str(path) for path in self.aider_homes],
+            **{
+                spec.homes_field: [
+                    str(path) for path in self.provider_homes[spec.key]
+                ]
+                for spec in home_providers()
+            },
             "budget_usd": self.budget_usd,
             "alert_context_content": self.alert_context_content,
             "upload_burst_warn_mb": self.upload_burst_warn_mb,
@@ -295,18 +259,10 @@ class ServiceConfig:
                 "dashboard_host",
             ),
             dashboard_port=_required_int(raw_payload, "dashboard_port"),
-            grok_homes=_optional_path_tuple(raw_payload, "grok_homes"),
-            kimi_homes=_optional_path_tuple(raw_payload, "kimi_homes"),
-            dsh_homes=_optional_path_tuple(raw_payload, "dsh_homes"),
-            commandcode_homes=_optional_path_tuple(
-                raw_payload, "commandcode_homes"
-            ),
-            claude_homes=_optional_path_tuple(raw_payload, "claude_homes"),
-            opencode_homes=_optional_path_tuple(raw_payload, "opencode_homes"),
-            cursor_homes=_optional_path_tuple(raw_payload, "cursor_homes"),
-            gemini_homes=_optional_path_tuple(raw_payload, "gemini_homes"),
-            qwen_homes=_optional_path_tuple(raw_payload, "qwen_homes"),
-            aider_homes=_optional_path_tuple(raw_payload, "aider_homes"),
+            provider_homes={
+                spec.key: _optional_path_tuple(raw_payload, spec.homes_field)
+                for spec in home_providers()
+            },
             budget_usd=_optional_float(raw_payload, "budget_usd"),
             alert_context_content=raw_payload.get("alert_context_content") is True,
             upload_burst_warn_mb=_optional_float(
@@ -362,16 +318,7 @@ class ServiceConfig:
         # daemon 启动不应静默忽略配置错误。
         cli_homes: dict[str, tuple[Path, ...] | None] = {
             "codex": self.codex_homes or None,
-            "claude": self.claude_homes or None,
-            "commandcode": self.commandcode_homes or None,
-            "dsh": self.dsh_homes or None,
-            "grok": self.grok_homes or None,
-            "kimi": self.kimi_homes or None,
-            "opencode": self.opencode_homes or None,
-            "cursor": self.cursor_homes or None,
-            "gemini": self.gemini_homes or None,
-            "qwen": self.qwen_homes or None,
-            "aider": self.aider_homes or None,
+            **{key: homes or None for key, homes in self.provider_homes.items()},
         }
         controller = ScanDirsController(self.state_dir, cli_homes)
         effective_dirs = controller.effective()
@@ -407,16 +354,9 @@ class ServiceConfig:
             accounts=accounts,
             state_dir=self.state_dir,
             config=monitor_config,
-            grok_homes=_daemon_homes(effective_dirs.state("grok")),
-            kimi_homes=_daemon_homes(effective_dirs.state("kimi")),
-            dsh_homes=_daemon_homes(effective_dirs.state("dsh")),
-            commandcode_homes=_daemon_homes(effective_dirs.state("commandcode")),
-            claude_homes=_daemon_homes(effective_dirs.state("claude")),
-            opencode_homes=_daemon_homes(effective_dirs.state("opencode")),
-            cursor_homes=_daemon_homes(effective_dirs.state("cursor")),
-            gemini_homes=_daemon_homes(effective_dirs.state("gemini")),
-            qwen_homes=_daemon_homes(effective_dirs.state("qwen")),
-            aider_homes=_daemon_homes(effective_dirs.state("aider")),
+            homes={
+                key: _daemon_homes(effective_dirs.state(key)) for key in home_keys()
+            },
             scan_dirs_controller=controller,
         )
 

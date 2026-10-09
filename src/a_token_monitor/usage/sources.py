@@ -34,6 +34,7 @@ from ..local_agents import (
     list_opencode_dbs,
     list_qwen_chats,
 )
+from ..providers import home_providers
 from ..registry import MultiSessionRegistry
 from .parsing import (
     _canonical_source_rank,
@@ -74,43 +75,12 @@ class _SourceDiscoveryMixin:
                 for profile_name, registry in registries.items()
             )
         )
-        grok_scope = tuple(("grok", str(home), "", "") for home in self._grok_homes)
-        kimi_scope = tuple(("kimi", str(home), "", "") for home in self._kimi_homes)
-        dsh_scope = tuple(("dsh", str(home), "", "") for home in self._dsh_homes)
-        claude_scope = tuple(
-            ("claude", str(home), "", "") for home in self._claude_homes
+        provider_scope = tuple(
+            (spec.product_id, str(home), "", "")
+            for spec in home_providers()
+            for home in self._homes[spec.key]
         )
-        commandcode_scope = tuple(
-            ("command-code", str(home), "", "") for home in self._commandcode_homes
-        )
-        opencode_scope = tuple(
-            ("opencode", str(home), "", "") for home in self._opencode_homes
-        )
-        cursor_scope = tuple(
-            ("cursor", str(home), "", "") for home in self._cursor_homes
-        )
-        gemini_scope = tuple(
-            ("gemini", str(home), "", "") for home in self._gemini_homes
-        )
-        qwen_scope = tuple(
-            ("qwen", str(home), "", "") for home in self._qwen_homes
-        )
-        aider_scope = tuple(
-            ("aider", str(home), "", "") for home in self._aider_homes
-        )
-        return (
-            registry_scope
-            + grok_scope
-            + kimi_scope
-            + dsh_scope
-            + claude_scope
-            + commandcode_scope
-            + opencode_scope
-            + cursor_scope
-            + gemini_scope
-            + qwen_scope
-            + aider_scope
-        )
+        return registry_scope + provider_scope
 
     def _build_sources(
         self,
@@ -161,7 +131,7 @@ class _SourceDiscoveryMixin:
         # 中文注释：同一 Codex session 可能在多个 CODEX_HOME 中留下前缀副本。
         # Grok 的 unified.jsonl 没有 Codex session UUID，必须在加入 Grok 前去重。
         sources = self._deduplicate_codex_sources(sources)
-        for grok_home in self._grok_homes:
+        for grok_home in self._homes["grok"]:
             log_path = grok_unified_log(grok_home)
             if not log_path.is_file():
                 continue
@@ -172,7 +142,7 @@ class _SourceDiscoveryMixin:
                 codex_home=str(grok_home),
                 product="grok",
             )
-        for kimi_home in self._kimi_homes:
+        for kimi_home in self._homes["kimi"]:
             account = read_kimi_account(kimi_home)
             for path in self._discover_kimi_wires(kimi_home):
                 sources[path] = _UsageSource(
@@ -181,7 +151,7 @@ class _SourceDiscoveryMixin:
                     codex_home=str(kimi_home),
                     product="kimi",
                 )
-        for dsh_home in self._dsh_homes:
+        for dsh_home in self._homes["dsh"]:
             account = read_dsh_account(dsh_home)
             for path in list_dsh_projcache_files(dsh_home):
                 sources[path] = _UsageSource(
@@ -190,7 +160,7 @@ class _SourceDiscoveryMixin:
                     codex_home=str(dsh_home),
                     product="dsh",
                 )
-        for claude_home in self._claude_homes:
+        for claude_home in self._homes["claude"]:
             account = read_claude_account(claude_home)
             include_subagents = self._claude_include_subagents(claude_home)
             for path in list_claude_transcripts(
@@ -203,7 +173,7 @@ class _SourceDiscoveryMixin:
                     codex_home=str(claude_home),
                     product="claude",
                 )
-        for home in self._commandcode_homes:
+        for home in self._homes["commandcode"]:
             account = read_commandcode_account(home)
             for path in list_commandcode_transcripts(home):
                 sources[path.resolve()] = _UsageSource(
@@ -212,7 +182,7 @@ class _SourceDiscoveryMixin:
                     codex_home=str(home),
                     product="command-code",
                 )
-        for home in self._opencode_homes:
+        for home in self._homes["opencode"]:
             for path in self._cached_paths(
                 home / ".usage-opencode",
                 lambda home=home: list_opencode_dbs((home,)),
@@ -223,7 +193,7 @@ class _SourceDiscoveryMixin:
                     codex_home=str(home),
                     product="opencode",
                 )
-        for home in self._cursor_homes:
+        for home in self._homes["cursor"]:
             for path in self._cached_paths(
                 home / ".usage-cursor",
                 lambda home=home: list_cursor_transcripts(home),
@@ -235,7 +205,7 @@ class _SourceDiscoveryMixin:
                     project=chat_project(home, path, product="cursor"),
                     product="cursor",
                 )
-        for home in self._gemini_homes:
+        for home in self._homes["gemini"]:
             for path in self._cached_paths(
                 home / ".usage-gemini",
                 lambda home=home: list_gemini_chats(home),
@@ -247,7 +217,7 @@ class _SourceDiscoveryMixin:
                     project=chat_project(home, path, product="gemini"),
                     product="gemini",
                 )
-        for home in self._qwen_homes:
+        for home in self._homes["qwen"]:
             for path in self._cached_paths(
                 home / ".usage-qwen",
                 lambda home=home: list_qwen_chats(home),
@@ -259,7 +229,7 @@ class _SourceDiscoveryMixin:
                     project=chat_project(home, path, product="qwen"),
                     product="qwen",
                 )
-        for home in self._aider_homes:
+        for home in self._homes["aider"]:
             for path in self._cached_paths(
                 home / ".usage-aider",
                 lambda home=home: list_aider_histories(home),

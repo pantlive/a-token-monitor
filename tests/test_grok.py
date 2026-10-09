@@ -95,7 +95,9 @@ class GrokUsageTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             aggregator = UsageAggregator(
                 discovery_interval=0.01,
-                grok_homes=(grok_home,),
+                homes={
+                    "grok": (grok_home,),
+                },
             )
 
             state = aggregator.snapshot(

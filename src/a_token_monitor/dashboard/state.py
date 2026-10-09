@@ -241,11 +241,7 @@ def build_multi_dashboard_state(
     registries: Mapping[str, MultiSessionRegistry],
     account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
     usage_aggregator: UsageAggregator | None = None,
-    grok_homes: Sequence[Path] | None = None,
-    kimi_homes: Sequence[Path] | None = None,
-    dsh_homes: Sequence[Path] | None = None,
-    commandcode_homes: Sequence[Path] | None = None,
-    claude_homes: Sequence[Path] | None = None,
+    homes: Mapping[str, Sequence[Path]] | None = None,
     budget_usd: float | None = None,
     traffic: TrafficSnapshot | None = None,
     health: HealthTracker | None = None,
@@ -347,7 +343,7 @@ def build_multi_dashboard_state(
         if profile not in account["profiles"]:
             account["profiles"].append(profile)
 
-    for grok_home in grok_homes or ():
+    for grok_home in (homes or {}).get("grok", ()):
         if not grok_home.is_dir():
             continue
         try:
@@ -404,7 +400,7 @@ def build_multi_dashboard_state(
                 error=error,
             )
     # Kimi 配额经官方 /usages 接口读取（带缓存）；失败时账号卡片只展示身份。
-    for kimi_home in kimi_homes or ():
+    for kimi_home in (homes or {}).get("kimi", ()):
         if not kimi_home.is_dir():
             continue
         try:
@@ -460,7 +456,7 @@ def build_multi_dashboard_state(
                 provider_key='kimi',
                 error=error,
             )
-    for dsh_home in dsh_homes or ():
+    for dsh_home in (homes or {}).get("dsh", ()):
         if not dsh_home.is_dir():
             continue
         try:
@@ -517,7 +513,7 @@ def build_multi_dashboard_state(
                 error=error,
             )
     # Claude Code 订阅额度经 OAuth usage 接口读取（带缓存）；失败时只展示账号身份。
-    for claude_home in claude_homes or ():
+    for claude_home in (homes or {}).get("claude", ()):
         if not claude_home.is_dir():
             continue
         try:
@@ -575,7 +571,7 @@ def build_multi_dashboard_state(
                 error=error,
             )
     # Command Code 订阅额度经官方后台接口读取（带缓存）；失败时只展示账号身份。
-    for commandcode_home in commandcode_homes or ():
+    for commandcode_home in (homes or {}).get("commandcode", ()):
         if not commandcode_home.is_dir():
             continue
         try:

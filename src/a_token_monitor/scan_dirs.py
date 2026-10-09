@@ -15,24 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-from .accounts import default_codex_home
-from .claude import default_claude_home, resolve_claude_homes
-from .commandcode import default_commandcode_home, resolve_commandcode_homes
-from .dsh import default_dsh_home, resolve_dsh_homes
-from .grok import default_grok_home, resolve_grok_homes
-from .kimi import default_kimi_home, resolve_kimi_homes
-from .local_agents import (
-    default_aider_home,
-    default_cursor_home,
-    default_gemini_home,
-    default_opencode_home,
-    default_qwen_home,
-    resolve_aider_homes,
-    resolve_cursor_homes,
-    resolve_gemini_homes,
-    resolve_opencode_homes,
-    resolve_qwen_homes,
-)
+# 中文注释：provider 元数据统一登记在 providers.py；这里重新导出原有名字。
+from .providers import PROVIDER_SPECS as PROVIDER_SPECS
+from .providers import ProviderSpec as ProviderSpec
+from .providers import _normalize, home_keys
 
 
 SCAN_DIRS_FILENAME = "scan-dirs.json"
@@ -43,147 +29,6 @@ _DENIED_HOME_SUBDIRS = (".ssh", ".gnupg", ".aws", ".kube")
 
 class ScanDirsError(ValueError):
     """扫描目录配置或校验失败。"""
-
-
-@dataclass(frozen=True)
-class ProviderSpec:
-    """一个 provider 的扫描目录元数据。"""
-
-    key: str
-    display_name: str
-    cli_option: str
-    # 中文注释:任一标记存在即认为目录符合该 provider 的结构。
-    markers: tuple[str, ...]
-    default_home: Callable[[], Path]
-    resolver: Callable[[Sequence[Path] | None], tuple[Path, ...]]
-
-
-def _resolve_codex_homes(homes: Sequence[Path] | None) -> tuple[Path, ...]:
-    """解析 Codex 登录目录;未传入时仅在默认目录存在时使用它。"""
-
-    if homes is None:
-        default_home = default_codex_home().expanduser()
-        return (default_home,) if default_home.exists() else ()
-    return _unique_normalized(homes)
-
-
-def _unique_normalized(paths: Sequence[Path]) -> tuple[Path, ...]:
-    """按传入顺序去重并规范化为稳定绝对路径。"""
-
-    result: list[Path] = []
-    seen: set[Path] = set()
-    for path in paths:
-        normalized = _normalize(path)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(normalized)
-    return tuple(result)
-
-
-def _normalize(path: Path) -> Path:
-    """展开用户目录并尽量生成稳定的绝对路径。"""
-
-    expanded = path.expanduser()
-    try:
-        return expanded.resolve()
-    except (OSError, RuntimeError):
-        return expanded.absolute()
-
-
-PROVIDER_SPECS: dict[str, ProviderSpec] = {
-    spec.key: spec
-    for spec in (
-        ProviderSpec(
-            key="codex",
-            display_name="Codex",
-            cli_option="--codex-home",
-            markers=("sessions", "auth.json"),
-            default_home=default_codex_home,
-            resolver=_resolve_codex_homes,
-        ),
-        ProviderSpec(
-            key="claude",
-            display_name="Claude Code",
-            cli_option="--claude-home",
-            markers=("projects",),
-            default_home=default_claude_home,
-            resolver=resolve_claude_homes,
-        ),
-        ProviderSpec(
-            key="commandcode",
-            display_name="Command Code",
-            cli_option="--commandcode-home",
-            markers=("projects", "auth.json"),
-            default_home=default_commandcode_home,
-            resolver=resolve_commandcode_homes,
-        ),
-        ProviderSpec(
-            key="dsh",
-            display_name="DeepSeek Harness",
-            cli_option="--dsh-home",
-            markers=("sessions", "storages"),
-            default_home=default_dsh_home,
-            resolver=resolve_dsh_homes,
-        ),
-        ProviderSpec(
-            key="grok",
-            display_name="Grok",
-            cli_option="--grok-home",
-            markers=("logs", "sessions", "auth.json"),
-            default_home=default_grok_home,
-            resolver=resolve_grok_homes,
-        ),
-        ProviderSpec(
-            key="kimi",
-            display_name="Kimi Code",
-            cli_option="--kimi-home",
-            markers=("sessions",),
-            default_home=default_kimi_home,
-            resolver=resolve_kimi_homes,
-        ),
-        ProviderSpec(
-            key="opencode",
-            display_name="OpenCode",
-            cli_option="--opencode-home",
-            markers=("opencode.db",),
-            default_home=default_opencode_home,
-            resolver=resolve_opencode_homes,
-        ),
-        ProviderSpec(
-            key="cursor",
-            display_name="Cursor",
-            cli_option="--cursor-home",
-            markers=("projects",),
-            default_home=default_cursor_home,
-            resolver=resolve_cursor_homes,
-        ),
-        ProviderSpec(
-            key="gemini",
-            display_name="Gemini CLI",
-            cli_option="--gemini-home",
-            markers=("tmp", "projects.json"),
-            default_home=default_gemini_home,
-            resolver=resolve_gemini_homes,
-        ),
-        ProviderSpec(
-            key="qwen",
-            display_name="Qwen Code",
-            cli_option="--qwen-home",
-            markers=("projects", "tmp"),
-            default_home=default_qwen_home,
-            resolver=resolve_qwen_homes,
-        ),
-        ProviderSpec(
-            key="aider",
-            display_name="Aider",
-            cli_option="--aider-home",
-            markers=(".aider.chat.history.md", "analytics.json"),
-            default_home=default_aider_home,
-            resolver=resolve_aider_homes,
-        ),
-    )
-}
 
 
 @dataclass(frozen=True)
@@ -440,6 +285,17 @@ class EffectiveScanDirs:
         """返回最终生效的目录列表。"""
 
         return self.state(provider).effective
+
+    def provider_homes(
+        self,
+        keys: Sequence[str] | None = None,
+    ) -> dict[str, tuple[Path, ...]]:
+        """返回除 Codex 外各 provider 的生效目录映射；``keys`` 可只取其中几个。"""
+
+        return {
+            key: self.homes(key)
+            for key in (home_keys() if keys is None else keys)
+        }
 
 
 def resolve_effective(

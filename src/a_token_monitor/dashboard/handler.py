@@ -9,7 +9,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from threading import Lock
-from typing import Any, ClassVar, Sequence
+from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
 from ..alerts import (
@@ -25,6 +25,7 @@ from ..housekeeping import (
     HousekeepingMonitor,
 )
 from ..health import HealthTracker, sanitize_error
+from ..providers import ProviderHomes, home_keys
 from ..registry import RegistryError
 from ..retention import HistoryDataManager, RetentionController, RetentionError
 from ..scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
@@ -132,11 +133,7 @@ class _DashboardContext:
             state = build_multi_dashboard_state(
                 registries,
                 account_metadata=metadata,
-                grok_homes=homes["grok"],
-                kimi_homes=homes["kimi"],
-                dsh_homes=homes["dsh"],
-                commandcode_homes=homes["commandcode"],
-                claude_homes=homes["claude"],
+                homes=homes,
                 budget_usd=self.budget_usd,
                 traffic=self.traffic_monitor.latest()
                 if self.traffic_monitor is not None
@@ -411,16 +408,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             alert,
             configured_alert_context_roots(
                 codex_sessions=tuple(codex_roots),
-                claude_homes=homes["claude"],
-                kimi_homes=homes["kimi"],
-                commandcode_homes=homes["commandcode"],
-                grok_homes=homes["grok"],
-                dsh_homes=homes["dsh"],
-                opencode_homes=homes.get("opencode", ()),
-                cursor_homes=homes.get("cursor", ()),
-                gemini_homes=homes.get("gemini", ()),
-                qwen_homes=homes.get("qwen", ()),
-                aider_homes=homes.get("aider", ()),
+                homes=homes,
             ),
             include_content=ctx.alert_context_content,
         )
@@ -1301,16 +1289,7 @@ def _make_handler(
     accounts: _AccountSet,
     logger: logging.Logger,
     usage_aggregator: UsageAggregator | None = None,
-    grok_homes: Sequence[Path] | None = None,
-    kimi_homes: Sequence[Path] | None = None,
-    dsh_homes: Sequence[Path] | None = None,
-    commandcode_homes: Sequence[Path] | None = None,
-    claude_homes: Sequence[Path] | None = None,
-    opencode_homes: Sequence[Path] | None = None,
-    cursor_homes: Sequence[Path] | None = None,
-    gemini_homes: Sequence[Path] | None = None,
-    qwen_homes: Sequence[Path] | None = None,
-    aider_homes: Sequence[Path] | None = None,
+    homes: ProviderHomes | None = None,
     budget_usd: float | None = None,
     alert_context_content: bool = False,
     traffic_monitor: TrafficMonitor | None = None,
@@ -1324,18 +1303,9 @@ def _make_handler(
 ) -> type[BaseHTTPRequestHandler]:
     """为一个 Dashboard 服务创建绑定了依赖的请求处理器类型。"""
 
-    accounts.update_homes({
-        "grok": grok_homes or (),
-        "kimi": kimi_homes or (),
-        "dsh": dsh_homes or (),
-        "commandcode": commandcode_homes or (),
-        "claude": claude_homes or (),
-        "opencode": opencode_homes or (),
-        "cursor": cursor_homes or (),
-        "gemini": gemini_homes or (),
-        "qwen": qwen_homes or (),
-        "aider": aider_homes or (),
-    })
+    accounts.update_homes(
+        {key: tuple((homes or {}).get(key, ())) for key in home_keys()}
+    )
     context = _DashboardContext(
         accounts=accounts,
         logger=logger,

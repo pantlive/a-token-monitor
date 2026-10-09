@@ -61,15 +61,17 @@ class ServiceTests(unittest.TestCase):
                 dashboard=False,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(),
-                kimi_homes=(root / ".kimi-code",),
+                provider_homes={
+                    "grok": (),
+                    "kimi": (root / ".kimi-code",),
+                },
             )
 
             config.save()
             loaded = ServiceConfig.load(config.config_path)
 
             self.assertEqual(loaded, config)
-            self.assertEqual(loaded.kimi_homes, (root / ".kimi-code",))
+            self.assertEqual(loaded.provider_homes["kimi"], (root / ".kimi-code",))
 
     def test_config_round_trip_with_commandcode_homes(self) -> None:
         """Command Code 数据目录应随服务配置完整往返。"""
@@ -88,8 +90,10 @@ class ServiceTests(unittest.TestCase):
                 dashboard=False,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(),
-                commandcode_homes=(root / ".commandcode",),
+                provider_homes={
+                    "grok": (),
+                    "commandcode": (root / ".commandcode",),
+                },
             )
 
             config.save()
@@ -97,7 +101,7 @@ class ServiceTests(unittest.TestCase):
 
             self.assertEqual(loaded, config)
             self.assertEqual(
-                loaded.commandcode_homes,
+                loaded.provider_homes["commandcode"],
                 (root / ".commandcode",),
             )
 
@@ -117,7 +121,7 @@ class ServiceTests(unittest.TestCase):
 
             loaded = ServiceConfig.load(config.config_path)
 
-            self.assertEqual(loaded.commandcode_homes, ())
+            self.assertEqual(loaded.provider_homes["commandcode"], ())
 
     def test_legacy_config_without_kimi_homes_loads(self) -> None:
         """缺少 kimi_homes 键的旧配置应加载为空列表。"""
@@ -135,7 +139,7 @@ class ServiceTests(unittest.TestCase):
 
             loaded = ServiceConfig.load(config.config_path)
 
-            self.assertEqual(loaded.kimi_homes, ())
+            self.assertEqual(loaded.provider_homes["kimi"], ())
 
     def test_config_round_trip_with_budget(self) -> None:
         """月度预算应随服务配置完整往返。"""
@@ -154,7 +158,9 @@ class ServiceTests(unittest.TestCase):
                 dashboard=True,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(),
+                provider_homes={
+                    "grok": (),
+                },
                 budget_usd=99.5,
             )
 
@@ -225,7 +231,9 @@ class ServiceTests(unittest.TestCase):
                     dashboard=False,
                     dashboard_host="127.0.0.1",
                     dashboard_port=8765,
-                    grok_homes=(),
+                    provider_homes={
+                        "grok": (),
+                    },
                     budget_usd=0,
                 )
 
@@ -246,7 +254,9 @@ class ServiceTests(unittest.TestCase):
                 dashboard=False,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(),
+                provider_homes={
+                    "grok": (),
+                },
                 usage_retention_days=45.0,
                 session_retention_days=7.5,
             )
@@ -311,7 +321,9 @@ class ServiceTests(unittest.TestCase):
                             dashboard=False,
                             dashboard_host="127.0.0.1",
                             dashboard_port=8765,
-                            grok_homes=(),
+                            provider_homes={
+                                "grok": (),
+                            },
                             **{field: value},
                         )
 
@@ -505,11 +517,13 @@ class ServiceTests(unittest.TestCase):
                 dashboard=True,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(),
-                kimi_homes=(),
-                dsh_homes=(),
-                commandcode_homes=(),
-                claude_homes=(),
+                provider_homes={
+                    "grok": (),
+                    "kimi": (),
+                    "dsh": (),
+                    "commandcode": (),
+                    "claude": (),
+                },
             )
 
             config.save()
@@ -547,7 +561,9 @@ class ServiceTests(unittest.TestCase):
                 dashboard=False,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(persisted_grok,),
+                provider_homes={
+                    "grok": (persisted_grok,),
+                },
             )
             config.save()
             ScanDirsConfig(overrides={"grok": (web_grok,)}).save(
@@ -556,7 +572,7 @@ class ServiceTests(unittest.TestCase):
 
             monitor = config.build_monitor()
             try:
-                grok_homes = monitor.grok_homes
+                grok_homes = monitor.homes["grok"]
             finally:
                 monitor.close()
 
@@ -581,14 +597,16 @@ class ServiceTests(unittest.TestCase):
                 dashboard=False,
                 dashboard_host="127.0.0.1",
                 dashboard_port=8765,
-                grok_homes=(),
+                provider_homes={
+                    "grok": (),
+                },
             )
             config.save()
 
             with patch.dict(os.environ, {"GROK_HOME": str(grok_home)}):
                 monitor = config.build_monitor()
                 try:
-                    grok_homes = monitor.grok_homes
+                    grok_homes = monitor.homes["grok"]
                 finally:
                     monitor.close()
 
@@ -625,7 +643,9 @@ class ServiceTests(unittest.TestCase):
             dashboard=True,
             dashboard_host="0.0.0.0",
             dashboard_port=8765,
-            grok_homes=(),
+            provider_homes={
+                "grok": (),
+            },
         )
 
 

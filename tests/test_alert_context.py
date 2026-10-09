@@ -1374,11 +1374,13 @@ class AlertContextCacheTests(unittest.TestCase):
         from a_token_monitor.alert_context import configured_alert_context_roots
 
         roots = configured_alert_context_roots(
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(),
-            aider_homes=(),
+            homes={
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
         )
         self.assertEqual(roots.opencode_dbs, ())
         self.assertEqual(roots.cursor_projects, ())

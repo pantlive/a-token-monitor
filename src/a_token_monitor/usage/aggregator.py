@@ -7,35 +7,22 @@ import threading
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping
 
-from ..commandcode import (
-    resolve_commandcode_homes,
-)
 from ..grok import (
     GrokSessionInfo,
-    resolve_grok_homes,
-)
-from ..dsh import (
-    resolve_dsh_homes,
-)
-from ..claude import (
-    resolve_claude_homes,
 )
 from ..health import sanitize_error
 from ..kimi import (
     KimiSessionInfo,
-    resolve_kimi_homes,
-)
-from ..local_agents import (
-    resolve_aider_homes,
-    resolve_cursor_homes,
-    resolve_gemini_homes,
-    resolve_opencode_homes,
-    resolve_qwen_homes,
 )
 from ..registry import MultiSessionRegistry
 from ..local_time import local_day_key, local_day_start, to_local
+from ..providers import (
+    ProviderHomesInput,
+    resolve_provider_homes,
+    update_provider_homes,
+)
 from .aggregates import (
     _ConversationMetrics,
     _FileRollup,
@@ -95,16 +82,7 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         cache_path: Path | None = None,
         background_indexing: bool = False,
         index_bytes_per_sec: int = _DEFAULT_INDEX_BYTES_PER_SEC,
-        grok_homes: Sequence[Path] | None = None,
-        kimi_homes: Sequence[Path] | None = None,
-        dsh_homes: Sequence[Path] | None = None,
-        claude_homes: Sequence[Path] | None = None,
-        commandcode_homes: Sequence[Path] | None = None,
-        opencode_homes: Sequence[Path] | None = None,
-        cursor_homes: Sequence[Path] | None = None,
-        gemini_homes: Sequence[Path] | None = None,
-        qwen_homes: Sequence[Path] | None = None,
-        aider_homes: Sequence[Path] | None = None,
+        homes: ProviderHomesInput | None = None,
     ) -> None:
         """创建有刷新间隔、持久化检查点和单轮磁盘预算的用量缓存。"""
 
@@ -121,43 +99,14 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         self.read_budget_bytes = read_budget_bytes
         self.background_indexing = background_indexing
         self.index_bytes_per_sec = index_bytes_per_sec
-        self._grok_homes = (
-            resolve_grok_homes(grok_homes) if grok_homes is not None else ()
-        )
+        # 中文注释：聚合器里未给出的 provider 一律不扫描，避免单测把本机数据读进来；
+        # 监控进程要自动探测时先 resolve，再把结果映射传进来。
+        self._homes = resolve_provider_homes(homes, auto_detect=False)
         self._grok_sessions: dict[Path, dict[str, GrokSessionInfo]] = {}
         self._grok_sessions_at: dict[Path, float] = {}
-        self._kimi_homes = (
-            resolve_kimi_homes(kimi_homes) if kimi_homes is not None else ()
-        )
         self._kimi_sessions: dict[Path, dict[str, KimiSessionInfo]] = {}
         self._kimi_sessions_at: dict[Path, float] = {}
-        self._dsh_homes = (
-            resolve_dsh_homes(dsh_homes) if dsh_homes is not None else ()
-        )
-        self._claude_homes = (
-            resolve_claude_homes(claude_homes) if claude_homes is not None else ()
-        )
         self._claude_sidechain_cache: dict[Path, tuple[float, bool]] = {}
-        self._commandcode_homes = resolve_commandcode_homes(commandcode_homes or ())
-        # 中文注释：聚合器的 None 表示不扫描，避免单测把本机 OpenCode 库读进来。
-        # 监控进程要自动探测时先 resolve，再把结果元组传进来。
-        self._opencode_homes = (
-            resolve_opencode_homes(opencode_homes)
-            if opencode_homes is not None
-            else ()
-        )
-        self._cursor_homes = (
-            resolve_cursor_homes(cursor_homes) if cursor_homes is not None else ()
-        )
-        self._gemini_homes = (
-            resolve_gemini_homes(gemini_homes) if gemini_homes is not None else ()
-        )
-        self._qwen_homes = (
-            resolve_qwen_homes(qwen_homes) if qwen_homes is not None else ()
-        )
-        self._aider_homes = (
-            resolve_aider_homes(aider_homes) if aider_homes is not None else ()
-        )
         self._chat_partial: dict[Path, tuple[Any, ...]] = {}
         self._cache: dict[Path, _CachedFile] = {}
         self._rollups: dict[Path, _FileRollup] = {}
@@ -247,21 +196,8 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         if worker is not None and worker.is_alive():
             worker.join(timeout=2)
 
-    def update_homes(
-        self,
-        *,
-        grok_homes: Sequence[Path] | None = None,
-        kimi_homes: Sequence[Path] | None = None,
-        dsh_homes: Sequence[Path] | None = None,
-        claude_homes: Sequence[Path] | None = None,
-        commandcode_homes: Sequence[Path] | None = None,
-        opencode_homes: Sequence[Path] | None = None,
-        cursor_homes: Sequence[Path] | None = None,
-        gemini_homes: Sequence[Path] | None = None,
-        qwen_homes: Sequence[Path] | None = None,
-        aider_homes: Sequence[Path] | None = None,
-    ) -> None:
-        """热更新各 provider 的扫描目录；None 保持不变，显式元组（含空）替换。
+    def update_homes(self, homes: ProviderHomesInput) -> None:
+        """热更新各 provider 的扫描目录；未给出或 None 保持不变，显式元组（含空）替换。
 
         只替换实例属性，下一轮 ``_index_once``/``_build_sources`` 自动按新目录
         建源；被移除目录的内存缓存和索引行由 ``_remove_stale_cache`` 和
@@ -269,51 +205,34 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         """
 
         with self._lock:
-            if commandcode_homes is not None:
-                self._commandcode_homes = resolve_commandcode_homes(commandcode_homes)
-            if grok_homes is not None:
-                self._grok_homes = resolve_grok_homes(grok_homes)
-                self._grok_sessions = {
-                    home: index
-                    for home, index in self._grok_sessions.items()
-                    if home in self._grok_homes
-                }
-                self._grok_sessions_at = {
-                    home: cached_at
-                    for home, cached_at in self._grok_sessions_at.items()
-                    if home in self._grok_homes
-                }
-            if kimi_homes is not None:
-                self._kimi_homes = resolve_kimi_homes(kimi_homes)
-                self._kimi_sessions = {
-                    home: index
-                    for home, index in self._kimi_sessions.items()
-                    if home in self._kimi_homes
-                }
-                self._kimi_sessions_at = {
-                    home: cached_at
-                    for home, cached_at in self._kimi_sessions_at.items()
-                    if home in self._kimi_homes
-                }
-            if dsh_homes is not None:
-                self._dsh_homes = resolve_dsh_homes(dsh_homes)
-            if claude_homes is not None:
-                self._claude_homes = resolve_claude_homes(claude_homes)
-                self._claude_sidechain_cache = {
-                    home: cached
-                    for home, cached in self._claude_sidechain_cache.items()
-                    if home in self._claude_homes
-                }
-            if opencode_homes is not None:
-                self._opencode_homes = resolve_opencode_homes(opencode_homes)
-            if cursor_homes is not None:
-                self._cursor_homes = resolve_cursor_homes(cursor_homes)
-            if gemini_homes is not None:
-                self._gemini_homes = resolve_gemini_homes(gemini_homes)
-            if qwen_homes is not None:
-                self._qwen_homes = resolve_qwen_homes(qwen_homes)
-            if aider_homes is not None:
-                self._aider_homes = resolve_aider_homes(aider_homes)
+            self._homes = update_provider_homes(self._homes, homes)
+            grok_homes = self._homes["grok"]
+            self._grok_sessions = {
+                home: index
+                for home, index in self._grok_sessions.items()
+                if home in grok_homes
+            }
+            self._grok_sessions_at = {
+                home: cached_at
+                for home, cached_at in self._grok_sessions_at.items()
+                if home in grok_homes
+            }
+            kimi_homes = self._homes["kimi"]
+            self._kimi_sessions = {
+                home: index
+                for home, index in self._kimi_sessions.items()
+                if home in kimi_homes
+            }
+            self._kimi_sessions_at = {
+                home: cached_at
+                for home, cached_at in self._kimi_sessions_at.items()
+                if home in kimi_homes
+            }
+            self._claude_sidechain_cache = {
+                home: cached
+                for home, cached in self._claude_sidechain_cache.items()
+                if home in self._homes["claude"]
+            }
             # 中文注释：目录变化后立即丢弃展示缓存，不能继续显示旧账号或旧筛选项。
             with self._snapshot_lock:
                 self._snapshot_scope = None

@@ -39,7 +39,9 @@ class KimiUsageTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             aggregator = UsageAggregator(
                 discovery_interval=0.01,
-                kimi_homes=(kimi_home,),
+                homes={
+                    "kimi": (kimi_home,),
+                },
             )
 
             state = aggregator.snapshot({"codex": registry}, now=1789708700.0)
@@ -219,7 +221,9 @@ class KimiUsageTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             aggregator = UsageAggregator(
                 discovery_interval=0.01,
-                kimi_homes=(kimi_home,),
+                homes={
+                    "kimi": (kimi_home,),
+                },
             )
 
             state = aggregator.snapshot({"codex": registry}, now=1789708700.0)

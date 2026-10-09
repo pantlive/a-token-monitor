@@ -28,11 +28,6 @@ from .alerts import StoredAlert
 from .alert_activity import describe_tool_activity, describe_user_text
 from .local_agents import (
     opencode_db_path,
-    resolve_aider_homes,
-    resolve_cursor_homes,
-    resolve_gemini_homes,
-    resolve_opencode_homes,
-    resolve_qwen_homes,
 )
 from .commandcode import (
     _commandcode_project_dir,
@@ -298,18 +293,7 @@ def _dispatch_extract(
         return _extract_opencode(
             candidate.path, start, end, candidate.session_id or ""
         )
-    extractor = {
-        "codex": _extract_codex,
-        "claude": _extract_claude,
-        "kimi": _extract_kimi,
-        "command-code": _extract_commandcode,
-        "grok": _extract_grok,
-        "dsh": _extract_dsh,
-        "cursor": _extract_cursor,
-        "gemini": _extract_gemini,
-        "qwen": _extract_qwen,
-        "aider": _extract_aider,
-    }[product]
+    extractor = _EXTRACTORS[product]
     return extractor(candidate.path, start, end)
 
 
@@ -2955,19 +2939,26 @@ def _existing_homes(homes: Sequence[Path]) -> tuple[Path, ...]:
 def configured_alert_context_roots(
     *,
     codex_sessions: Sequence[Path] = (),
-    claude_homes: Sequence[Path] = (),
-    kimi_homes: Sequence[Path] = (),
-    commandcode_homes: Sequence[Path] = (),
-    grok_homes: Sequence[Path] = (),
-    dsh_homes: Sequence[Path] = (),
-    opencode_homes: Sequence[Path] | None = None,
-    cursor_homes: Sequence[Path] | None = None,
-    gemini_homes: Sequence[Path] | None = None,
-    qwen_homes: Sequence[Path] | None = None,
-    aider_homes: Sequence[Path] | None = None,
+    homes: Mapping[str, Sequence[Path] | None] | None = None,
 ) -> AlertContextRoots:
-    """已配置的产品只用传入的目录；参数为 None 时才看本机默认位置。"""
+    """按 provider 目录映射生成告警详情的会话根目录。
 
+    已配置的产品只用传入的目录。映射里没有（或为 None）的产品：Claude Code、
+    Kimi、Command Code、Grok、DSH 不扫描；OpenCode、Cursor、Gemini、Qwen、Aider
+    看本机默认位置。
+    """
+
+    given = homes or {}
+    claude_homes = given.get("claude") or ()
+    kimi_homes = given.get("kimi") or ()
+    commandcode_homes = given.get("commandcode") or ()
+    grok_homes = given.get("grok") or ()
+    dsh_homes = given.get("dsh") or ()
+    opencode_homes = given.get("opencode")
+    cursor_homes = given.get("cursor")
+    gemini_homes = given.get("gemini")
+    qwen_homes = given.get("qwen")
+    aider_homes = given.get("aider")
     return AlertContextRoots(
         codex_sessions=tuple(codex_sessions),
         claude_projects=tuple(Path(home) / "projects" for home in claude_homes),
@@ -3008,24 +2999,26 @@ def configured_alert_context_roots(
 def default_alert_context_roots() -> AlertContextRoots:
     """命令行使用各产品的默认数据目录；目录不存在就不扫。"""
 
-    from .claude import resolve_claude_homes
-    from .commandcode import resolve_commandcode_homes
     from .discovery import default_session_root
-    from .dsh import resolve_dsh_homes
-    from .grok import resolve_grok_homes
-    from .kimi import resolve_kimi_homes
+    from .providers import resolve_provider_homes
 
     codex = default_session_root()
     return configured_alert_context_roots(
         codex_sessions=(codex,) if codex.is_dir() else (),
-        claude_homes=resolve_claude_homes(),
-        kimi_homes=resolve_kimi_homes(),
-        commandcode_homes=resolve_commandcode_homes(),
-        grok_homes=resolve_grok_homes(),
-        dsh_homes=resolve_dsh_homes(),
-        opencode_homes=resolve_opencode_homes(),
-        cursor_homes=resolve_cursor_homes(),
-        gemini_homes=resolve_gemini_homes(),
-        qwen_homes=resolve_qwen_homes(),
-        aider_homes=resolve_aider_homes(),
+        homes=resolve_provider_homes(None, auto_detect=True),
     )
+
+
+# 中文注释：按产品分派的会话文件解析器；OpenCode 的会话在 SQLite 里，单独处理。
+_EXTRACTORS: dict[str, Callable[[Path, float, float], _Extraction]] = {
+    "codex": _extract_codex,
+    "claude": _extract_claude,
+    "kimi": _extract_kimi,
+    "command-code": _extract_commandcode,
+    "grok": _extract_grok,
+    "dsh": _extract_dsh,
+    "cursor": _extract_cursor,
+    "gemini": _extract_gemini,
+    "qwen": _extract_qwen,
+    "aider": _extract_aider,
+}

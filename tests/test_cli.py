@@ -1541,13 +1541,13 @@ class CliTests(unittest.TestCase):
             kwargs = monitor_class.call_args.kwargs
 
         self.assertIs(monitor, monitor_class.return_value)
-        self.assertEqual(kwargs["grok_homes"], (web_grok,))
+        self.assertEqual(kwargs["homes"]["grok"], (web_grok,))
         self.assertEqual(kwargs["accounts"], ())
         # 没有覆盖也没有命令行参数的 provider 传 None，保留自动探测。
-        self.assertIsNone(kwargs["kimi_homes"])
-        self.assertIsNone(kwargs["dsh_homes"])
-        self.assertIsNone(kwargs["commandcode_homes"])
-        self.assertIsNone(kwargs["claude_homes"])
+        self.assertIsNone(kwargs["homes"]["kimi"])
+        self.assertIsNone(kwargs["homes"]["dsh"])
+        self.assertIsNone(kwargs["homes"]["commandcode"])
+        self.assertIsNone(kwargs["homes"]["claude"])
         self.assertIsInstance(
             kwargs["scan_dirs_controller"],
             ScanDirsController,
@@ -1584,7 +1584,7 @@ class CliTests(unittest.TestCase):
                 _monitor(args)
             kwargs = monitor_class.call_args.kwargs
 
-        self.assertEqual(kwargs["grok_homes"], (cli_grok,))
+        self.assertEqual(kwargs["homes"]["grok"], (cli_grok,))
         self.assertIsInstance(
             kwargs["scan_dirs_controller"],
             ScanDirsController,

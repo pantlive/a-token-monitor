@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 from threading import Thread
-from typing import Mapping, Sequence
+from typing import Mapping
 
 from ..alerts import (
     TrafficAlertStore,
@@ -15,28 +14,11 @@ from ..alerts import (
 from ..housekeeping import (
     HousekeepingMonitor,
 )
-from ..claude import (
-    resolve_claude_homes,
-)
-from ..commandcode import (
-    resolve_commandcode_homes,
-)
-from ..dsh import (
-    resolve_dsh_homes,
-)
-from ..grok import (
-    resolve_grok_homes,
-)
 from ..health import HealthTracker
-from ..kimi import (
-    resolve_kimi_homes,
-)
-from ..local_agents import (
-    resolve_aider_homes,
-    resolve_cursor_homes,
-    resolve_gemini_homes,
-    resolve_opencode_homes,
-    resolve_qwen_homes,
+from ..providers import (
+    ProviderHomesInput,
+    resolve_provider_homes,
+    update_provider_homes,
 )
 from ..registry import MultiSessionRegistry
 from ..retention import HistoryDataManager, RetentionController
@@ -98,16 +80,7 @@ class DashboardServer:
         registries: Mapping[str, MultiSessionRegistry] | None = None,
         account_metadata: Mapping[str, Mapping[str, str | None]] | None = None,
         usage_aggregator: UsageAggregator | None = None,
-        grok_homes: Sequence[Path] | None = None,
-        kimi_homes: Sequence[Path] | None = None,
-        dsh_homes: Sequence[Path] | None = None,
-        commandcode_homes: Sequence[Path] | None = None,
-        claude_homes: Sequence[Path] | None = None,
-        opencode_homes: Sequence[Path] | None = None,
-        cursor_homes: Sequence[Path] | None = None,
-        gemini_homes: Sequence[Path] | None = None,
-        qwen_homes: Sequence[Path] | None = None,
-        aider_homes: Sequence[Path] | None = None,
+        homes: ProviderHomesInput | None = None,
         traffic_monitor: TrafficMonitor | None = None,
         alert_store: TrafficAlertStore | None = None,
         housekeeping: HousekeepingMonitor | None = None,
@@ -128,16 +101,8 @@ class DashboardServer:
         self.registry = next(iter(self.registries.values()), None)
         self.config = config or DashboardConfig()
         self.logger = logger or logging.getLogger(__name__)
-        self.grok_homes = resolve_grok_homes(grok_homes)
-        self.kimi_homes = resolve_kimi_homes(kimi_homes)
-        self.dsh_homes = resolve_dsh_homes(dsh_homes)
-        self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
-        self.claude_homes = resolve_claude_homes(claude_homes)
-        self.opencode_homes = resolve_opencode_homes(opencode_homes)
-        self.cursor_homes = resolve_cursor_homes(cursor_homes)
-        self.gemini_homes = resolve_gemini_homes(gemini_homes)
-        self.qwen_homes = resolve_qwen_homes(qwen_homes)
-        self.aider_homes = resolve_aider_homes(aider_homes)
+        # 中文注释：未给出的 provider 自动探测本机默认目录。
+        self.homes = resolve_provider_homes(homes, auto_detect=True)
         self.traffic_monitor = traffic_monitor
         self.alert_store = alert_store
         self.housekeeping = housekeeping
@@ -146,18 +111,7 @@ class DashboardServer:
         self.history = history
         self.retention = retention
         self.session_thresholds = session_thresholds or SessionSwitchThresholds()
-        self.usage_aggregator = usage_aggregator or UsageAggregator(
-            grok_homes=self.grok_homes,
-            kimi_homes=self.kimi_homes,
-            dsh_homes=self.dsh_homes,
-            claude_homes=self.claude_homes,
-            commandcode_homes=self.commandcode_homes,
-            opencode_homes=self.opencode_homes,
-            cursor_homes=self.cursor_homes,
-            gemini_homes=self.gemini_homes,
-            qwen_homes=self.qwen_homes,
-            aider_homes=self.aider_homes,
-        )
+        self.usage_aggregator = usage_aggregator or UsageAggregator(homes=self.homes)
         # 中文注释：handler 闭包只持有这个容器；扫描目录变化导致账号增减时
         # 由 update_accounts 热替换内容，无需重启 HTTP 服务。
         self._accounts = _AccountSet(self.registries, self.account_metadata)
@@ -194,16 +148,7 @@ class DashboardServer:
             self._accounts,
             self.logger,
             self.usage_aggregator,
-            self.grok_homes,
-            self.kimi_homes,
-            self.dsh_homes,
-            self.commandcode_homes,
-            self.claude_homes,
-            self.opencode_homes,
-            self.cursor_homes,
-            self.gemini_homes,
-            self.qwen_homes,
-            self.aider_homes,
+            homes=self.homes,
             budget_usd=self.config.budget_usd,
             alert_context_content=self.config.alert_context_content,
             traffic_monitor=self.traffic_monitor,
@@ -227,63 +172,15 @@ class DashboardServer:
         )
         self._thread.start()
 
-    def update_homes(
-        self,
-        *,
-        grok_homes: Sequence[Path],
-        kimi_homes: Sequence[Path],
-        dsh_homes: Sequence[Path],
-        commandcode_homes: Sequence[Path],
-        claude_homes: Sequence[Path],
-        opencode_homes: Sequence[Path] | None = None,
-        cursor_homes: Sequence[Path] | None = None,
-        gemini_homes: Sequence[Path] | None = None,
-        qwen_homes: Sequence[Path] | None = None,
-        aider_homes: Sequence[Path] | None = None,
-    ) -> None:
-        """热更新额度、活动会话和告警详情请求使用的数据目录。"""
+    def update_homes(self, homes: ProviderHomesInput) -> None:
+        """热更新额度、活动会话和告警详情请求使用的数据目录。
 
-        self.grok_homes = resolve_grok_homes(grok_homes)
-        self.kimi_homes = resolve_kimi_homes(kimi_homes)
-        self.dsh_homes = resolve_dsh_homes(dsh_homes)
-        self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
-        self.claude_homes = resolve_claude_homes(claude_homes)
-        if opencode_homes is not None:
-            self.opencode_homes = resolve_opencode_homes(opencode_homes)
-        if cursor_homes is not None:
-            self.cursor_homes = resolve_cursor_homes(cursor_homes)
-        if gemini_homes is not None:
-            self.gemini_homes = resolve_gemini_homes(gemini_homes)
-        if qwen_homes is not None:
-            self.qwen_homes = resolve_qwen_homes(qwen_homes)
-        if aider_homes is not None:
-            self.aider_homes = resolve_aider_homes(aider_homes)
-        self.usage_aggregator.update_homes(
-            opencode_homes=self.opencode_homes,
-            cursor_homes=self.cursor_homes,
-            gemini_homes=self.gemini_homes,
-            qwen_homes=self.qwen_homes,
-            aider_homes=self.aider_homes,
-            grok_homes=self.grok_homes,
-            kimi_homes=self.kimi_homes,
-            dsh_homes=self.dsh_homes,
-            claude_homes=self.claude_homes,
-            commandcode_homes=self.commandcode_homes,
-        )
-        self._accounts.update_homes(
-            {
-                "grok": self.grok_homes,
-                "kimi": self.kimi_homes,
-                "dsh": self.dsh_homes,
-                "commandcode": self.commandcode_homes,
-                "claude": self.claude_homes,
-                "opencode": self.opencode_homes,
-                "cursor": self.cursor_homes,
-                "gemini": self.gemini_homes,
-                "qwen": self.qwen_homes,
-                "aider": self.aider_homes,
-            }
-        )
+        给出的 provider（含空元组）替换，未给出或 None 的保持不变。
+        """
+
+        self.homes = update_provider_homes(self.homes, homes)
+        self.usage_aggregator.update_homes(self.homes)
+        self._accounts.update_homes(self.homes)
 
     def close(self) -> None:
         """停止 HTTP 服务并等待请求线程退出。"""

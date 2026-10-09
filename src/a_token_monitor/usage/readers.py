@@ -75,11 +75,11 @@ class _FileReaderMixin:
         if kimi_home is not None:
             return self._read_kimi_wire(path, kimi_home, maximum_bytes)
 
-        dsh_home = dsh_projcache_home(path, self._dsh_homes)
+        dsh_home = dsh_projcache_home(path, self._homes["dsh"])
         if dsh_home is not None:
             return self._read_dsh_projcache(path, maximum_bytes)
 
-        if claude_home_for(path, self._claude_homes) is not None:
+        if claude_home_for(path, self._homes["claude"]) is not None:
             return self._read_claude_transcript(path, maximum_bytes)
 
         if self._opencode_home_for(path) is not None:
@@ -123,7 +123,7 @@ class _FileReaderMixin:
                 offset=cached.next_offset,
                 state=cached.state,
                 maximum_bytes=maximum_bytes,
-                commandcode=commandcode_home_for(path, self._commandcode_homes)
+                commandcode=commandcode_home_for(path, self._homes["commandcode"])
                 is not None,
             )
             cached_file = _CachedFile(
@@ -144,7 +144,7 @@ class _FileReaderMixin:
                     previous_timestamp=stat_result.st_mtime,
                 ),
                 maximum_bytes=maximum_bytes,
-                commandcode=commandcode_home_for(path, self._commandcode_homes)
+                commandcode=commandcode_home_for(path, self._homes["commandcode"])
                 is not None,
             )
             cached_file = _CachedFile(
@@ -188,7 +188,7 @@ class _FileReaderMixin:
         return paths
 
     def _aider_home_for(self, path: Path) -> Path | None:
-        for home in self._aider_homes:
+        for home in self._homes["aider"]:
             if path == home / ".aider.chat.history.md":
                 return home
         return None
@@ -278,17 +278,17 @@ class _FileReaderMixin:
         return cached_file
 
     def _opencode_home_for(self, path: Path) -> Path | None:
-        for home in self._opencode_homes:
+        for home in self._homes["opencode"]:
             if path == opencode_db_path(home):
                 return home
         return None
 
     def _chat_product_for(self, path: Path) -> str | None:
-        if _path_under(path, self._cursor_homes) and "agent-transcripts" in path.parts:
+        if _path_under(path, self._homes["cursor"]) and "agent-transcripts" in path.parts:
             return "cursor"
-        if _path_under(path, self._gemini_homes):
+        if _path_under(path, self._homes["gemini"]):
             return "gemini"
-        if _path_under(path, self._qwen_homes):
+        if _path_under(path, self._homes["qwen"]):
             return "qwen"
         return None
 
@@ -358,11 +358,11 @@ class _FileReaderMixin:
             return unchanged
         home = _owning_home(
             path,
-            self._cursor_homes
+            self._homes["cursor"]
             if product == "cursor"
-            else self._gemini_homes
+            else self._homes["gemini"]
             if product == "gemini"
-            else self._qwen_homes,
+            else self._homes["qwen"],
         )
         project = (
             chat_project(home, path, product=product) if home is not None else None
@@ -504,7 +504,7 @@ class _FileReaderMixin:
     def _grok_home_for_log(self, path: Path) -> Path | None:
         """判断路径是否为某个 GROK_HOME 的统一用量日志。"""
 
-        for home in self._grok_homes:
+        for home in self._homes["grok"]:
             if path == grok_unified_log(home):
                 return home
         return None
@@ -645,7 +645,7 @@ class _FileReaderMixin:
 
         if path.name != "wire.jsonl":
             return None
-        for home in self._kimi_homes:
+        for home in self._homes["kimi"]:
             try:
                 if path.is_relative_to(home / "sessions"):
                     return home

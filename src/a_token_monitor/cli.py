@@ -75,6 +75,7 @@ from .multi_models import (
     session_view,
 )
 from .models import JobState
+from .providers import PROVIDER_SPECS, home_keys, home_providers
 from .registry import MultiSessionRegistry, RegistryError
 from .quota import (
     QuotaSnapshot,
@@ -203,114 +204,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=default_state_dir(),
         help="状态和日志目录（默认: ~/.a-token-monitor）",
     )
-    parser.add_argument(
-        "--codex-home",
-        dest="codex_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Codex 登录目录，可重复传入多个账号（默认: ~/.codex；例如 ~/.codex-work）"
-        ),
-    )
-    parser.add_argument(
-        "--grok-home",
-        dest="grok_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Grok 登录目录，可重复传入；默认在存在时使用 ~/.grok 或 GROK_HOME"
-        ),
-    )
-    parser.add_argument(
-        "--kimi-home",
-        dest="kimi_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Kimi Code 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.kimi-code 或 KIMI_CODE_HOME"
-        ),
-    )
-    parser.add_argument(
-        "--dsh-home",
-        dest="dsh_homes",
-        type=Path,
-        action="append",
-        help=(
-            "DeepSeek Harness 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.dsh 或 DSH_HOME"
-        ),
-    )
-    parser.add_argument(
-        "--claude-home",
-        dest="claude_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Claude Code 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.claude 或 CLAUDE_CONFIG_DIR"
-        ),
-    )
-    parser.add_argument(
-        "--commandcode-home",
-        dest="commandcode_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Command Code 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.commandcode 或 COMMANDCODE_HOME"
-        ),
-    )
-    parser.add_argument(
-        "--opencode-home",
-        dest="opencode_homes",
-        type=Path,
-        action="append",
-        help=(
-            "OpenCode 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.local/share/opencode 或 OPENCODE_DB"
-        ),
-    )
-    parser.add_argument(
-        "--cursor-home",
-        dest="cursor_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Cursor 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.cursor 或 CURSOR_CONFIG_DIR"
-        ),
-    )
-    parser.add_argument(
-        "--gemini-home",
-        dest="gemini_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Gemini CLI 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.gemini 或 GEMINI_CLI_HOME"
-        ),
-    )
-    parser.add_argument(
-        "--qwen-home",
-        dest="qwen_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Qwen Code 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.qwen、QWEN_HOME 或 QWEN_CODE_HOME"
-        ),
-    )
-    parser.add_argument(
-        "--aider-home",
-        dest="aider_homes",
-        type=Path,
-        action="append",
-        help=(
-            "Aider 数据目录，可重复传入；"
-            "默认在存在时使用 ~/.aider 或 AIDER_HOME"
-        ),
-    )
+    for spec in PROVIDER_SPECS.values():
+        parser.add_argument(
+            spec.cli_option,
+            dest=spec.homes_field,
+            type=Path,
+            action="append",
+            help=spec.cli_help,
+        )
     parser.add_argument(
         "--session-root",
         type=Path,
@@ -920,6 +821,18 @@ def _add_upload_threshold_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# 中文注释：会话视图与用量检索命令扫描的 provider（不含 Grok / Kimi / DSH）。
+_SESSION_USAGE_PROVIDERS = (
+    "claude",
+    "commandcode",
+    "opencode",
+    "cursor",
+    "gemini",
+    "qwen",
+    "aider",
+)
+
+
 def _accounts(args: argparse.Namespace) -> tuple[CodexAccount, ...]:
     """把 CLI 参数解析为独立的 Codex 账号配置。"""
 
@@ -934,17 +847,8 @@ def _cli_scan_homes(args: argparse.Namespace) -> dict[str, Sequence[Path] | None
     """从 CLI 参数收集各 provider 数据目录；未传入时为 None。"""
 
     return {
-        "codex": getattr(args, "codex_homes", None),
-        "claude": getattr(args, "claude_homes", None),
-        "commandcode": getattr(args, "commandcode_homes", None),
-        "dsh": getattr(args, "dsh_homes", None),
-        "grok": getattr(args, "grok_homes", None),
-        "kimi": getattr(args, "kimi_homes", None),
-        "opencode": getattr(args, "opencode_homes", None),
-        "cursor": getattr(args, "cursor_homes", None),
-        "gemini": getattr(args, "gemini_homes", None),
-        "qwen": getattr(args, "qwen_homes", None),
-        "aider": getattr(args, "aider_homes", None),
+        spec.key: getattr(args, spec.homes_field, None)
+        for spec in PROVIDER_SPECS.values()
     }
 
 
@@ -1501,11 +1405,7 @@ def _show_sessions(args: argparse.Namespace) -> int:
             session_turn_warn=args.session_turn_warn,
             session_context_warn_tokens=args.session_context_warn_tokens,
         ),
-        grok_homes=effective_dirs.homes("grok"),
-        kimi_homes=effective_dirs.homes("kimi"),
-        dsh_homes=effective_dirs.homes("dsh"),
-        commandcode_homes=effective_dirs.homes("commandcode"),
-        claude_homes=effective_dirs.homes("claude"),
+        homes=effective_dirs.provider_homes(("grok", "kimi", "dsh", "commandcode", "claude")),
     )
     try:
         monitor.start()
@@ -1688,13 +1588,8 @@ def _enrich_session_summaries(
     effective = _effective_scan_dirs(args)
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        claude_homes=effective.homes("claude"),
-        commandcode_homes=effective.homes("commandcode"),
-        opencode_homes=effective.homes("opencode"),
-        cursor_homes=effective.homes("cursor"),
-        gemini_homes=effective.homes("gemini"),
-        qwen_homes=effective.homes("qwen"),
-        aider_homes=effective.homes("aider"),
+        # 中文注释：会话视图和用量检索沿用原来的范围，不索引 Grok / Kimi / DSH。
+        homes=effective.provider_homes(_SESSION_USAGE_PROVIDERS),
     )
     try:
         aggregator.refresh_index(
@@ -1942,16 +1837,7 @@ def _cli_alert_roots(args: argparse.Namespace) -> object:
             codex_roots.append(fallback)
     return configured_alert_context_roots(
         codex_sessions=tuple(codex_roots),
-        claude_homes=effective.homes("claude"),
-        kimi_homes=effective.homes("kimi"),
-        commandcode_homes=effective.homes("commandcode"),
-        grok_homes=effective.homes("grok"),
-        dsh_homes=effective.homes("dsh"),
-        opencode_homes=effective.homes("opencode"),
-        cursor_homes=effective.homes("cursor"),
-        gemini_homes=effective.homes("gemini"),
-        qwen_homes=effective.homes("qwen"),
-        aider_homes=effective.homes("aider"),
+        homes=effective.provider_homes(),
     )
 
 
@@ -2103,13 +1989,8 @@ def _show_usage_search(args: argparse.Namespace) -> int:
     effective = _effective_scan_dirs(args)
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        claude_homes=effective.homes("claude"),
-        commandcode_homes=effective.homes("commandcode"),
-        opencode_homes=effective.homes("opencode"),
-        cursor_homes=effective.homes("cursor"),
-        gemini_homes=effective.homes("gemini"),
-        qwen_homes=effective.homes("qwen"),
-        aider_homes=effective.homes("aider"),
+        # 中文注释：会话视图和用量检索沿用原来的范围，不索引 Grok / Kimi / DSH。
+        homes=effective.provider_homes(_SESSION_USAGE_PROVIDERS),
     )
     since, until = _usage_search_bounds(args)
     search = aggregator.search(
@@ -2209,90 +2090,16 @@ def _housekeeping_targets(args: argparse.Namespace) -> tuple[AuditTarget, ...]:
             )
         )
     effective_dirs = _effective_scan_dirs(args)
-    for home in effective_dirs.homes("grok"):
-        targets.append(
-            AuditTarget(
-                "Grok",
-                "grok",
-                home,
-                sessions_root=default_sessions_root("grok", home),
+    for spec in home_providers():
+        for home in effective_dirs.homes(spec.key):
+            targets.append(
+                AuditTarget(
+                    spec.display_name,
+                    spec.product_id,
+                    home,
+                    sessions_root=default_sessions_root(spec.product_id, home),
+                )
             )
-        )
-    for home in effective_dirs.homes("kimi"):
-        targets.append(
-            AuditTarget(
-                "Kimi Code",
-                "kimi",
-                home,
-                sessions_root=default_sessions_root("kimi", home),
-            )
-        )
-    for home in effective_dirs.homes("dsh"):
-        targets.append(
-            AuditTarget(
-                "DeepSeek Harness",
-                "dsh",
-                home,
-                sessions_root=default_sessions_root("dsh", home),
-            )
-        )
-    for home in effective_dirs.homes("commandcode"):
-        targets.append(
-            AuditTarget(
-                "Command Code",
-                "command-code",
-                home,
-                sessions_root=default_sessions_root("command-code", home),
-            )
-        )
-    for home in effective_dirs.homes("claude"):
-        targets.append(
-            AuditTarget(
-                "Claude Code",
-                "claude",
-                home,
-                sessions_root=default_sessions_root("claude", home),
-            )
-        )
-    for home in effective_dirs.homes("opencode"):
-        # 单个数据库保存全部会话，只统计占用。
-        targets.append(AuditTarget("OpenCode", "opencode", home))
-    for home in effective_dirs.homes("cursor"):
-        targets.append(
-            AuditTarget(
-                "Cursor",
-                "cursor",
-                home,
-                sessions_root=default_sessions_root("cursor", home),
-            )
-        )
-    for home in effective_dirs.homes("gemini"):
-        targets.append(
-            AuditTarget(
-                "Gemini CLI",
-                "gemini",
-                home,
-                sessions_root=default_sessions_root("gemini", home),
-            )
-        )
-    for home in effective_dirs.homes("qwen"):
-        targets.append(
-            AuditTarget(
-                "Qwen Code",
-                "qwen",
-                home,
-                sessions_root=default_sessions_root("qwen", home),
-            )
-        )
-    for home in effective_dirs.homes("aider"):
-        targets.append(
-            AuditTarget(
-                "Aider",
-                "aider",
-                home,
-                sessions_root=default_sessions_root("aider", home),
-            )
-        )
     targets.append(
         AuditTarget("监控状态目录", "state", args.state_dir.expanduser())
     )
@@ -2515,16 +2322,7 @@ def _active_session_paths(
             accounts=_accounts(args),
             state_dir=args.state_dir,
             config=MonitorConfig(auto_resume=False),
-            grok_homes=effective_dirs.homes("grok"),
-            kimi_homes=effective_dirs.homes("kimi"),
-            dsh_homes=effective_dirs.homes("dsh"),
-            commandcode_homes=effective_dirs.homes("commandcode"),
-            claude_homes=effective_dirs.homes("claude"),
-            opencode_homes=effective_dirs.homes("opencode"),
-            cursor_homes=effective_dirs.homes("cursor"),
-            gemini_homes=effective_dirs.homes("gemini"),
-            qwen_homes=effective_dirs.homes("qwen"),
-            aider_homes=effective_dirs.homes("aider"),
+            homes=effective_dirs.provider_homes(),
         )
         paths: set[str] = set()
         for item in monitor.account_monitors:
@@ -2533,15 +2331,7 @@ def _active_session_paths(
                     paths.add(str(Path(session.jsonl_path)))
         paths.update(
             external_active_session_paths(
-                grok_homes=effective_dirs.homes("grok"),
-                kimi_homes=effective_dirs.homes("kimi"),
-                dsh_homes=effective_dirs.homes("dsh"),
-                commandcode_homes=effective_dirs.homes("commandcode"),
-                claude_homes=effective_dirs.homes("claude"),
-                cursor_homes=effective_dirs.homes("cursor"),
-                gemini_homes=effective_dirs.homes("gemini"),
-                qwen_homes=effective_dirs.homes("qwen"),
-                aider_homes=effective_dirs.homes("aider"),
+                homes=effective_dirs.provider_homes(),
             )
         )
         return paths
@@ -2590,16 +2380,9 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         accounts=accounts,
         state_dir=args.state_dir,
         config=config,
-        grok_homes=_daemon_homes(effective_dirs.state("grok")),
-        kimi_homes=_daemon_homes(effective_dirs.state("kimi")),
-        dsh_homes=_daemon_homes(effective_dirs.state("dsh")),
-        commandcode_homes=_daemon_homes(effective_dirs.state("commandcode")),
-        claude_homes=_daemon_homes(effective_dirs.state("claude")),
-        opencode_homes=_daemon_homes(effective_dirs.state("opencode")),
-        cursor_homes=_daemon_homes(effective_dirs.state("cursor")),
-        gemini_homes=_daemon_homes(effective_dirs.state("gemini")),
-        qwen_homes=_daemon_homes(effective_dirs.state("qwen")),
-        aider_homes=_daemon_homes(effective_dirs.state("aider")),
+        homes={
+            key: _daemon_homes(effective_dirs.state(key)) for key in home_keys()
+        },
         scan_dirs_controller=controller,
     )
 
@@ -2640,46 +2423,13 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
         session_context_warn_tokens=args.session_context_warn_tokens,
         disk_warn_gb=args.disk_warn_gb,
         disk_total_warn_gb=args.disk_total_warn_gb,
-        grok_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "grok_homes", None) or ())
-        ),
-        kimi_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "kimi_homes", None) or ())
-        ),
-        dsh_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "dsh_homes", None) or ())
-        ),
-        commandcode_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "commandcode_homes", None) or ())
-        ),
-        claude_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "claude_homes", None) or ())
-        ),
-        opencode_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "opencode_homes", None) or ())
-        ),
-        cursor_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "cursor_homes", None) or ())
-        ),
-        gemini_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "gemini_homes", None) or ())
-        ),
-        qwen_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "qwen_homes", None) or ())
-        ),
-        aider_homes=tuple(
-            path.expanduser().resolve()
-            for path in (getattr(args, "aider_homes", None) or ())
-        ),
+        provider_homes={
+            spec.key: tuple(
+                path.expanduser().resolve()
+                for path in (getattr(args, spec.homes_field, None) or ())
+            )
+            for spec in home_providers()
+        },
     )
 
 

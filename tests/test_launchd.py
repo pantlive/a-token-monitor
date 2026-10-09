@@ -409,7 +409,9 @@ class LaunchdServiceTests(unittest.TestCase):
             dashboard=True,
             dashboard_host="0.0.0.0",
             dashboard_port=8765,
-            grok_homes=(),
+            provider_homes={
+                "grok": (),
+            },
         )
 
 

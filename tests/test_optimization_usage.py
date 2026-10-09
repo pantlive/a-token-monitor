@@ -78,7 +78,7 @@ class CommandCodeUsageTests(unittest.TestCase):
                 [_message("sidecar", now - 7)],
             )
             cache = root / "usage.sqlite3"
-            first = UsageAggregator(commandcode_homes=(home,), cache_path=cache)
+            first = UsageAggregator(homes={"commandcode": (home,)}, cache_path=cache)
             first.refresh_index({}, now=now)
             summary = first.session_usages([str(path)])[str(path)]
             self.assertEqual(summary.total_tokens, 2200)
@@ -91,7 +91,7 @@ class CommandCodeUsageTests(unittest.TestCase):
             self.assertNotIn("SECRET-CONTENT", json.dumps(first.search()))
             first.close()
 
-            resumed = UsageAggregator(commandcode_homes=(home,), cache_path=cache)
+            resumed = UsageAggregator(homes={"commandcode": (home,)}, cache_path=cache)
             try:
                 # 中文注释：readers 与 parsing 各自引用 _parse_usage_chunk，
                 # 两处共用同一个 mock 才能断言整个索引流程都没有重新解析。
@@ -137,7 +137,9 @@ class CommandCodeUsageTests(unittest.TestCase):
                     json.dumps({"userId": f"account-{index}"}), encoding="utf-8"
                 )
             aggregator = UsageAggregator(
-                commandcode_homes=(homes[0],), cache_path=root / "usage.sqlite3"
+                homes={
+                    "commandcode": (homes[0],),
+                },cache_path=root / "usage.sqlite3"
             )
             try:
                 aggregator.refresh_index({}, now=now)
@@ -145,7 +147,7 @@ class CommandCodeUsageTests(unittest.TestCase):
                     result = aggregator.search(group=group, account="command-code")
                     self.assertEqual(result["totals"]["total_tokens"], 1100)
                     self.assertEqual(result["matched_rows"], 1)
-                aggregator.update_homes(commandcode_homes=(homes[1],))
+                aggregator.update_homes(homes={"commandcode": (homes[1],)})
                 snapshot = aggregator.snapshot({}, now=now)
                 accounts = snapshot["periods"][0]["accounts"]
                 self.assertEqual(
@@ -233,7 +235,9 @@ class IncrementalRollupTests(unittest.TestCase):
                 path = home / "projects" / "demo" / f"session-{index}.jsonl"
                 _write_records(path, [_message(f"request-{index}", now - index)])
             aggregator = UsageAggregator(
-                commandcode_homes=(home,), cache_path=root / "usage.sqlite3"
+                homes={
+                    "commandcode": (home,),
+                },cache_path=root / "usage.sqlite3"
             )
             try:
                 aggregator.refresh_index({}, now=now)

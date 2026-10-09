@@ -2208,25 +2208,25 @@ class UpdateHomesTests(unittest.TestCase):
             for home in (grok_a, grok_b):
                 (home / "logs").mkdir(parents=True)
                 (home / "logs" / "unified.jsonl").write_text("", encoding="utf-8")
-            aggregator = UsageAggregator(grok_homes=(grok_a,))
+            aggregator = UsageAggregator(homes={"grok": (grok_a,)})
 
-            aggregator.update_homes(grok_homes=(grok_b,))
+            aggregator.update_homes(homes={"grok": (grok_b,)})
             sources = aggregator._build_sources({}, {})
 
         self.assertNotIn(grok_a / "logs" / "unified.jsonl", sources)
         self.assertIn(grok_b / "logs" / "unified.jsonl", sources)
-        self.assertEqual(aggregator._grok_homes, (grok_b,))
+        self.assertEqual(aggregator._homes["grok"], (grok_b,))
 
     def test_empty_tuple_disables_and_none_keeps_current(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
             grok_home = root / "grok"
-            aggregator = UsageAggregator(grok_homes=(grok_home,))
+            aggregator = UsageAggregator(homes={"grok": (grok_home,)})
 
-            aggregator.update_homes()
-            unchanged = aggregator._grok_homes
-            aggregator.update_homes(grok_homes=())
-            disabled = aggregator._grok_homes
+            aggregator.update_homes({})
+            unchanged = aggregator._homes["grok"]
+            aggregator.update_homes(homes={"grok": ()})
+            disabled = aggregator._homes["grok"]
             sources = aggregator._build_sources({}, {})
 
         self.assertEqual(unchanged, (grok_home,))
@@ -2237,11 +2237,11 @@ class UpdateHomesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
             grok_home = root / "grok"
-            aggregator = UsageAggregator(grok_homes=(grok_home,))
+            aggregator = UsageAggregator(homes={"grok": (grok_home,)})
             aggregator._grok_sessions[grok_home] = {}
             aggregator._grok_sessions_at[grok_home] = 1.0
 
-            aggregator.update_homes(grok_homes=())
+            aggregator.update_homes(homes={"grok": ()})
 
         self.assertEqual(aggregator._grok_sessions, {})
         self.assertEqual(aggregator._grok_sessions_at, {})
@@ -2255,14 +2255,17 @@ class IndexHealthTests(unittest.TestCase):
         """构造不触碰真实用户目录的聚合器。"""
 
         return UsageAggregator(
-            grok_homes=(),
-            kimi_homes=(),
-            dsh_homes=(),
-            claude_homes=(),
-            opencode_homes=(),
-            cursor_homes=(),
-            gemini_homes=(),
-            qwen_homes=(), aider_homes=(),
+            homes={
+                "grok": (),
+                "kimi": (),
+                "dsh": (),
+                "claude": (),
+                "opencode": (),
+                "cursor": (),
+                "gemini": (),
+                "qwen": (),
+                "aider": (),
+            },
         )
 
     def test_success_marks_last_indexed_at(self) -> None:
