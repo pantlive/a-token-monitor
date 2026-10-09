@@ -24,7 +24,7 @@ from .alerts import (
     AlertStoreError,
     TrafficAlertStore,
 )
-from .alert_context import AlertContextRoots, load_alert_context
+from .alert_context import configured_alert_context_roots, load_alert_context
 from .discovery import default_session_root
 from .i18n import localize_payload, resolve_language, substitute
 from .housekeeping import (
@@ -63,6 +63,13 @@ from .kimi import (
     read_kimi_account,
     read_kimi_quota,
     resolve_kimi_homes,
+)
+from .local_agents import (
+    resolve_aider_homes,
+    resolve_cursor_homes,
+    resolve_gemini_homes,
+    resolve_opencode_homes,
+    resolve_qwen_homes,
 )
 from .multi_models import TrackedSession, session_view
 from .quota import (
@@ -2935,6 +2942,13 @@ __THEME_TOGGLE__
     tool_output: '工具输出',
     search: '联网搜索',
     assistant: '助手消息',
+    image: '图片输入',
+  };
+  const ALERT_ACTIVITY_BASIS = {
+    record: '日志记录',
+    parameters: '根据参数判断',
+    tool: '根据调用类型判断',
+    unknown: '证据不足',
   };
   const renderAlertContext = (context) => {
     if (!context || !context.found) {
@@ -2947,16 +2961,27 @@ __THEME_TOGGLE__
     const items = events.map((event) => {
       const kindLabel = ALERT_CONTEXT_KINDS[event.kind] || '事件';
       const size = Number(event.size || 0) > 0 ? ` <span class="muted">${escapeHtml(formatDataSize(event.size))}</span>` : '';
-      const label = event.label ? `<strong>${escapeHtml(event.label)}</strong> ` : '';
-      return `<div class="ctx-event"><span class="ctx-time mono">${escapeHtml(formatTime(event.t))}</span><span class="chip">${escapeHtml(kindLabel)}</span><span class="ctx-body">${label}${escapeHtml(event.detail || '')}${size}</span></div>`;
+      // 中文注释：优先展示行为和对象，不把工具名称或命令当作执行目的。
+      const activities = Array.isArray(event.activities) && event.activities.length ? event.activities : [{ summary: '用途无法判断', basis: 'unknown' }];
+      const body = activities.map((activity) => {
+        const result = activity.phase === 'result' ? ' · 执行结果' : '';
+        const target = activity.target ? ` · ${escapeHtml(activity.target)}` : '';
+        const basis = ALERT_ACTIVITY_BASIS[activity.basis] || ALERT_ACTIVITY_BASIS.unknown;
+        return `<strong>${escapeHtml(activity.summary || '用途无法判断')}${result}</strong>${target} <span class="muted">${escapeHtml(basis)}</span>`;
+      }).join('<br>');
+      const detail = event.kind === 'user' || event.kind === 'search' ? escapeHtml(event.detail || '') : '';
+      return `<div class="ctx-event"><span class="ctx-time mono">${escapeHtml(formatTime(event.t))}</span><span class="chip">${escapeHtml(kindLabel)}</span><span class="ctx-body">${body}${detail ? `<br>${detail}` : ''}${size}</span></div>`;
     }).join('');
     const truncated = context.truncated ? `（仅显示前 ${events.length} 条）` : '';
-    const privacyNote = context.content_enabled ? '' : '<br>内容摘要已隐藏，仅显示事件类型和字节数。';
+    const privacyNote = context.content_enabled ? '' : '<br>内容摘要已隐藏，行为类别仍可见。';
+    const summaries = Array.isArray(context.activity_summary) ? context.activity_summary : [];
+    const activityOverview = summaries.length ? `<div class="usage-note"><strong>涉及的行为：</strong>${summaries.map(escapeHtml).join(' · ')}</div>` : '';
     const statsNote = context.fallback
-      ? '告警时间窗内该会话没有新事件；以下是告警发生前最近的会话活动——突发上传通常是这些累积内容随后的请求。'
-      : `时间窗内 ${Number(totals.events || 0)} 条事件 · 上行内容 ${escapeHtml(formatDataSize(totals.input_bytes || 0))} · 工具输出 ${escapeHtml(formatDataSize(totals.output_bytes || 0))}${truncated}。用户消息、工具调用与工具输出都会随后续请求上传到 API，这里的大小即当时新增的上行内容。`;
+      ? '告警时间窗内该会话没有新事件；以下是告警发生前最近的活动，不能确认它们对应本次外发。'
+      : `时间窗内 ${Number(totals.events || 0)} 条事件 · 本地输入记录 ${escapeHtml(formatDataSize(totals.input_bytes || 0))} · 工具输出 ${escapeHtml(formatDataSize(totals.output_bytes || 0))}${truncated}。行为来自本地日志，不能确认实际外发内容或上传成功。`;
     return `<div class="alert-context">
       <div class="usage-note">会话 <span class="mono">${escapeHtml(session.path || '')}</span><br>${statsNote}${privacyNote}</div>
+      ${activityOverview}
       ${items || '<div class="empty-state"><span class="empty-hint">时间窗内没有提取到事件明细。</span></div>'}
     </div>`;
   };
@@ -4386,12 +4411,12 @@ __THEME_TOGGLE__
       <div class="criteria-row">
         ${retentionField('usage_days', '用量历史保留天数')}
         ${retentionField('session_days', '会话历史保留天数')}
+        ${retentionField('alert_days', '告警历史保留天数')}
         <div class="toolbar-actions">
           <button class="btn mini primary" type="button" id="history-save-button">保存</button>
           <button class="btn mini warn" type="button" id="history-reset-button">恢复默认</button>
         </div>
       </div>
-      <div class="usage-note">告警历史保留 ${escapeHtml(String(days.alert_days ?? '—'))} 天（只读，由运行配置决定）。</div>
       <div class="account-subtitle"><span>索引与状态数据占用</span></div>
       <div class="table-wrap"><table class="tight"><thead><tr><th>数据</th><th>占用</th></tr></thead><tbody>${dbRows || '<tr><td colspan="2">暂无数据</td></tr>'}</tbody></table></div>
       <div class="criteria-row">
@@ -4403,13 +4428,13 @@ __THEME_TOGGLE__
       <div class="usage-note" id="history-last-cleanup">${lastCleanupLine}</div>`;
     document.getElementById('history-save-button')?.addEventListener('click', () => {
       const body = { action: 'set-retention' };
-      [['usage_days', '[data-history-days="usage_days"]'], ['session_days', '[data-history-days="session_days"]']].forEach(([key, selector]) => {
+      [['usage_days', '[data-history-days="usage_days"]'], ['session_days', '[data-history-days="session_days"]'], ['alert_days', '[data-history-days="alert_days"]']].forEach(([key, selector]) => {
         const input = container.querySelector(selector);
         const raw = input ? String(input.value || '').trim() : '';
         const value = Number(raw);
         if (raw !== '' && Number.isFinite(value)) body[key] = value;
       });
-      if (body.usage_days === undefined && body.session_days === undefined) {
+      if (body.usage_days === undefined && body.session_days === undefined && body.alert_days === undefined) {
         window.alert('请填写要保存的保留天数。');
         return;
       }
@@ -4634,6 +4659,11 @@ class DashboardServer:
         dsh_homes: Sequence[Path] | None = None,
         commandcode_homes: Sequence[Path] | None = None,
         claude_homes: Sequence[Path] | None = None,
+        opencode_homes: Sequence[Path] | None = None,
+        cursor_homes: Sequence[Path] | None = None,
+        gemini_homes: Sequence[Path] | None = None,
+        qwen_homes: Sequence[Path] | None = None,
+        aider_homes: Sequence[Path] | None = None,
         traffic_monitor: TrafficMonitor | None = None,
         alert_store: TrafficAlertStore | None = None,
         housekeeping: HousekeepingMonitor | None = None,
@@ -4659,6 +4689,11 @@ class DashboardServer:
         self.dsh_homes = resolve_dsh_homes(dsh_homes)
         self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
         self.claude_homes = resolve_claude_homes(claude_homes)
+        self.opencode_homes = resolve_opencode_homes(opencode_homes)
+        self.cursor_homes = resolve_cursor_homes(cursor_homes)
+        self.gemini_homes = resolve_gemini_homes(gemini_homes)
+        self.qwen_homes = resolve_qwen_homes(qwen_homes)
+        self.aider_homes = resolve_aider_homes(aider_homes)
         self.traffic_monitor = traffic_monitor
         self.alert_store = alert_store
         self.housekeeping = housekeeping
@@ -4673,6 +4708,11 @@ class DashboardServer:
             dsh_homes=self.dsh_homes,
             claude_homes=self.claude_homes,
             commandcode_homes=self.commandcode_homes,
+            opencode_homes=self.opencode_homes,
+            cursor_homes=self.cursor_homes,
+            gemini_homes=self.gemini_homes,
+            qwen_homes=self.qwen_homes,
+            aider_homes=self.aider_homes,
         )
         # 中文注释：handler 闭包只持有这个容器；扫描目录变化导致账号增减时
         # 由 update_accounts 热替换内容，无需重启 HTTP 服务。
@@ -4715,6 +4755,11 @@ class DashboardServer:
             self.dsh_homes,
             self.commandcode_homes,
             self.claude_homes,
+            self.opencode_homes,
+            self.cursor_homes,
+            self.gemini_homes,
+            self.qwen_homes,
+            self.aider_homes,
             budget_usd=self.config.budget_usd,
             alert_context_content=self.config.alert_context_content,
             traffic_monitor=self.traffic_monitor,
@@ -4746,6 +4791,11 @@ class DashboardServer:
         dsh_homes: Sequence[Path],
         commandcode_homes: Sequence[Path],
         claude_homes: Sequence[Path],
+        opencode_homes: Sequence[Path] | None = None,
+        cursor_homes: Sequence[Path] | None = None,
+        gemini_homes: Sequence[Path] | None = None,
+        qwen_homes: Sequence[Path] | None = None,
+        aider_homes: Sequence[Path] | None = None,
     ) -> None:
         """热更新额度、活动会话和告警详情请求使用的数据目录。"""
 
@@ -4754,6 +4804,28 @@ class DashboardServer:
         self.dsh_homes = resolve_dsh_homes(dsh_homes)
         self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
         self.claude_homes = resolve_claude_homes(claude_homes)
+        if opencode_homes is not None:
+            self.opencode_homes = resolve_opencode_homes(opencode_homes)
+        if cursor_homes is not None:
+            self.cursor_homes = resolve_cursor_homes(cursor_homes)
+        if gemini_homes is not None:
+            self.gemini_homes = resolve_gemini_homes(gemini_homes)
+        if qwen_homes is not None:
+            self.qwen_homes = resolve_qwen_homes(qwen_homes)
+        if aider_homes is not None:
+            self.aider_homes = resolve_aider_homes(aider_homes)
+        self.usage_aggregator.update_homes(
+            opencode_homes=self.opencode_homes,
+            cursor_homes=self.cursor_homes,
+            gemini_homes=self.gemini_homes,
+            qwen_homes=self.qwen_homes,
+            aider_homes=self.aider_homes,
+            grok_homes=self.grok_homes,
+            kimi_homes=self.kimi_homes,
+            dsh_homes=self.dsh_homes,
+            claude_homes=self.claude_homes,
+            commandcode_homes=self.commandcode_homes,
+        )
         self._accounts.update_homes(
             {
                 "grok": self.grok_homes,
@@ -4761,6 +4833,11 @@ class DashboardServer:
                 "dsh": self.dsh_homes,
                 "commandcode": self.commandcode_homes,
                 "claude": self.claude_homes,
+                "opencode": self.opencode_homes,
+                "cursor": self.cursor_homes,
+                "gemini": self.gemini_homes,
+                "qwen": self.qwen_homes,
+                "aider": self.aider_homes,
             }
         )
 
@@ -5900,6 +5977,11 @@ def _make_handler(
     dsh_homes: Sequence[Path] | None = None,
     commandcode_homes: Sequence[Path] | None = None,
     claude_homes: Sequence[Path] | None = None,
+    opencode_homes: Sequence[Path] | None = None,
+    cursor_homes: Sequence[Path] | None = None,
+    gemini_homes: Sequence[Path] | None = None,
+    qwen_homes: Sequence[Path] | None = None,
+    aider_homes: Sequence[Path] | None = None,
     budget_usd: float | None = None,
     alert_context_content: bool = False,
     traffic_monitor: TrafficMonitor | None = None,
@@ -5919,9 +6001,16 @@ def _make_handler(
 
     thresholds_in_use = session_thresholds or SessionSwitchThresholds()
     accounts.update_homes({
-        "grok": grok_homes or (), "kimi": kimi_homes or (),
-        "dsh": dsh_homes or (), "commandcode": commandcode_homes or (),
+        "grok": grok_homes or (),
+        "kimi": kimi_homes or (),
+        "dsh": dsh_homes or (),
+        "commandcode": commandcode_homes or (),
         "claude": claude_homes or (),
+        "opencode": opencode_homes or (),
+        "cursor": cursor_homes or (),
+        "gemini": gemini_homes or (),
+        "qwen": qwen_homes or (),
+        "aider": aider_homes or (),
     })
     state_cache_lock = Lock()
     state_cache: dict[str, Any] = {}
@@ -5998,7 +6087,6 @@ def _make_handler(
             path = urlsplit(self.path).path
             # 中文注释：每次请求读取热更新后的目录，额度、会话、详情采用同一份快照。
             homes = accounts.provider_homes()
-            kimi_homes, claude_homes = homes["kimi"], homes["claude"]
             if path == "/":
                 page = _localize_page(_DASHBOARD_HTML, self._request_language())
                 self._send_bytes(
@@ -6131,14 +6219,18 @@ def _make_handler(
                     codex_roots.append(default_session_root())
                 context = load_alert_context(
                     alert,
-                    AlertContextRoots(
+                    configured_alert_context_roots(
                         codex_sessions=tuple(codex_roots),
-                        claude_projects=tuple(
-                            home / "projects" for home in (claude_homes or ())
-                        ),
-                        kimi_sessions=tuple(
-                            home / "sessions" for home in (kimi_homes or ())
-                        ),
+                        claude_homes=homes["claude"],
+                        kimi_homes=homes["kimi"],
+                        commandcode_homes=homes["commandcode"],
+                        grok_homes=homes["grok"],
+                        dsh_homes=homes["dsh"],
+                        opencode_homes=homes.get("opencode", ()),
+                        cursor_homes=homes.get("cursor", ()),
+                        gemini_homes=homes.get("gemini", ()),
+                        qwen_homes=homes.get("qwen", ()),
+                        aider_homes=homes.get("aider", ()),
                     ),
                     include_content=alert_context_content,
                 )
@@ -6841,18 +6933,26 @@ def _make_handler(
                     return
                 usage_days = body.get("usage_days")
                 session_days = body.get("session_days")
-                if usage_days is None and session_days is None:
+                alert_days = body.get("alert_days")
+                if (
+                    usage_days is None
+                    and session_days is None
+                    and alert_days is None
+                ):
                     self._send_json(
                         status=400,
                         payload={
                             "error": "invalid_retention",
-                            "message": "至少提供 usage_days 或 session_days 之一",
+                            "message": (
+                                "至少提供 usage_days、session_days 或 alert_days 之一"
+                            ),
                         },
                     )
                     return
                 for name, value in (
                     ("usage_days", usage_days),
                     ("session_days", session_days),
+                    ("alert_days", alert_days),
                 ):
                     if value is not None and (
                         isinstance(value, bool)
@@ -6871,6 +6971,7 @@ def _make_handler(
                         "set",
                         usage_days=usage_days,
                         session_days=session_days,
+                        alert_days=alert_days,
                     )
                 except RetentionError as error:
                     self._send_json(

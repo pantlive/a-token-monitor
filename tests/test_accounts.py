@@ -258,6 +258,10 @@ class AccountTests(unittest.TestCase):
                     dsh_homes=(),
                     commandcode_homes=(),
                     claude_homes=(),
+                    opencode_homes=(),
+                    cursor_homes=(),
+                    gemini_homes=(),
+                    qwen_homes=(), aider_homes=(),
                 )
                 labels = [target.label for target in monitor.housekeeping.targets]
                 with self.assertLogs(
@@ -304,6 +308,10 @@ class AccountTests(unittest.TestCase):
                     dsh_homes=(),
                     commandcode_homes=(),
                     claude_homes=(),
+                    opencode_homes=(),
+                    cursor_homes=(),
+                    gemini_homes=(),
+                    qwen_homes=(), aider_homes=(),
                 )
                 monitor.account_monitors[0].registry.upsert_session(
                     TrackedSession(
@@ -367,6 +375,10 @@ class AccountTests(unittest.TestCase):
                     dsh_homes=(provider_root / "dsh",),
                     commandcode_homes=(provider_root / "commandcode",),
                     claude_homes=(provider_root / "claude",),
+                    opencode_homes=(),
+                    cursor_homes=(),
+                    gemini_homes=(),
+                    qwen_homes=(), aider_homes=(),
                 )
                 registries = dict(monitor.registries)
                 metadata = dict(monitor.dashboard_account_metadata)

@@ -103,6 +103,10 @@ def _build_monitor(root: Path, homes: tuple[Path, ...], **kwargs: object):
         "dsh_homes": (),
         "commandcode_homes": (),
         "claude_homes": (),
+        "opencode_homes": (),
+        "cursor_homes": (),
+        "gemini_homes": (),
+        "qwen_homes": (), "aider_homes": (),
     }
     options.update(kwargs)
     return MultiAccountMonitor(**options)
@@ -356,6 +360,10 @@ class ConstructorSemanticsTests(unittest.TestCase):
                     dsh_homes=(),
                     commandcode_homes=(),
                     claude_homes=(),
+                    opencode_homes=(),
+                    cursor_homes=(),
+                    gemini_homes=(),
+                    qwen_homes=(), aider_homes=(),
                 )
 
         # 显式空元组必须原样传给解析器，禁止回退成自动探测。
@@ -377,6 +385,10 @@ class ConstructorSemanticsTests(unittest.TestCase):
                     dsh_homes=(),
                     commandcode_homes=(),
                     claude_homes=(),
+                    opencode_homes=(),
+                    cursor_homes=(),
+                    gemini_homes=(),
+                    qwen_homes=(), aider_homes=(),
                 )
 
         self.assertIsNone(mocked.call_args.args[0])
@@ -394,6 +406,10 @@ class ConstructorSemanticsTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
                 scan_dirs_controller=controller,
             )
 
@@ -524,9 +540,13 @@ class RetentionWiringTests(unittest.TestCase):
 
         self.assertEqual(initial["usage_days"], 45.0)
         self.assertEqual(initial["session_days"], 7.0)
+        self.assertEqual(initial["alert_days"], 30.0)
         self.assertEqual(updated["usage_days"], 10.0)
         self.assertEqual(updated["session_days"], 7.0)
-        self.assertEqual(persisted, {"usage_days": 10.0, "session_days": 7.0})
+        self.assertEqual(updated["alert_days"], 30.0)
+        self.assertEqual(
+            persisted, {"usage_days": 10.0, "session_days": 7.0, "alert_days": 30.0}
+        )
 
     def test_cleanup_failure_marks_component_failed_then_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

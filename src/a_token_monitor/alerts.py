@@ -177,6 +177,15 @@ class TrafficAlertStore:
         self._writer_lock = threading.Lock()
         self._last_prune_at = 0.0
 
+    def set_retention_days(self, days: float) -> None:
+        """热更新清理用的保留天数。正在进行的清理会读到同一把锁下的新值。"""
+
+        if days <= 0:
+            raise ValueError("retention_days 必须大于 0")
+        with self._writer_lock:
+            self.retention_days = float(days)
+            self._retention_seconds = self.retention_days * 86400.0
+
     @property
     def db_path(self) -> Path:
         """告警历史 SQLite 文件路径，供历史数据管理器统计占用。"""

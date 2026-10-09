@@ -607,6 +607,10 @@ class ClaudeUsageAggregatorTests(unittest.TestCase):
             kimi_homes=(),
             dsh_homes=(),
             claude_homes=(home,),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
         )
         aggregator.snapshot(
             {"codex": MultiSessionRegistry(root / "state")},
@@ -661,6 +665,10 @@ class ClaudeUsageAggregatorTests(unittest.TestCase):
                 kimi_homes=(),
                 dsh_homes=(),
                 claude_homes=(root / ".claude",),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             snapshot = second.snapshot(
                 {"codex": MultiSessionRegistry(root / "state")},
@@ -699,6 +707,10 @@ class ClaudeUsageAggregatorTests(unittest.TestCase):
                 kimi_homes=(),
                 dsh_homes=(),
                 claude_homes=(home,),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
 
             snapshot = aggregator.snapshot(

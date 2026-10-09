@@ -7,16 +7,39 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import os
 import re
-from collections import deque
+import shutil
+import sqlite3
+import subprocess
+import threading
+from hashlib import sha256
+from collections import OrderedDict, deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .alerts import StoredAlert
+from .alert_activity import describe_tool_activity, describe_user_text
+from .local_agents import (
+    opencode_db_path,
+    resolve_aider_homes,
+    resolve_cursor_homes,
+    resolve_gemini_homes,
+    resolve_opencode_homes,
+    resolve_qwen_homes,
+)
+from .commandcode import (
+    _commandcode_project_dir,
+    _session_id_from_filename,
+    read_commandcode_session_info,
+)
 from .discovery import JsonlSessionReader
+from .grok import decode_grok_project
 
 # 中文注释：内容事件（用户消息、工具输出）往往发生在字节告警触发前一两分钟
 # （上传的是累积上下文），窗口向前多留 2 分钟；向后只留 30 秒落盘余量。
@@ -28,8 +51,31 @@ _MAX_EVENTS = 60
 # 中文注释：窗口内没有事件时（如 MCP 子进程直接外传），退而展示告警前最近的活动。
 _FALLBACK_TAIL = 8
 _EXCERPT_CHARS = 160
+# 中文注释：关联工具输出时限制保留的调用数，避免长会话无限占用内存。
+_MAX_TOOL_LABELS = 1024
+# 中文注释：会话只追加。先从尾部退到时间窗之前再正向扫，避免整文件读进请求线程。
+_TAIL_CHUNK = 256 * 1024
+_LOOKBACK_RECORDS = 256
+# 中文注释：单块 JSON 会话过大时不整份载入内存。
+_BLOB_READ_LIMIT = 32 * 1024 * 1024
+# 中文注释：同一文件签名和时间窗的提取结果短时复用，避免每条告警重读大会话。
+_EXTRACT_CACHE_LIMIT = 64
+_EXTRACT_CACHE: OrderedDict[tuple[object, ...], "_Extraction"] = OrderedDict()
+_EXTRACT_CACHE_LOCK = threading.Lock()
 
-SUPPORTED_PRODUCTS = ("codex", "claude", "kimi")
+SUPPORTED_PRODUCTS = (
+    "codex",
+    "claude",
+    "kimi",
+    "command-code",
+    "grok",
+    "dsh",
+    "opencode",
+    "cursor",
+    "gemini",
+    "qwen",
+    "aider",
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +85,24 @@ class AlertContextRoots:
     codex_sessions: tuple[Path, ...] = ()
     claude_projects: tuple[Path, ...] = ()
     kimi_sessions: tuple[Path, ...] = ()
+    commandcode_projects: tuple[Path, ...] = ()
+    grok_sessions: tuple[Path, ...] = ()
+    dsh_sessions: tuple[Path, ...] = ()
+    opencode_dbs: tuple[Path, ...] = ()
+    cursor_projects: tuple[Path, ...] = ()
+    gemini_homes: tuple[Path, ...] = ()
+    qwen_homes: tuple[Path, ...] = ()
+    aider_homes: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """一个可能对上告警的会话文件；session_id 用于一个库里有多段会话的产品。"""
+
+    path: Path
+    mtime: float
+    size: int
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +115,14 @@ class _Extraction:
     output_bytes: int
     fallback: bool = False
     event_count: int | None = None
+
+
+@dataclass(frozen=True)
+class _ToolCall:
+    """保留调用的行为描述，使输出能通过 ID 关联用途而非猜测相邻事件。"""
+
+    label: str
+    activities: tuple[dict[str, str], ...]
 
 
 def load_alert_context(
@@ -75,6 +147,7 @@ def load_alert_context(
         "fallback": False,
         "totals": {"events": 0, "input_bytes": 0, "output_bytes": 0},
         "events": [],
+        "activity_summary": [],
     }
     if alert.product not in SUPPORTED_PRODUCTS:
         payload["reason"] = "unsupported_product"
@@ -84,23 +157,18 @@ def load_alert_context(
     if not candidates:
         payload["reason"] = "no_session"
         return payload
-    extractor = {
-        "codex": _extract_codex,
-        "claude": _extract_claude,
-        "kimi": _extract_kimi,
-    }[alert.product]
     # 中文注释：同目录可能并行多个会话，按最后写入时间离告警由近到远尝试：
     # 窗口内有真实事件的优先，其次是兜底（窗口前活动），最后才是空明细。
-    best: tuple[Path, float, int, _Extraction] | None = None
-    fallback_choice: tuple[Path, float, int, _Extraction] | None = None
-    empty_choice: tuple[Path, float, int, _Extraction] | None = None
-    for path, mtime, size in sorted(
-        candidates, key=lambda item: abs(item[1] - alert.last_seen_at)
+    best: tuple[_Candidate, _Extraction] | None = None
+    fallback_choice: tuple[_Candidate, _Extraction] | None = None
+    empty_choice: tuple[_Candidate, _Extraction] | None = None
+    for candidate in sorted(
+        candidates, key=lambda item: abs(item.mtime - alert.last_seen_at)
     ):
-        result = extractor(path, start, end)
+        result = _cached_extract(alert.product, candidate, start, end)
         if result.events is None:
             continue
-        entry = (path, mtime, size, result)
+        entry = (candidate, result)
         if result.events and not result.fallback:
             best = entry
             break
@@ -112,18 +180,26 @@ def load_alert_context(
     if chosen is None:
         payload["reason"] = "unreadable"
         return payload
-    path, mtime, size, extraction = chosen
-    # 中文注释：内容展示需显式开启，默认响应只保留类型、时间及字节数。
-    events = [dict(item) for item in (extraction.events or ())]
+    candidate, extraction = chosen
+    path, mtime, size = candidate.path, candidate.mtime, candidate.size
+    # 中文注释：行为与对象类别始终可见，文件名和内容仍由摘要开关控制。
+    events = [_copy_event(item) for item in (extraction.events or ())]
     for item in events:
         item["detail"] = _excerpt(item.get("detail")) if include_content else ""
-        item["label"] = _excerpt(item.get("label"), 80)
-    if alert.product == "codex":
-        session_id = _session_id_from_name(path)
-    elif alert.product == "claude":
-        session_id = path.stem
-    else:
-        session_id = path.name.removeprefix("session_")
+        item["label"] = _excerpt(item.get("label"), 240)
+        for activity in item.get("activities", []):
+            activity["target"] = (
+                _excerpt(activity.get("target")) if include_content else ""
+            )
+    summaries = list(
+        dict.fromkeys(
+            activity["summary"]
+            for item in events
+            for activity in item.get("activities", [])
+            if activity.get("phase") != "result"
+        )
+    )
+    session_id = candidate.session_id or _session_id_for(alert.product, path)
     payload.update(
         found=True,
         reason=None,
@@ -143,11 +219,97 @@ def load_alert_context(
             "output_bytes": extraction.output_bytes,
         },
         events=events,
+        activity_summary=summaries,
     )
     return payload
 
 
+def _copy_event(item: Mapping[str, Any]) -> dict[str, Any]:
+    """复制一条事件，避免内容开关改写缓存里的摘要。"""
+
+    copied = dict(item)
+    activities = item.get("activities")
+    if isinstance(activities, list):
+        copied["activities"] = [
+            dict(activity) if isinstance(activity, Mapping) else activity
+            for activity in activities
+        ]
+    return copied
+
+
+def _cached_extract(
+    product: str,
+    candidate: _Candidate,
+    start: float,
+    end: float,
+) -> _Extraction:
+    """按文件大小、修改时间和时间窗缓存提取结果，含不可读。"""
+
+    key = (
+        product,
+        str(candidate.path),
+        candidate.session_id or "",
+        candidate.size,
+        candidate.mtime,
+        start,
+        end,
+    )
+    with _EXTRACT_CACHE_LOCK:
+        cached = _EXTRACT_CACHE.get(key)
+        if cached is not None:
+            _EXTRACT_CACHE.move_to_end(key)
+            return cached
+    result = _dispatch_extract(product, candidate, start, end)
+    with _EXTRACT_CACHE_LOCK:
+        _EXTRACT_CACHE[key] = result
+        _EXTRACT_CACHE.move_to_end(key)
+        while len(_EXTRACT_CACHE) > _EXTRACT_CACHE_LIMIT:
+            _EXTRACT_CACHE.popitem(last=False)
+    return result
+
+
 # ---------------------------------------------------------------- 候选定位
+
+
+def _session_id_for(product: str, path: Path) -> str:
+    """从文件位置还原会话 ID。"""
+
+    if product == "codex":
+        return _session_id_from_name(path) or path.stem
+    if product == "kimi":
+        return path.name.removeprefix("session_")
+    if product == "grok":
+        # 中文注释：updates.jsonl 的上一级目录名才是会话 ID。
+        return path.parent.name
+    if product == "dsh":
+        return path.parent.name.removeprefix("session-")
+    if product == "aider":
+        return path.parent.name or path.stem
+    return path.stem
+
+
+def _dispatch_extract(
+    product: str, candidate: _Candidate, start: float, end: float
+) -> _Extraction:
+    """按产品提取；OpenCode 的会话 ID 不在文件名里，要单独传进去。"""
+
+    if product == "opencode":
+        return _extract_opencode(
+            candidate.path, start, end, candidate.session_id or ""
+        )
+    extractor = {
+        "codex": _extract_codex,
+        "claude": _extract_claude,
+        "kimi": _extract_kimi,
+        "command-code": _extract_commandcode,
+        "grok": _extract_grok,
+        "dsh": _extract_dsh,
+        "cursor": _extract_cursor,
+        "gemini": _extract_gemini,
+        "qwen": _extract_qwen,
+        "aider": _extract_aider,
+    }[product]
+    return extractor(candidate.path, start, end)
 
 
 def _find_candidates(
@@ -155,17 +317,37 @@ def _find_candidates(
     roots: AlertContextRoots,
     start: float,
     end: float,
-) -> list[tuple[Path, float, int]]:
-    """按 mtime 预筛、cwd 匹配，返回候选会话（路径, 最后写入时间, 体积）。"""
+) -> list[_Candidate]:
+    """按 mtime 预筛、cwd 匹配，返回候选会话。"""
 
     if alert.product == "codex":
         files = _codex_recent_files(roots.codex_sessions, start, end)
         matched = _match_codex_cwd(files, alert.cwd)
-        return [(path, stat.st_mtime, stat.st_size) for path, stat in matched]
+        return [
+            _Candidate(path, stat.st_mtime, stat.st_size) for path, stat in matched
+        ]
     if alert.product == "claude":
         files = _claude_recent_files(roots.claude_projects, alert.cwd, start)
-        return [(path, stat.st_mtime, stat.st_size) for path, stat in files]
-    return _kimi_candidates(roots.kimi_sessions, alert.cwd, start)
+        return [_Candidate(path, stat.st_mtime, stat.st_size) for path, stat in files]
+    if alert.product == "kimi":
+        return _kimi_candidates(roots.kimi_sessions, alert.cwd, start)
+    if alert.product == "command-code":
+        return _commandcode_candidates(roots.commandcode_projects, alert.cwd, start)
+    if alert.product == "grok":
+        return _grok_candidates(roots.grok_sessions, alert.cwd, start)
+    if alert.product == "dsh":
+        return _dsh_candidates(roots.dsh_sessions, alert.cwd, start)
+    if alert.product == "opencode":
+        return _opencode_candidates(roots.opencode_dbs, alert.cwd, start)
+    if alert.product == "cursor":
+        return _cursor_candidates(roots.cursor_projects, alert.cwd, start, end)
+    if alert.product == "gemini":
+        return _gemini_candidates(roots.gemini_homes, alert.cwd, start)
+    if alert.product == "qwen":
+        return _qwen_candidates(roots.qwen_homes, alert.cwd, start)
+    if alert.product == "aider":
+        return _aider_candidates(roots.aider_homes, alert.cwd, start)
+    return []
 
 
 # 中文注释：rollout 文件名内嵌会话开始的本地时间。
@@ -257,10 +439,10 @@ def _kimi_candidates(
     roots: Sequence[Path],
     cwd: str | None,
     start: float,
-) -> list[tuple[Path, float, int]]:
+) -> list[_Candidate]:
     """Kimi 会话按 ``sessions/wd_*/session_*/`` 组织，cwd 在 state.json 里。"""
 
-    out: list[tuple[Path, float, int]] = []
+    out: list[_Candidate] = []
     for root in roots:
         if not root.is_dir():
             continue
@@ -283,19 +465,134 @@ def _kimi_candidates(
             latest = max(stat.st_mtime for stat in wires)
             if latest < start - _MTIME_SLACK_SECONDS:
                 continue
-            out.append((state_file.parent, latest, sum(stat.st_size for stat in wires)))
+            out.append(
+                _Candidate(
+                    state_file.parent,
+                    latest,
+                    sum(stat.st_size for stat in wires),
+                )
+            )
     return out
 
 
-def _cwd_matches(alert_cwd: str, session_cwd: str) -> bool:
-    """进程 cwd 与会话工作目录一致或互为前缀时视为同一会话现场。"""
+def _commandcode_candidates(
+    roots: Sequence[Path],
+    cwd: str | None,
+    start: float,
+) -> list[_Candidate]:
+    """按项目 slug 定位主会话 JSONL，再用会话头里的 cwd 校验一次。"""
 
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for project_dir in _commandcode_project_dirs(root, cwd):
+            try:
+                entries = tuple(project_dir.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if _session_id_from_filename(path.name) is None:
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if not path.is_file() or stat.st_mtime < cutoff:
+                    continue
+                if cwd and not _commandcode_header_matches(path, cwd):
+                    continue
+                out.append(_Candidate(path, stat.st_mtime, stat.st_size))
+    return out
+
+
+def _commandcode_project_dirs(root: Path, cwd: str | None) -> list[Path]:
+    if not cwd:
+        try:
+            return [entry for entry in root.iterdir() if entry.is_dir()]
+        except OSError:
+            return []
+    project = _commandcode_project_dir(root, cwd)
+    return [project] if project is not None else []
+
+
+def _commandcode_header_matches(path: Path, cwd: str) -> bool:
+    info = read_commandcode_session_info(path)
+    session_cwd = info.cwd if info is not None else None
+    return bool(session_cwd) and _cwd_matches(cwd, session_cwd)
+
+
+def _grok_candidates(
+    roots: Sequence[Path],
+    cwd: str | None,
+    start: float,
+) -> list[_Candidate]:
+    """只扫 sessions/<项目>/<会话>/updates.jsonl，不递归整棵会话树。"""
+
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            projects = [entry for entry in root.iterdir() if entry.is_dir()]
+        except OSError:
+            continue
+        for project_dir in projects:
+            try:
+                sessions = [entry for entry in project_dir.iterdir() if entry.is_dir()]
+            except OSError:
+                continue
+            for session_dir in sessions:
+                log = session_dir / "updates.jsonl"
+                try:
+                    stat = log.stat()
+                except OSError:
+                    continue
+                if not log.is_file() or stat.st_mtime < cutoff:
+                    continue
+                session_cwd = _grok_session_cwd(session_dir, project_dir.name)
+                if cwd and (
+                    not session_cwd or not _cwd_matches(cwd, session_cwd)
+                ):
+                    continue
+                out.append(_Candidate(log, stat.st_mtime, stat.st_size))
+    return out
+
+
+def _grok_session_cwd(session_dir: Path, project_name: str) -> str | None:
+    """summary.json 的 info.cwd 优先；缺失时用项目目录名解码。"""
+
+    summary = session_dir / "summary.json"
+    try:
+        payload = json.loads(summary.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, Mapping):
+        info = payload.get("info")
+        if isinstance(info, Mapping):
+            cwd = info.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                return cwd
+    return decode_grok_project(project_name)
+
+
+def _cwd_matches(alert_cwd: str, session_cwd: str) -> bool:
+    """进程 cwd 等于会话目录，或落在会话目录里面，才算同一现场。
+
+    会话目录是告警目录的上级时算匹配（进程在项目子目录里）。反过来，
+    一个很短的告警目录不能把下面每个项目都算进来。空的会话目录也不匹配。
+    """
+
+    if not session_cwd or not alert_cwd:
+        return False
     if alert_cwd == session_cwd:
         return True
-    return (
-        alert_cwd.startswith(session_cwd.rstrip("/") + "/")
-        or session_cwd.startswith(alert_cwd.rstrip("/") + "/")
-    )
+    prefix = session_cwd.rstrip("/")
+    if not prefix:
+        return False
+    return alert_cwd.startswith(prefix + "/")
 
 
 def _claude_slug(cwd: str) -> str:
@@ -327,18 +624,6 @@ def _parse_ts(value: object) -> float | None:
     return parsed.timestamp()
 
 
-def _window_dates(start: float, end: float) -> tuple[bytes, ...]:
-    """窗口覆盖的 UTC 日期串，用于行级字节预筛，避免整文件 JSON 解析。"""
-
-    days: list[bytes] = []
-    current = datetime.fromtimestamp(start, tz=timezone.utc).date()
-    last = datetime.fromtimestamp(end, tz=timezone.utc).date()
-    while current <= last:
-        days.append(current.isoformat().encode("ascii"))
-        current += timedelta(days=1)
-    return tuple(days)
-
-
 def _is_readable(path: Path) -> bool:
     try:
         with path.open("rb"):
@@ -347,11 +632,17 @@ def _is_readable(path: Path) -> bool:
         return False
 
 
-def _iter_records(path: Path, dates: tuple[bytes, ...] | None) -> Iterable[Mapping[str, Any]]:
-    """逐行产出 JSON 记录；给出日期时先做字节级预筛（调用方先查可读性）。"""
+def _iter_records(
+    path: Path,
+    dates: tuple[bytes, ...] | None,
+    offset: int = 0,
+) -> Iterable[Mapping[str, Any]]:
+    """从 ``offset`` 起逐行产出 JSON 记录（调用方先查可读性）。"""
 
     try:
         with path.open("rb") as handle:
+            if offset > 0:
+                handle.seek(offset)
             for raw in handle:
                 if dates and not any(day in raw for day in dates):
                     continue
@@ -363,6 +654,83 @@ def _iter_records(path: Path, dates: tuple[bytes, ...] | None) -> Iterable[Mappi
                     yield record
     except OSError:
         return
+
+
+def _line_timestamp(raw: bytes, parse_ts: _TsFn) -> float | None:
+    """解析一行的时间戳；坏行和没有时间的行返回 None。"""
+
+    try:
+        record = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, Mapping):
+        return None
+    try:
+        return parse_ts(record)
+    except (TypeError, ValueError):
+        return None
+
+
+def _suffix_offset(path: Path, start: float | None, parse_ts: _TsFn) -> int:
+    """返回正向扫描的起始字节。
+
+    从文件尾往前找，直到越过时间窗并再留出一段记录，供工具调用和兜底使用。
+    文件不超过一块、或整份都落在窗口里时返回 0，等价于整文件扫描。
+    """
+
+    if start is None:
+        return 0
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= _TAIL_CHUNK:
+        return 0
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return 0
+    with handle:
+        position = size
+        pending = b""
+        old_count = 0
+        crossed = False
+        while position > 0:
+            take = min(_TAIL_CHUNK, position)
+            position -= take
+            handle.seek(position)
+            block = handle.read(take) + pending
+            parts = block.split(b"\n")
+            if position > 0:
+                pending = parts[0]
+                complete = parts[1:]
+                base = position + len(parts[0]) + 1
+            else:
+                pending = b""
+                complete = parts
+                base = 0
+            offsets: list[int] = []
+            cursor = base
+            for part in complete:
+                offsets.append(cursor)
+                cursor += len(part) + 1
+            for offset, raw in zip(reversed(offsets), reversed(complete), strict=True):
+                if not raw.strip():
+                    continue
+                timestamp = _line_timestamp(raw, parse_ts)
+                if timestamp is not None and timestamp >= start:
+                    # 中文注释：时钟回拨时重新计数，避免停在窗口中间。
+                    crossed = False
+                    old_count = 0
+                    continue
+                if timestamp is not None and timestamp < start:
+                    crossed = True
+                if not crossed:
+                    continue
+                old_count += 1
+                if old_count >= _LOOKBACK_RECORDS:
+                    return offset
+    return 0
 
 
 def _excerpt(value: object, limit: int = _EXCERPT_CHARS) -> str:
@@ -393,12 +761,184 @@ def _tool_detail(arguments: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return _excerpt(arguments)
     if isinstance(parsed, Mapping):
-        for key in ("cmd", "command", "file_path", "path", "filename", "query", "pattern"):
+        for key in (
+            "cmd",
+            "command",
+            "file_path",
+            "path",
+            "filename",
+            "target_file",
+            "filePath",
+            "query",
+            "pattern",
+        ):
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():
                 return _excerpt(value)
         return _excerpt(json.dumps(parsed, ensure_ascii=False))
     return _excerpt(arguments)
+
+
+# 中文注释：跳过字符串及注释，只识别包装器中静态写出的 tools.xxx(...) 调用。
+# 不执行日志里的 JavaScript，无法识别的动态调用仍保留原始包装器名称。
+_JS_TOOL_CALLS = re.compile(
+    r"//[^\n]*|/\*[\s\S]*?\*/"
+    r'|"(?:\\.|[^"\\])*"'
+    r"|'(?:\\.|[^'\\])*'"
+    r"|`(?:\\.|[^`\\])*`"
+    r"|(?<![\w$.])tools\s*"
+    r"(?:\.\s*(?P<name>[A-Za-z_$][\w$]*)"
+    r"|\[\s*(?P<quote>[\"'])(?P<key>[A-Za-z_$][\w$]*)(?P=quote)\s*\])"
+    r"\s*(?:\?\.\s*)?\("
+)
+
+
+def _codex_tool_label(name: str, arguments: str) -> str:
+    """为 Codex 的 exec 包装器补充静态工具名称，保留原始调用关系。"""
+
+    if name not in {"exec", "functions.exec", "functions__exec"}:
+        return name
+    # 中文注释：同一包装器可调用多个工具，按首次出现顺序去重展示。
+    names = dict.fromkeys(
+        match.group("name") or match.group("key")
+        for match in _JS_TOOL_CALLS.finditer(arguments)
+        if match.group("name") or match.group("key")
+    )
+    return f"{name} → {' · '.join(names)}" if names else name
+
+
+def _remember_tool_call(
+    calls: dict[str, _ToolCall] | None, call_id: object, call: _ToolCall
+) -> None:
+    """按调用 ID 记录用途和名称，用于关联后续输出。"""
+
+    if calls is None or not isinstance(call_id, str) or not call_id:
+        return
+    calls[call_id] = call
+    if len(calls) > _MAX_TOOL_LABELS:
+        # 中文注释：只淘汰最旧的关联，不按相邻事件猜测输出属于哪个工具。
+        calls.pop(next(iter(calls)))
+
+
+def _tool_output_info(
+    calls: dict[str, _ToolCall] | None, call_id: object
+) -> dict[str, Any]:
+    """输出只关联已记录的用途，不把执行结果当成上传成功的证明。"""
+
+    call = calls.get(call_id) if calls and isinstance(call_id, str) else None
+    return {
+        "label": call.label if call else "",
+        "activities": [dict(activity, phase="result") for activity in call.activities]
+        if call
+        else [
+            {
+                "summary": "返回工具结果",
+                "basis": "record",
+                "target": "",
+                "phase": "result",
+            }
+        ],
+    }
+
+
+def _image_event(part: object, timestamp: float) -> tuple[dict[str, Any], int, int]:
+    """提取图片输入线索；不把图片 URL、base64 或实际图像返回给页面。"""
+
+    size = None
+    if isinstance(part, Mapping):
+        source = part.get("source")
+        if isinstance(source, Mapping) and isinstance(source.get("data"), str):
+            size = len(source["data"].encode("utf-8", errors="replace"))
+        url = part.get("image_url")
+        if isinstance(url, str) and url.startswith("data:"):
+            size = len(url.encode("utf-8", errors="replace"))
+    return (
+        {
+            "t": timestamp,
+            "kind": "image",
+            "label": "",
+            "detail": "",
+            "size": size,
+            "activities": [
+                {"summary": "向模型提供图片", "basis": "record", "target": ""}
+            ],
+        },
+        size or 0,
+        0,
+    )
+
+
+def _codex_user_events(
+    payload: Mapping[str, Any],
+    timestamp: float,
+    seen: deque[tuple[float, str, str]] | None,
+) -> list[tuple[dict[str, Any], int, int]]:
+    """兼容旧用户事件与新的消息块，并消除同一输入的双格式记录。"""
+
+    legacy = payload.get("type") == "user_message"
+    content = payload.get("content")
+    blocks = content if isinstance(content, list) else []
+    text = (
+        str(payload.get("message") or "")
+        if legacy
+        else "\n".join(
+            str(part.get("text") or "")
+            for part in blocks
+            if isinstance(part, Mapping) and part.get("type") in {"input_text", "text"}
+        )
+    )
+    images = (
+        [
+            part
+            for key in ("images", "local_images")
+            for part in (payload.get(key) if isinstance(payload.get(key), list) else [])
+        ]
+        if legacy
+        else [
+            part
+            for part in blocks
+            if isinstance(part, Mapping)
+            and part.get("type") in {"input_image", "image", "image_url"}
+        ]
+    )
+    result: list[tuple[dict[str, Any], int, int]] = []
+    source = "legacy" if legacy else "message"
+    # 中文注释：仅消除一秒内不同日志格式的同内容记录，保留真实的重复输入。
+    if text:
+        fingerprint = sha256(text.encode("utf-8", errors="replace")).hexdigest()
+        duplicate = next(
+            (
+                index
+                for index, (previous, key, origin) in enumerate(seen or ())
+                if abs(timestamp - previous) <= 1
+                and fingerprint == key
+                and source != origin
+            ),
+            None,
+        )
+        if duplicate is None:
+            size = len(text.encode("utf-8", errors="replace"))
+            result.append(
+                (
+                    {
+                        "t": timestamp,
+                        "kind": "user",
+                        "label": "",
+                        "detail": _excerpt(text),
+                        "size": size,
+                        "activities": [describe_user_text(text)],
+                    },
+                    size,
+                    0,
+                )
+            )
+            if seen is not None:
+                seen.append((timestamp, fingerprint, source))
+        elif seen is not None:
+            # 中文注释：双格式记录一对一消重，不能误删紧接着的真实重复输入。
+            del seen[duplicate]
+    result.extend(_image_event(part, timestamp) for part in images)
+    return result
 
 
 # 中文注释：map_record 把一条原始记录映射成 0..n 个
@@ -407,19 +947,15 @@ _MapFn = Callable[[Mapping[str, Any], float], list[tuple[dict[str, Any], int, in
 _TsFn = Callable[[Mapping[str, Any]], float | None]
 
 
-def _scan_session(
-    path: Path,
+def _scan_parsed(
+    records: Iterable[Mapping[str, Any]],
     *,
-    dates: tuple[bytes, ...] | None,
     parse_ts: _TsFn,
     map_record: _MapFn,
     start: float | None,
     end: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, int, int, int]:
-    """单遍扫描会话文件：窗口内事件（带截断）+ 窗口前最近的若干条。
-
-    ``start`` 为 None 时只收集窗口前的事件（兜底第二遍，不做日期预筛）。
-    """
+    """单遍扫描已解析记录：窗口内事件（带截断）+ 窗口前最近的若干条。"""
 
     in_window: list[dict[str, Any]] = []
     before: deque[dict[str, Any]] = deque(maxlen=_FALLBACK_TAIL)
@@ -427,7 +963,7 @@ def _scan_session(
     input_bytes = 0
     output_bytes = 0
     event_count = 0
-    for record in _iter_records(path, dates):
+    for record in records:
         timestamp = parse_ts(record)
         if timestamp is None or timestamp > end:
             continue
@@ -446,27 +982,33 @@ def _scan_session(
     return in_window, list(before), truncated, input_bytes, output_bytes, event_count
 
 
-def _finish(
+def _scan_session(
     path: Path,
     *,
-    prefilter: bool,
+    dates: tuple[bytes, ...] | None,
     parse_ts: _TsFn,
     map_record: _MapFn,
-    start: float,
+    start: float | None,
     end: float,
-) -> _Extraction:
-    """先扫窗口日期；窗口空时全量扫第二遍，取告警前最近的活动兜底。"""
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, int, int, int]:
+    """从尾部定位后的偏移正向扫描会话文件。"""
 
-    if not _is_readable(path):
-        return _Extraction(None, False, 0, 0)
-    in_window, _, truncated, input_bytes, output_bytes, event_count = _scan_session(
-        path,
-        dates=_window_dates(start, end) if prefilter else None,
+    return _scan_parsed(
+        _iter_records(path, dates, offset),
         parse_ts=parse_ts,
         map_record=map_record,
         start=start,
         end=end,
     )
+
+
+def _extraction_from_scan(
+    scanned: tuple[list[dict[str, Any]], list[dict[str, Any]], bool, int, int, int],
+) -> _Extraction:
+    """窗口里有事件就用窗口；否则用扫描时已经留下的窗口前活动。"""
+
+    in_window, before, truncated, input_bytes, output_bytes, event_count = scanned
     if in_window:
         return _Extraction(
             tuple(in_window),
@@ -475,26 +1017,44 @@ def _finish(
             output_bytes,
             event_count=event_count,
         )
-    if not prefilter:
-        # 无日期预筛的格式第一遍就已收集到窗口前事件，这里直接没有。
-        return _Extraction((), False, 0, 0)
-    _, before, _, _, _, _ = _scan_session(
-        path,
-        dates=None,
-        parse_ts=parse_ts,
-        map_record=map_record,
-        start=None,
-        end=start,
-    )
     if not before:
         return _Extraction((), False, 0, 0)
     fallback_in = sum(
-        item["size"] or 0 for item in before if item["kind"] in ("user", "tool")
+        item["size"] or 0
+        for item in before
+        if item["kind"] in ("user", "image", "tool")
     )
     fallback_out = sum(
         item["size"] or 0 for item in before if item["kind"] == "tool_output"
     )
-    return _Extraction(tuple(before), False, fallback_in, fallback_out, fallback=True)
+    return _Extraction(
+        tuple(before), False, fallback_in, fallback_out, fallback=True
+    )
+
+
+def _finish(
+    path: Path,
+    *,
+    parse_ts: _TsFn,
+    map_record: _MapFn,
+    start: float,
+    end: float,
+) -> _Extraction:
+    """从覆盖时间窗的文件尾部做一次正向扫描。"""
+
+    if not _is_readable(path):
+        return _Extraction(None, False, 0, 0)
+    return _extraction_from_scan(
+        _scan_session(
+            path,
+            dates=None,
+            parse_ts=parse_ts,
+            map_record=map_record,
+            start=start,
+            end=end,
+            offset=_suffix_offset(path, start, parse_ts),
+        )
+    )
 
 
 # ---------------------------------------------------------------- Codex
@@ -505,40 +1065,40 @@ def _iso_record_ts(record: Mapping[str, Any]) -> float | None:
 
 
 def _codex_map(
-    record: Mapping[str, Any], timestamp: float
+    record: Mapping[str, Any],
+    timestamp: float,
+    *,
+    tool_calls: dict[str, _ToolCall] | None = None,
+    user_inputs: deque[tuple[float, str, str]] | None = None,
 ) -> list[tuple[dict[str, Any], int, int]]:
     payload = record.get("payload")
     if not isinstance(payload, Mapping):
         return []
     kind = payload.get("type")
-    if record.get("type") == "event_msg" and kind == "user_message":
-        text = str(payload.get("message") or "")
-        size = len(text.encode("utf-8", errors="replace"))
-        return [
-            (
-                {
-                    "t": timestamp,
-                    "kind": "user",
-                    "label": "",
-                    "detail": _excerpt(text),
-                    "size": size,
-                },
-                size,
-                0,
-            )
-        ]
+    if (record.get("type") == "event_msg" and kind == "user_message") or (
+        record.get("type") == "response_item"
+        and kind == "message"
+        and payload.get("role") == "user"
+    ):
+        return _codex_user_events(payload, timestamp, user_inputs)
     if kind in ("function_call", "custom_tool_call"):
         name = str(payload.get("name") or "")
         arguments = str(payload.get("arguments") or payload.get("input") or "")
+        label = _codex_tool_label(name, arguments)
+        activities = describe_tool_activity(name, arguments)
+        _remember_tool_call(
+            tool_calls, payload.get("call_id"), _ToolCall(label, tuple(activities))
+        )
         size = len(arguments.encode("utf-8", errors="replace"))
         return [
             (
                 {
                     "t": timestamp,
                     "kind": "tool",
-                    "label": name,
+                    "label": label,
                     "detail": _tool_detail(arguments),
                     "size": size,
+                    "activities": activities,
                 },
                 size,
                 0,
@@ -557,7 +1117,7 @@ def _codex_map(
                 {
                     "t": timestamp,
                     "kind": "tool_output",
-                    "label": "",
+                    **_tool_output_info(tool_calls, payload.get("call_id")),
                     "detail": "",
                     "size": size,
                 },
@@ -576,6 +1136,13 @@ def _codex_map(
                     "label": "",
                     "detail": _excerpt(query or ""),
                     "size": None,
+                    "activities": [
+                        {
+                            "summary": "检索或读取网络内容",
+                            "basis": "record",
+                            "target": "",
+                        }
+                    ],
                 },
                 0,
                 0,
@@ -587,9 +1154,8 @@ def _codex_map(
 def _extract_codex(path: Path, start: float, end: float) -> _Extraction:
     return _finish(
         path,
-        prefilter=True,
         parse_ts=_iso_record_ts,
-        map_record=_codex_map,
+        map_record=partial(_codex_map, tool_calls={}, user_inputs=deque(maxlen=16)),
         start=start,
         end=end,
     )
@@ -599,7 +1165,10 @@ def _extract_codex(path: Path, start: float, end: float) -> _Extraction:
 
 
 def _claude_map(
-    record: Mapping[str, Any], timestamp: float
+    record: Mapping[str, Any],
+    timestamp: float,
+    *,
+    tool_calls: dict[str, _ToolCall] | None = None,
 ) -> list[tuple[dict[str, Any], int, int]]:
     if record.get("isSidechain"):
         return []
@@ -619,6 +1188,7 @@ def _claude_map(
                         "label": "",
                         "detail": _excerpt(content),
                         "size": size,
+                        "activities": [describe_user_text(content)],
                     },
                     size,
                     0,
@@ -627,6 +1197,9 @@ def _claude_map(
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, Mapping):
+                    continue
+                if block.get("type") == "image":
+                    items.append(_image_event(block, timestamp))
                     continue
                 if block.get("type") == "text":
                     text = str(block.get("text") or "")
@@ -639,6 +1212,7 @@ def _claude_map(
                                 "label": "",
                                 "detail": _excerpt(text),
                                 "size": size,
+                                "activities": [describe_user_text(text)],
                             },
                             size,
                             0,
@@ -662,7 +1236,7 @@ def _claude_map(
                         {
                             "t": timestamp,
                             "kind": "tool_output",
-                            "label": "",
+                            **_tool_output_info(tool_calls, block.get("tool_use_id")),
                             "detail": "",
                             "size": size,
                         },
@@ -675,6 +1249,11 @@ def _claude_map(
             if not isinstance(block, Mapping):
                 continue
             if block.get("type") == "tool_use":
+                label = str(block.get("name") or "")
+                activities = describe_tool_activity(label, block.get("input"))
+                _remember_tool_call(
+                    tool_calls, block.get("id"), _ToolCall(label, tuple(activities))
+                )
                 raw = json.dumps(block.get("input") or {}, ensure_ascii=False)
                 size = len(raw.encode("utf-8", errors="replace"))
                 items.append(
@@ -682,9 +1261,10 @@ def _claude_map(
                         {
                             "t": timestamp,
                             "kind": "tool",
-                            "label": str(block.get("name") or ""),
+                            "label": label,
                             "detail": _tool_detail(raw),
                             "size": size,
+                            "activities": activities,
                         },
                         size,
                         0,
@@ -696,9 +1276,8 @@ def _claude_map(
 def _extract_claude(path: Path, start: float, end: float) -> _Extraction:
     return _finish(
         path,
-        prefilter=True,
         parse_ts=_iso_record_ts,
-        map_record=_claude_map,
+        map_record=partial(_claude_map, tool_calls={}),
         start=start,
         end=end,
     )
@@ -745,8 +1324,20 @@ def _kimi_map(
         ):
             return []
         text = _kimi_message_text(message)
+        content = message.get("content")
+        images = (
+            [
+                part
+                for part in content
+                if isinstance(part, Mapping)
+                and part.get("type") in {"image", "image_url", "input_image"}
+            ]
+            if isinstance(content, list)
+            else []
+        )
+        image_events = [_image_event(part, timestamp) for part in images]
         if not text.strip():
-            return []
+            return image_events
         size = len(text.encode("utf-8", errors="replace"))
         return [
             (
@@ -756,11 +1347,12 @@ def _kimi_map(
                     "label": "",
                     "detail": _excerpt(text),
                     "size": size,
+                    "activities": [describe_user_text(text)],
                 },
                 size,
                 0,
             )
-        ]
+        ] + image_events
     if record_type == "context.append_loop_event":
         event = record.get("event")
         if not isinstance(event, Mapping):
@@ -777,6 +1369,9 @@ def _kimi_map(
                         "label": str(event.get("name") or ""),
                         "detail": _tool_detail(raw_args),
                         "size": size,
+                        "activities": describe_tool_activity(
+                            str(event.get("name") or ""), event.get("args")
+                        ),
                     },
                     size,
                     0,
@@ -801,6 +1396,7 @@ def _kimi_map(
                         "label": "",
                         "detail": "",
                         "size": size,
+                        **_tool_output_info(None, None),
                     },
                     0,
                     size,
@@ -834,6 +1430,7 @@ def _extract_kimi(session_dir: Path, start: float, end: float) -> _Extraction:
                 map_record=_kimi_map,
                 start=start,
                 end=end,
+                offset=_suffix_offset(wire, start, _kimi_record_ts),
             )
         )
         event_count += wire_count
@@ -858,9 +1455,1576 @@ def _extract_kimi(session_dir: Path, start: float, end: float) -> _Extraction:
     if not tail:
         return _Extraction((), False, 0, 0)
     fallback_in = sum(
-        item["size"] or 0 for item in tail if item["kind"] in ("user", "tool")
+        item["size"] or 0 for item in tail if item["kind"] in ("user", "image", "tool")
     )
     fallback_out = sum(
         item["size"] or 0 for item in tail if item["kind"] == "tool_output"
     )
     return _Extraction(tuple(tail), False, fallback_in, fallback_out, fallback=True)
+
+
+# ---------------------------------------------------------------- Command Code
+
+
+def _commandcode_map(
+    record: Mapping[str, Any],
+    timestamp: float,
+    *,
+    tool_calls: dict[str, _ToolCall] | None = None,
+) -> list[tuple[dict[str, Any], int, int]]:
+    """Command Code 用 type=message 加 message.role，内容块与 Claude 相同。"""
+
+    if record.get("type") != "message":
+        return []
+    message = record.get("message")
+    if not isinstance(message, Mapping):
+        return []
+    role = message.get("role")
+    if role not in {"user", "assistant"}:
+        return []
+    return _claude_map(
+        {"type": role, "message": message},
+        timestamp,
+        tool_calls=tool_calls,
+    )
+
+
+def _extract_commandcode(path: Path, start: float, end: float) -> _Extraction:
+    return _finish(
+        path,
+        parse_ts=_iso_record_ts,
+        map_record=partial(_commandcode_map, tool_calls={}),
+        start=start,
+        end=end,
+    )
+
+
+# ---------------------------------------------------------------- Grok
+
+
+# 中文注释：真实会话是 unix 秒（约 1e9）。超过该阈值才当成毫秒，避免把秒误除。
+_GROK_MS_THRESHOLD = 10_000_000_000
+
+
+def _grok_record_ts(record: Mapping[str, Any]) -> float | None:
+    """updates.jsonl 的 timestamp 是 unix 秒；过大的数字按毫秒处理。"""
+
+    value = record.get("timestamp")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > _GROK_MS_THRESHOLD:
+            return number / 1000.0
+        return number
+    return _parse_ts(value)
+
+
+def _grok_update(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    params = record.get("params")
+    if isinstance(params, Mapping):
+        update = params.get("update")
+        if isinstance(update, Mapping):
+            return update
+    if isinstance(record.get("sessionUpdate"), str):
+        return record
+    return None
+
+
+def _grok_tool_name(update: Mapping[str, Any]) -> str:
+    meta = update.get("_meta")
+    if isinstance(meta, Mapping):
+        tool = meta.get("x.ai/tool")
+        if isinstance(tool, Mapping):
+            name = tool.get("name")
+            if isinstance(name, str) and name.strip():
+                return name
+    title = update.get("title")
+    return title if isinstance(title, str) else ""
+
+
+def _grok_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Mapping):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    if isinstance(content, list):
+        return " ".join(
+            part for part in (_grok_text(item) for item in content) if part
+        )
+    return ""
+
+
+def _grok_user_event(
+    text: str, timestamp: float
+) -> tuple[dict[str, Any], int, int] | None:
+    if not text.strip():
+        return None
+    size = len(text.encode("utf-8", errors="replace"))
+    return (
+        {
+            "t": timestamp,
+            "kind": "user",
+            "label": "",
+            "detail": _excerpt(text),
+            "size": size,
+            "activities": [describe_user_text(text)],
+        },
+        size,
+        0,
+    )
+
+
+def _grok_user_events(
+    update: Mapping[str, Any], timestamp: float
+) -> list[tuple[dict[str, Any], int, int]]:
+    content = update.get("content")
+    blocks = content if isinstance(content, list) else [content]
+    items: list[tuple[dict[str, Any], int, int]] = []
+    for block in blocks:
+        if isinstance(block, str):
+            event = _grok_user_event(block, timestamp)
+            if event is not None:
+                items.append(event)
+            continue
+        if not isinstance(block, Mapping):
+            continue
+        if block.get("type") in {"image", "image_url", "input_image"}:
+            items.append(_image_event(block, timestamp))
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            event = _grok_user_event(text, timestamp)
+            if event is not None:
+                items.append(event)
+    return items
+
+
+def _grok_output_text(update: Mapping[str, Any]) -> str:
+    raw = update.get("rawOutput")
+    if isinstance(raw, str):
+        text = raw
+    elif raw is None:
+        text = ""
+    else:
+        text = json.dumps(raw, ensure_ascii=False, default=str)
+        if text in {"{}", "[]", "null"}:
+            text = ""
+    if text:
+        return text
+    return _grok_text(update.get("content"))
+
+
+def _grok_map(
+    record: Mapping[str, Any],
+    timestamp: float,
+    *,
+    tool_calls: dict[str, _ToolCall] | None = None,
+) -> list[tuple[dict[str, Any], int, int]]:
+    update = _grok_update(record)
+    if update is None:
+        return []
+    kind = update.get("sessionUpdate")
+    if kind == "user_message_chunk":
+        return _grok_user_events(update, timestamp)
+    if kind == "tool_call":
+        name = _grok_tool_name(update)
+        raw_input = update.get("rawInput")
+        if not isinstance(raw_input, Mapping):
+            raw_input = {}
+        activities = describe_tool_activity(name, raw_input)
+        label = name or str(update.get("title") or "")
+        _remember_tool_call(
+            tool_calls,
+            update.get("toolCallId"),
+            _ToolCall(label, tuple(activities)),
+        )
+        raw = json.dumps(raw_input, ensure_ascii=False)
+        size = len(raw.encode("utf-8", errors="replace"))
+        return [
+            (
+                {
+                    "t": timestamp,
+                    "kind": "tool",
+                    "label": label,
+                    "detail": _tool_detail(raw),
+                    "size": size,
+                    "activities": activities,
+                },
+                size,
+                0,
+            )
+        ]
+    if kind != "tool_call_update":
+        return []
+    # 中文注释：同一次调用会先写进行中、再写完成。只保留终态，避免输出重复。
+    if update.get("status") not in {"completed", "failed"}:
+        return []
+    text = _grok_output_text(update)
+    if not text:
+        return []
+    size = len(text.encode("utf-8", errors="replace"))
+    return [
+        (
+            {
+                "t": timestamp,
+                "kind": "tool_output",
+                **_tool_output_info(tool_calls, update.get("toolCallId")),
+                "detail": "",
+                "size": size,
+            },
+            0,
+            size,
+        )
+    ]
+
+
+def _extract_grok(path: Path, start: float, end: float) -> _Extraction:
+    """unix 时间戳从文件尾部定位后正向扫描；窗口为空时保留窗口前事件。"""
+
+    if not _is_readable(path):
+        return _Extraction(None, False, 0, 0)
+    return _extraction_from_scan(
+        _scan_session(
+            path,
+            dates=None,
+            parse_ts=_grok_record_ts,
+            map_record=partial(_grok_map, tool_calls={}),
+            start=start,
+            end=end,
+            offset=_suffix_offset(path, start, _grok_record_ts),
+        )
+    )
+
+
+# ---------------------------------------------------------------- 时间与文本
+
+
+def _epoch_seconds(value: object) -> float | None:
+    """秒或毫秒的数字时间戳；布尔值不是时间。"""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number > _GROK_MS_THRESHOLD:
+        return number / 1000.0
+    return number
+
+
+def _as_text(value: object) -> str:
+    """把字符串或 JSON 值收成一段文本；空对象不当成输出。"""
+
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    if text in {"{}", "[]", "null", '""'}:
+        return ""
+    return text
+
+
+def _content_text(content: object) -> str:
+    """取出用户或工具正文里的文字，跳过思考和图片块。"""
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Mapping):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, Mapping):
+            continue
+        if part.get("type") in {"image", "image_url", "input_image"}:
+            continue
+        if part.get("thought") is True or part.get("type") == "thought":
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(part for part in parts if part)
+
+
+def _user_item(text: str, timestamp: float) -> tuple[dict[str, Any], int, int] | None:
+    if not text.strip():
+        return None
+    size = len(text.encode("utf-8", errors="replace"))
+    return (
+        {
+            "t": timestamp,
+            "kind": "user",
+            "label": "",
+            "detail": _excerpt(text),
+            "size": size,
+            "activities": [describe_user_text(text)],
+        },
+        size,
+        0,
+    )
+
+
+def _tool_item(
+    name: str,
+    arguments: object,
+    timestamp: float,
+    call_id: object,
+    tool_calls: dict[str, _ToolCall] | None,
+) -> tuple[dict[str, Any], int, int]:
+    activities = describe_tool_activity(name, arguments if arguments is not None else {})
+    label = name or ""
+    _remember_tool_call(tool_calls, call_id, _ToolCall(label, tuple(activities)))
+    raw = arguments if isinstance(arguments, str) else _as_text(arguments)
+    size = len(raw.encode("utf-8", errors="replace"))
+    return (
+        {
+            "t": timestamp,
+            "kind": "tool",
+            "label": label,
+            "detail": _tool_detail(raw),
+            "size": size,
+            "activities": activities,
+        },
+        size,
+        0,
+    )
+
+
+def _output_item(
+    text: str,
+    timestamp: float,
+    call_id: object,
+    tool_calls: dict[str, _ToolCall] | None,
+) -> tuple[dict[str, Any], int, int] | None:
+    if not text:
+        return None
+    size = len(text.encode("utf-8", errors="replace"))
+    return (
+        {
+            "t": timestamp,
+            "kind": "tool_output",
+            **_tool_output_info(tool_calls, call_id),
+            "detail": "",
+            "size": size,
+        },
+        0,
+        size,
+    )
+
+
+# ---------------------------------------------------------------- DeepSeek Harness
+
+
+class _DecodeError(OSError):
+    """会话压缩帧无法解开。"""
+
+
+_UNREADABLE = object()
+_DSH_TRANSCRIPTS = (
+    "session.v4.jsonl.zstd",
+    "session.v3.jsonl.zstd",
+    "session.v2.jsonl.zstd",
+    "session.v4.jsonl",
+    "session.v3.jsonl",
+    "session.v2.jsonl",
+    "session.jsonl",
+)
+
+
+def _dsh_transcript(session_dir: Path) -> Path | None:
+    """同一会话目录里取版本最高的那份记录。"""
+
+    for name in _DSH_TRANSCRIPTS:
+        path = session_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _zstd_lines(path: Path) -> Iterable[str]:
+    """解开 zstd JSONL。标准库、可选第三方库、本机 zstd 命令依次尝试。"""
+
+    try:
+        zstd_mod = importlib.import_module("compression.zstd")
+    except ImportError:
+        zstd_mod = None
+    if zstd_mod is not None:
+        try:
+            with path.open("rb") as raw, zstd_mod.ZstdFile(raw) as decoded:
+                for line in decoded:
+                    yield line.decode("utf-8", errors="replace")
+            return
+        except (OSError, AttributeError) as error:
+            raise _DecodeError(str(error)) from error
+    for module_name in ("zstandard", "backports.zstd"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        try:
+            with path.open("rb") as raw:
+                if module_name == "zstandard":
+                    reader = module.ZstdDecompressor().stream_reader(raw)
+                else:
+                    reader = module.open(raw, "rb")
+                try:
+                    for line in reader:
+                        yield line.decode("utf-8", errors="replace")
+                finally:
+                    reader.close()
+            return
+        except (OSError, AttributeError) as error:
+            raise _DecodeError(str(error)) from error
+    if shutil.which("zstd") is None:
+        raise _DecodeError("没有可用的 zstd 解码器")
+    process = subprocess.Popen(
+        ["zstd", "-dc", "--", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    stdout = process.stdout
+    if stdout is None:
+        process.kill()
+        process.wait()
+        raise _DecodeError("zstd 没有输出")
+    try:
+        for line in stdout:
+            yield line.decode("utf-8", errors="replace")
+    finally:
+        stdout.close()
+        process.kill()
+        process.wait()
+
+
+def _dsh_lines(path: Path) -> Iterable[str]:
+    """逐行读出会话。压缩帧不能按偏移截断，读完或关闭生成器即停止。"""
+
+    if path.name.endswith(".zstd"):
+        yield from _zstd_lines(path)
+        return
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            yield from handle
+    except OSError as error:
+        raise _DecodeError(str(error)) from error
+
+
+def _dsh_records(path: Path) -> Iterable[Mapping[str, Any]]:
+    for line in _dsh_lines(path):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, Mapping):
+            yield record
+
+
+def _dsh_first_record(path: Path) -> Mapping[str, Any] | None | object:
+    """只读第一条记录拿 cwd；解不开时返回哨兵，调用方仍保留这个候选。"""
+
+    lines = _dsh_lines(path)
+    try:
+        for record in _mapping_lines(lines):
+            return record
+        return None
+    except _DecodeError:
+        return _UNREADABLE
+    finally:
+        close = getattr(lines, "close", None)
+        if close is not None:
+            close()
+
+
+def _mapping_lines(lines: Iterable[str]) -> Iterable[Mapping[str, Any]]:
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, Mapping):
+            yield record
+
+
+def _dsh_cwd(record: Mapping[str, Any]) -> str | None:
+    data = record.get("data")
+    if isinstance(data, Mapping):
+        cwd = data.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    cwd = record.get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
+
+
+def _dsh_record_ts(record: Mapping[str, Any]) -> float | None:
+    return _epoch_seconds(record.get("time"))
+
+
+def _dsh_candidates(
+    roots: Sequence[Path],
+    cwd: str | None,
+    start: float,
+) -> list[_Candidate]:
+    """会话目录名不可逆，cwd 在第一条 session 记录上。"""
+
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            projects = [entry for entry in root.iterdir() if entry.is_dir()]
+        except OSError:
+            continue
+        for project in projects:
+            try:
+                sessions = [entry for entry in project.iterdir() if entry.is_dir()]
+            except OSError:
+                continue
+            for session_dir in sessions:
+                path = _dsh_transcript(session_dir)
+                if path is None:
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if stat.st_mtime < cutoff:
+                    continue
+                header = _dsh_first_record(path)
+                if header is _UNREADABLE:
+                    out.append(_Candidate(path, stat.st_mtime, stat.st_size))
+                    continue
+                session_cwd = _dsh_cwd(header) if isinstance(header, Mapping) else None
+                if cwd and not (session_cwd and _cwd_matches(cwd, session_cwd)):
+                    continue
+                out.append(_Candidate(path, stat.st_mtime, stat.st_size))
+    return out
+
+
+def _dsh_map(
+    record: Mapping[str, Any],
+    timestamp: float,
+    *,
+    tool_calls: dict[str, _ToolCall] | None = None,
+) -> list[tuple[dict[str, Any], int, int]]:
+    kind = record.get("type")
+    data = record.get("data")
+    if not isinstance(data, Mapping):
+        return []
+    if kind == "user/message":
+        source = data.get("source")
+        if not isinstance(source, Mapping) or source.get("kind") != "user":
+            return []
+        item = _user_item(_content_text(data.get("content")), timestamp)
+        return [item] if item is not None else []
+    if kind == "tool/call":
+        return [
+            _tool_item(
+                str(data.get("name") or ""),
+                data.get("arguments"),
+                timestamp,
+                data.get("callId"),
+                tool_calls,
+            )
+        ]
+    if kind != "tool/result":
+        return []
+    call_id = data.get("callId")
+    message = data.get("message")
+    content: object = data.get("content")
+    if isinstance(message, Mapping):
+        source = message.get("source")
+        if isinstance(source, Mapping) and source.get("callId"):
+            call_id = source.get("callId")
+        content = message.get("content")
+    item = _output_item(_content_text(content) or _as_text(content), timestamp, call_id, tool_calls)
+    return [item] if item is not None else []
+
+
+def _extract_dsh(path: Path, start: float, end: float) -> _Extraction:
+    tool_calls: dict[str, _ToolCall] = {}
+    try:
+        return _extraction_from_scan(
+            _scan_parsed(
+                _dsh_records(path),
+                parse_ts=_dsh_record_ts,
+                map_record=partial(_dsh_map, tool_calls=tool_calls),
+                start=start,
+                end=end,
+            )
+        )
+    except _DecodeError:
+        return _Extraction(None, False, 0, 0)
+
+
+# ---------------------------------------------------------------- OpenCode
+
+
+def _opencode_connect(path: Path) -> sqlite3.Connection:
+    """只读打开会话库，不碰账号和凭据表。"""
+
+    connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _opencode_candidates(
+    roots: Sequence[Path],
+    cwd: str | None,
+    start: float,
+) -> list[_Candidate]:
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for path in roots:
+        if not path.is_file():
+            continue
+        try:
+            connection = _opencode_connect(path)
+        except sqlite3.Error:
+            continue
+        try:
+            try:
+                rows = connection.execute(
+                    "SELECT id, directory, time_updated FROM session"
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            for row in rows:
+                session_id = row["id"]
+                directory = row["directory"]
+                updated = _epoch_seconds(row["time_updated"])
+                if not isinstance(session_id, str) or updated is None:
+                    continue
+                if updated < cutoff:
+                    continue
+                if cwd and (
+                    not isinstance(directory, str) or not _cwd_matches(cwd, directory)
+                ):
+                    continue
+                out.append(
+                    _Candidate(path, updated, size, session_id=session_id)
+                )
+        finally:
+            connection.close()
+    return out
+
+
+def _opencode_role(raw: object) -> str:
+    if not isinstance(raw, str) or not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    role = payload.get("role")
+    return role if isinstance(role, str) else ""
+
+
+def _opencode_part_items(
+    part: Mapping[str, Any],
+    role: str,
+    timestamp: float,
+    tool_calls: dict[str, _ToolCall],
+) -> list[tuple[dict[str, Any], int, int]]:
+    kind = part.get("type")
+    if kind == "text" and role == "user":
+        item = _user_item(_content_text(part.get("text")), timestamp)
+        return [item] if item is not None else []
+    if kind != "tool":
+        return []
+    state = part.get("state")
+    params = state if isinstance(state, Mapping) else {}
+    call_id = part.get("callID") or part.get("callId")
+    items = [
+        _tool_item(
+            str(part.get("tool") or ""),
+            params.get("input"),
+            timestamp,
+            call_id,
+            tool_calls,
+        )
+    ]
+    status = params.get("status")
+    if status in {"completed", "error"}:
+        output = _output_item(
+            _as_text(params.get("output")), timestamp, call_id, tool_calls
+        )
+        if output is not None:
+            items.append(output)
+    return items
+
+
+def _extract_opencode(
+    path: Path, start: float, end: float, session_id: str
+) -> _Extraction:
+    if not session_id:
+        return _Extraction((), False, 0, 0)
+    start_ms = int(start * 1000)
+    end_ms = int(end * 1000)
+    try:
+        connection = _opencode_connect(path)
+    except sqlite3.Error:
+        return _Extraction(None, False, 0, 0)
+    try:
+        try:
+            before_rows = connection.execute(
+                """
+                SELECT time_created, data, message_id
+                FROM part
+                WHERE session_id = ? AND time_created < ?
+                ORDER BY time_created DESC
+                LIMIT ?
+                """,
+                (session_id, start_ms, _LOOKBACK_RECORDS),
+            ).fetchall()
+            window_rows = connection.execute(
+                """
+                SELECT time_created, data, message_id
+                FROM part
+                WHERE session_id = ? AND time_created >= ? AND time_created <= ?
+                ORDER BY time_created ASC
+                """,
+                (session_id, start_ms, end_ms),
+            ).fetchall()
+        except sqlite3.Error:
+            return _Extraction(None, False, 0, 0)
+        rows = list(reversed(before_rows)) + list(window_rows)
+        message_ids = tuple(
+            dict.fromkeys(
+                row["message_id"]
+                for row in rows
+                if isinstance(row["message_id"], str) and row["message_id"]
+            )
+        )
+        roles: dict[str, str] = {}
+        if message_ids:
+            marks = ",".join("?" for _ in message_ids)
+            try:
+                messages = connection.execute(
+                    f"SELECT id, data FROM message WHERE id IN ({marks})",
+                    message_ids,
+                ).fetchall()
+            except sqlite3.Error:
+                return _Extraction(None, False, 0, 0)
+            roles = {
+                row["id"]: _opencode_role(row["data"])
+                for row in messages
+                if isinstance(row["id"], str)
+            }
+    finally:
+        connection.close()
+    tool_calls: dict[str, _ToolCall] = {}
+    items: list[tuple[dict[str, Any], int, int]] = []
+    for row in rows:
+        timestamp = _epoch_seconds(row["time_created"])
+        if timestamp is None:
+            continue
+        try:
+            part = json.loads(row["data"] or "")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(part, Mapping):
+            continue
+        role = roles.get(row["message_id"], "")
+        items.extend(_opencode_part_items(part, role, timestamp, tool_calls))
+    return _bucket_items(items, start, end)
+
+
+def _bucket_items(
+    items: list[tuple[dict[str, Any], int, int]],
+    start: float,
+    end: float,
+) -> _Extraction:
+    """按事件时间分成窗口内和窗口前，规则与文件扫描一致。"""
+
+    in_window: list[dict[str, Any]] = []
+    before: deque[dict[str, Any]] = deque(maxlen=_FALLBACK_TAIL)
+    truncated = False
+    input_bytes = 0
+    output_bytes = 0
+    event_count = 0
+    for item, delta_in, delta_out in items:
+        timestamp = float(item["t"])
+        if timestamp > end:
+            continue
+        if timestamp < start:
+            before.append(item)
+            continue
+        event_count += 1
+        input_bytes += delta_in
+        output_bytes += delta_out
+        if len(in_window) >= _MAX_EVENTS:
+            truncated = True
+            continue
+        in_window.append(item)
+    in_window.sort(key=lambda event: event["t"])
+    return _extraction_from_scan(
+        (in_window, list(before), truncated, input_bytes, output_bytes, event_count)
+    )
+
+
+# ---------------------------------------------------------------- Cursor
+
+
+def _path_slugs(cwd: str) -> set[str]:
+    """目录名的几种扁平写法：非字母数字换成 '-'，或只替换斜杠。"""
+
+    dashed = _claude_slug(cwd)
+    slash = cwd.replace("/", "-").replace("\\", "-")
+    return {
+        item
+        for item in (dashed, dashed.lstrip("-"), slash, slash.lstrip("-"))
+        if item
+    }
+
+
+def _tail_text_lines(path: Path, limit: int) -> tuple[list[str], bool] | None:
+    """从文件尾部取出最多 limit 行；多于这个数时标明被截断。"""
+
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    collected: list[str] = []
+    with handle:
+        try:
+            position = handle.seek(0, 2)
+        except OSError:
+            return None
+        pending = b""
+        while position > 0 and len(collected) <= limit:
+            take = min(_TAIL_CHUNK, position)
+            position -= take
+            handle.seek(position)
+            block = handle.read(take) + pending
+            parts = block.split(b"\n")
+            if position > 0:
+                pending = parts[0]
+                complete = parts[1:]
+            else:
+                pending = b""
+                complete = parts
+            for raw in reversed(complete):
+                if not raw.strip():
+                    continue
+                collected.append(raw.decode("utf-8", errors="replace"))
+                if len(collected) > limit:
+                    break
+        if pending.strip() and len(collected) <= limit:
+            collected.append(pending.decode("utf-8", errors="replace"))
+    truncated = len(collected) > limit
+    return list(reversed(collected[:limit])), truncated
+
+
+def _cursor_as_claude(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Cursor 行没有独立 type 字段，整理成 Claude 记录再复用解析。"""
+
+    role = record.get("role") or record.get("type")
+    if role == "model":
+        role = "assistant"
+    if role not in {"user", "assistant"}:
+        return None
+    message = record.get("message")
+    if isinstance(message, Mapping):
+        return {"type": role, "message": message}
+    content = record.get("content")
+    if isinstance(content, (str, list)):
+        return {"type": role, "message": {"role": role, "content": content}}
+    return None
+
+
+def _cursor_candidates(
+    roots: Sequence[Path],
+    cwd: str | None,
+    start: float,
+    end: float,
+) -> list[_Candidate]:
+    """转录没有逐行时间，用文件 mtime 决定它是否还在告警附近。"""
+
+    del end
+    slugs = _path_slugs(cwd) if cwd else None
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            projects = [entry for entry in root.iterdir() if entry.is_dir()]
+        except OSError:
+            continue
+        for project in projects:
+            if slugs is not None and project.name not in slugs:
+                continue
+            transcripts = project / "agent-transcripts"
+            if not transcripts.is_dir():
+                continue
+            for path in transcripts.rglob("*.jsonl"):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if not path.is_file() or stat.st_mtime < cutoff:
+                    continue
+                out.append(_Candidate(path, stat.st_mtime, stat.st_size))
+    return out
+
+
+def _extract_cursor(path: Path, start: float, end: float) -> _Extraction:
+    """行内没有时间戳。文件在窗口内写过，就把尾部当成当时的活动。"""
+
+    tailed = _tail_text_lines(path, _MAX_EVENTS)
+    if tailed is None:
+        return _Extraction(None, False, 0, 0)
+    lines, truncated = tailed
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _Extraction(None, False, 0, 0)
+    tool_calls: dict[str, _ToolCall] = {}
+    items: list[tuple[dict[str, Any], int, int]] = []
+    for raw in lines:
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        shaped = _cursor_as_claude(record)
+        if shaped is None:
+            continue
+        for item, delta_in, delta_out in _claude_map(
+            shaped, mtime, tool_calls=tool_calls
+        ):
+            stamped = dict(item)
+            stamped["t"] = mtime
+            items.append((stamped, delta_in, delta_out))
+    if not items:
+        return _Extraction((), False, 0, 0)
+    in_window = start <= mtime <= end
+    if in_window:
+        return _Extraction(
+            tuple(item for item, _, _ in items),
+            truncated,
+            sum(delta for _, delta, _ in items),
+            sum(delta for _, _, delta in items),
+            event_count=len(items),
+        )
+    tail = items[-_FALLBACK_TAIL:]
+    return _Extraction(
+        tuple(item for item, _, _ in tail),
+        False,
+        sum(delta for _, delta, _ in tail),
+        sum(delta for _, _, delta in tail),
+        fallback=True,
+    )
+
+
+# ---------------------------------------------------------------- Gemini / Qwen
+
+
+def _project_paths(home: Path) -> dict[str, str]:
+    """projects.json 把项目 id 映到工作目录。几种历史写法都认。"""
+
+    path = home / "projects.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    found: dict[str, str] = {}
+
+    def take(ident: object, value: object) -> None:
+        if isinstance(value, str) and isinstance(ident, str) and value:
+            found[ident] = value
+            return
+        if isinstance(value, Mapping) and isinstance(ident, str):
+            cwd = value.get("path") or value.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                found[ident] = cwd
+
+    if isinstance(payload, Mapping):
+        nested = payload.get("projects")
+        source = nested if isinstance(nested, Mapping) else payload
+        for key, value in source.items():
+            take(key, value)
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, Mapping):
+                take(item.get("id") or item.get("hash"), item.get("path") or item.get("cwd"))
+    return found
+
+
+def _ids_for_cwd(home: Path, cwd: str) -> set[str] | None:
+    """有项目表时只返回对得上的 id；没有表时返回 None，表示还得看文件头。"""
+
+    mapping = _project_paths(home)
+    if not mapping:
+        return None
+    matched = {
+        ident for ident, path in mapping.items() if _cwd_matches(cwd, path)
+    }
+    # 中文注释：表里没有这个目录时，改看会话头，避免过期的项目表把会话藏掉。
+    return matched or None
+
+
+def _header_cwd(path: Path) -> str | None:
+    """会话头里的 cwd。JSONL 只看开头几行，不把整份历史读进来。"""
+
+    try:
+        if path.suffix == ".json":
+            if path.stat().st_size > _BLOB_READ_LIMIT:
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, Mapping):
+                for key in ("cwd", "projectPath", "directory"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+            return None
+        with path.open("rb") as handle:
+            raw = handle.read(65536)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    for line in raw.split(b"\n")[:8]:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        for key in ("cwd", "projectPath", "directory"):
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _chat_candidates(
+    homes: Sequence[Path],
+    cwd: str | None,
+    start: float,
+    *,
+    layouts: tuple[str, ...],
+) -> list[_Candidate]:
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for home in homes:
+        if not home.is_dir():
+            continue
+        allowed = _ids_for_cwd(home, cwd) if cwd else None
+        slugs = _path_slugs(cwd) if cwd else None
+        chat_dirs: list[tuple[Path, bool]] = []
+        if "tmp" in layouts:
+            tmp = home / "tmp"
+            if tmp.is_dir():
+                try:
+                    projects = [entry for entry in tmp.iterdir() if entry.is_dir()]
+                except OSError:
+                    projects = []
+                for project in projects:
+                    if allowed is not None and project.name not in allowed:
+                        continue
+                    chats = project / "chats"
+                    if chats.is_dir():
+                        chat_dirs.append((chats, allowed is not None))
+        if "projects" in layouts:
+            projects_root = home / "projects"
+            if projects_root.is_dir():
+                try:
+                    projects = [
+                        entry for entry in projects_root.iterdir() if entry.is_dir()
+                    ]
+                except OSError:
+                    projects = []
+                for project in projects:
+                    if slugs is not None and project.name not in slugs:
+                        continue
+                    chats = project / "chats"
+                    if chats.is_dir():
+                        chat_dirs.append((chats, slugs is not None))
+        for chats, trusted in chat_dirs:
+            try:
+                entries = list(chats.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if path.suffix not in {".json", ".jsonl"} or not path.is_file():
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if stat.st_mtime < cutoff:
+                    continue
+                if cwd and not trusted:
+                    session_cwd = _header_cwd(path)
+                    if not session_cwd or not _cwd_matches(cwd, session_cwd):
+                        continue
+                out.append(_Candidate(path, stat.st_mtime, stat.st_size))
+    return out
+
+
+def _gemini_candidates(
+    homes: Sequence[Path], cwd: str | None, start: float
+) -> list[_Candidate]:
+    return _chat_candidates(homes, cwd, start, layouts=("tmp",))
+
+
+def _qwen_candidates(
+    homes: Sequence[Path], cwd: str | None, start: float
+) -> list[_Candidate]:
+    return _chat_candidates(homes, cwd, start, layouts=("tmp", "projects"))
+
+
+def _gemini_record_ts(record: Mapping[str, Any]) -> float | None:
+    return _parse_ts(record.get("timestamp") or record.get("startTime"))
+
+
+def _gemini_tool_items(
+    record: Mapping[str, Any],
+    timestamp: float,
+    tool_calls: dict[str, _ToolCall],
+) -> list[tuple[dict[str, Any], int, int]]:
+    """只取工具调用和结果，不保留模型正文与思考。"""
+
+    calls: list[Mapping[str, Any]] = []
+    raw_calls = record.get("toolCalls")
+    if isinstance(raw_calls, list):
+        calls.extend(item for item in raw_calls if isinstance(item, Mapping))
+    content = record.get("content")
+    responses: list[tuple[object, object]] = []
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, Mapping):
+                continue
+            function_call = part.get("functionCall")
+            if isinstance(function_call, Mapping):
+                calls.append(
+                    {
+                        "name": function_call.get("name"),
+                        "args": function_call.get("args"),
+                        "id": part.get("id") or function_call.get("id"),
+                    }
+                )
+            elif part.get("type") in {"functionCall", "tool_use"}:
+                calls.append(part)
+            function_response = part.get("functionResponse")
+            if isinstance(function_response, Mapping):
+                responses.append(
+                    (
+                        part.get("id") or function_response.get("id"),
+                        function_response.get("response"),
+                    )
+                )
+            elif part.get("type") in {"functionResponse", "tool_result"}:
+                responses.append((part.get("id") or part.get("tool_use_id"), part.get("content")))
+    items: list[tuple[dict[str, Any], int, int]] = []
+    for call in calls:
+        name = str(call.get("name") or "")
+        call_id = call.get("id")
+        items.append(
+            _tool_item(name, call.get("args") or call.get("input"), timestamp, call_id, tool_calls)
+        )
+        result = call.get("result")
+        output = _output_item(_as_text(result), timestamp, call_id, tool_calls)
+        if output is not None:
+            items.append(output)
+    for call_id, body in responses:
+        output = _output_item(_as_text(body) or _content_text(body), timestamp, call_id, tool_calls)
+        if output is not None:
+            items.append(output)
+    return items
+
+
+def _rewind_target(record: Mapping[str, Any]) -> str | None:
+    for key in ("targetMessageId", "targetId", "messageId", "target"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _gemini_items(
+    records: Iterable[Mapping[str, Any]],
+) -> list[tuple[dict[str, Any], int, int]]:
+    """按写入顺序折叠：同 id 覆盖，$rewindTo 丢掉目标及其后的消息。"""
+
+    live: list[tuple[str | None, list[tuple[dict[str, Any], int, int]]]] = []
+    tool_calls: dict[str, _ToolCall] = {}
+    for record in records:
+        kind = str(record.get("type") or "")
+        if kind == "$rewindTo":
+            target = _rewind_target(record)
+            index = next(
+                (slot for slot, item in enumerate(live) if item[0] == target),
+                None,
+            )
+            if index is not None:
+                del live[index:]
+            continue
+        if kind in {"$set", "session_metadata"}:
+            continue
+        timestamp = _gemini_record_ts(record)
+        if timestamp is None:
+            continue
+        message_id = record.get("id") if isinstance(record.get("id"), str) else None
+        if kind == "message_update":
+            extra = _gemini_tool_items(record, timestamp, tool_calls)
+            if not extra:
+                continue
+            if message_id:
+                for slot, (existing_id, existing) in enumerate(live):
+                    if existing_id != message_id:
+                        continue
+                    kept = [item for item in existing if item[0]["kind"] == "user"]
+                    live[slot] = (message_id, kept + extra)
+                    break
+                else:
+                    live.append((message_id, extra))
+            else:
+                live.append((None, extra))
+            continue
+        items: list[tuple[dict[str, Any], int, int]] = []
+        if kind == "user":
+            user = _user_item(_content_text(record.get("content")), timestamp)
+            if user is not None:
+                items.append(user)
+            content = record.get("content")
+            if isinstance(content, list):
+                items.extend(
+                    _image_event(part, timestamp)
+                    for part in content
+                    if isinstance(part, Mapping)
+                    and part.get("type") in {"image", "image_url", "input_image"}
+                )
+        elif kind in {"gemini", "model"}:
+            items.extend(_gemini_tool_items(record, timestamp, tool_calls))
+        else:
+            continue
+        if message_id:
+            for slot, (existing_id, _) in enumerate(live):
+                if existing_id == message_id:
+                    live[slot] = (message_id, items)
+                    break
+            else:
+                live.append((message_id, items))
+        elif items:
+            live.append((None, items))
+    return [item for _, events in live for item in events]
+
+
+def _gemini_blob_records(path: Path) -> list[Mapping[str, Any]] | None:
+    try:
+        if path.stat().st_size > _BLOB_READ_LIMIT:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return []
+    records: list[Mapping[str, Any]] = []
+    for message in messages:
+        if isinstance(message, Mapping):
+            records.append(message)
+    return records
+
+
+def _extract_gemini_records(
+    records: Iterable[Mapping[str, Any]], start: float, end: float
+) -> _Extraction:
+    return _bucket_items(_gemini_items(records), start, end)
+
+
+def _extract_gemini(path: Path, start: float, end: float) -> _Extraction:
+    if path.suffix == ".json":
+        records = _gemini_blob_records(path)
+        if records is None:
+            return _Extraction(None, False, 0, 0)
+        return _extract_gemini_records(records, start, end)
+    if not _is_readable(path):
+        return _Extraction(None, False, 0, 0)
+    return _extract_gemini_records(
+        _iter_records(path, None, _suffix_offset(path, start, _gemini_record_ts)),
+        start,
+        end,
+    )
+
+
+def _extract_qwen(path: Path, start: float, end: float) -> _Extraction:
+    return _extract_gemini(path, start, end)
+
+
+# ---------------------------------------------------------------- Aider
+
+
+_AIDER_EDIT = re.compile(r"^> Applied edit to (?P<path>\S.*?)\s*$")
+_AIDER_EMPTY = re.compile(r"^> Creating empty file (?P<path>\S.*?)\s*$")
+_AIDER_RUN = re.compile(r"^> Running (?P<command>\S.*?)\s*$")
+
+
+def _aider_candidates(
+    homes: Sequence[Path],
+    cwd: str | None,
+    start: float,
+) -> list[_Candidate]:
+    """每个目录最多一份聊天历史，用文件 mtime 判断是否靠近告警。"""
+
+    out: list[_Candidate] = []
+    cutoff = start - _MTIME_SLACK_SECONDS
+    for home in homes:
+        path = Path(home) / ".aider.chat.history.md"
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if not path.is_file() or stat.st_mtime < cutoff:
+            continue
+        if cwd and not _cwd_matches(cwd, str(path.parent)):
+            continue
+        out.append(_Candidate(path, stat.st_mtime, stat.st_size))
+    return out
+
+
+def _aider_action(text: str) -> tuple[str, dict[str, str]] | None:
+    """只认编辑和命令。用户正文、跳过的编辑和 token 行都不算活动。"""
+
+    edited = _AIDER_EDIT.match(text) or _AIDER_EMPTY.match(text)
+    if edited is not None:
+        return "edit", {"path": edited.group("path")}
+    running = _AIDER_RUN.match(text)
+    if running is None:
+        return None
+    return "shell", {"command": running.group("command")}
+
+
+def _extract_aider(path: Path, start: float, end: float) -> _Extraction:
+    """历史没有逐条时间。文件落在窗口内时，把尾部工具行当作当时的活动。"""
+
+    tailed = _tail_text_lines(path, _MAX_EVENTS)
+    if tailed is None:
+        return _Extraction(None, False, 0, 0)
+    lines, truncated = tailed
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _Extraction(None, False, 0, 0)
+    items: list[tuple[dict[str, Any], int, int]] = []
+    for raw in lines:
+        action = _aider_action(raw.strip())
+        if action is None:
+            continue
+        name, argument = action
+        activities = describe_tool_activity(name, argument)
+        detail = next(iter(argument.values()), "")
+        size = len(detail.encode("utf-8"))
+        items.append(
+            (
+                {
+                    "t": mtime,
+                    "kind": "tool",
+                    "label": "",
+                    "detail": detail,
+                    "size": size,
+                    "activities": activities,
+                },
+                size,
+                0,
+            )
+        )
+    if not items:
+        return _Extraction((), False, 0, 0)
+    if start <= mtime <= end:
+        return _Extraction(
+            tuple(item for item, _, _ in items),
+            truncated,
+            sum(delta for _, delta, _ in items),
+            sum(delta for _, _, delta in items),
+            event_count=len(items),
+        )
+    tail = items[-_FALLBACK_TAIL:]
+    return _Extraction(
+        tuple(item for item, _, _ in tail),
+        False,
+        sum(delta for _, delta, _ in tail),
+        sum(delta for _, _, delta in tail),
+        fallback=True,
+    )
+
+
+# ---------------------------------------------------------------- 本机默认目录
+
+
+def _existing_file(path: Path) -> tuple[Path, ...]:
+    return (path,) if path.is_file() else ()
+
+
+def _existing_dir(path: Path) -> tuple[Path, ...]:
+    return (path,) if path.is_dir() else ()
+
+
+def _default_opencode_dbs() -> tuple[Path, ...]:
+    configured = os.environ.get("OPENCODE_DB")
+    if configured:
+        return _existing_file(Path(configured).expanduser())
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
+    return _existing_file(base / "opencode" / "opencode.db")
+
+
+def _default_cursor_projects() -> tuple[Path, ...]:
+    configured = os.environ.get("CURSOR_CONFIG_DIR")
+    if configured:
+        home = Path(configured).expanduser()
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        home = Path(xdg).expanduser() / "cursor" if xdg else Path.home() / ".cursor"
+    return _existing_dir(home / "projects")
+
+
+def _default_gemini_homes() -> tuple[Path, ...]:
+    configured = os.environ.get("GEMINI_CLI_HOME")
+    if configured:
+        raw = Path(configured).expanduser()
+        home = raw if raw.name == ".gemini" else raw / ".gemini"
+    else:
+        home = Path.home() / ".gemini"
+    return _existing_dir(home)
+
+
+def _default_qwen_homes() -> tuple[Path, ...]:
+    configured = os.environ.get("QWEN_HOME") or os.environ.get("QWEN_CODE_HOME")
+    home = Path(configured).expanduser() if configured else Path.home() / ".qwen"
+    return _existing_dir(home)
+
+
+def _default_aider_homes() -> tuple[Path, ...]:
+    configured = os.environ.get("AIDER_HOME")
+    home = Path(configured).expanduser() if configured else Path.home() / ".aider"
+    return _existing_dir(home)
+
+
+def _opencode_dbs_from_homes(homes: Sequence[Path]) -> tuple[Path, ...]:
+    """显式目录只映射到其中的数据库文件，空元组不退回本机默认库。"""
+
+    found: list[Path] = []
+    for home in homes:
+        database = opencode_db_path(Path(home))
+        if database.is_file():
+            found.append(database)
+    return tuple(found)
+
+
+def _cursor_projects_from_homes(homes: Sequence[Path]) -> tuple[Path, ...]:
+    """Cursor 告警根是配置目录下的 projects，不是配置目录本身。"""
+
+    found: list[Path] = []
+    for home in homes:
+        projects = Path(home) / "projects"
+        if projects.is_dir():
+            found.append(projects)
+    return tuple(found)
+
+
+def _existing_homes(homes: Sequence[Path]) -> tuple[Path, ...]:
+    return tuple(path for path in (Path(home) for home in homes) if path.is_dir())
+
+
+def configured_alert_context_roots(
+    *,
+    codex_sessions: Sequence[Path] = (),
+    claude_homes: Sequence[Path] = (),
+    kimi_homes: Sequence[Path] = (),
+    commandcode_homes: Sequence[Path] = (),
+    grok_homes: Sequence[Path] = (),
+    dsh_homes: Sequence[Path] = (),
+    opencode_homes: Sequence[Path] | None = None,
+    cursor_homes: Sequence[Path] | None = None,
+    gemini_homes: Sequence[Path] | None = None,
+    qwen_homes: Sequence[Path] | None = None,
+    aider_homes: Sequence[Path] | None = None,
+) -> AlertContextRoots:
+    """已配置的产品只用传入的目录；参数为 None 时才看本机默认位置。"""
+
+    return AlertContextRoots(
+        codex_sessions=tuple(codex_sessions),
+        claude_projects=tuple(Path(home) / "projects" for home in claude_homes),
+        kimi_sessions=tuple(Path(home) / "sessions" for home in kimi_homes),
+        commandcode_projects=tuple(
+            Path(home) / "projects" for home in commandcode_homes
+        ),
+        grok_sessions=tuple(Path(home) / "sessions" for home in grok_homes),
+        dsh_sessions=tuple(Path(home) / "sessions" for home in dsh_homes),
+        opencode_dbs=(
+            _default_opencode_dbs()
+            if opencode_homes is None
+            else _opencode_dbs_from_homes(opencode_homes)
+        ),
+        cursor_projects=(
+            _default_cursor_projects()
+            if cursor_homes is None
+            else _cursor_projects_from_homes(cursor_homes)
+        ),
+        gemini_homes=(
+            _default_gemini_homes()
+            if gemini_homes is None
+            else _existing_homes(gemini_homes)
+        ),
+        qwen_homes=(
+            _default_qwen_homes()
+            if qwen_homes is None
+            else _existing_homes(qwen_homes)
+        ),
+        aider_homes=(
+            _default_aider_homes()
+            if aider_homes is None
+            else _existing_homes(aider_homes)
+        ),
+    )
+
+
+def default_alert_context_roots() -> AlertContextRoots:
+    """命令行使用各产品的默认数据目录；目录不存在就不扫。"""
+
+    from .claude import resolve_claude_homes
+    from .commandcode import resolve_commandcode_homes
+    from .discovery import default_session_root
+    from .dsh import resolve_dsh_homes
+    from .grok import resolve_grok_homes
+    from .kimi import resolve_kimi_homes
+
+    codex = default_session_root()
+    return configured_alert_context_roots(
+        codex_sessions=(codex,) if codex.is_dir() else (),
+        claude_homes=resolve_claude_homes(),
+        kimi_homes=resolve_kimi_homes(),
+        commandcode_homes=resolve_commandcode_homes(),
+        grok_homes=resolve_grok_homes(),
+        dsh_homes=resolve_dsh_homes(),
+        opencode_homes=resolve_opencode_homes(),
+        cursor_homes=resolve_cursor_homes(),
+        gemini_homes=resolve_gemini_homes(),
+        qwen_homes=resolve_qwen_homes(),
+        aider_homes=resolve_aider_homes(),
+    )

@@ -27,6 +27,13 @@ from .discovery import (
 )
 from .events import EventObservation
 from .health import HealthTracker, sanitize_error
+from .local_agents import (
+    resolve_aider_homes,
+    resolve_cursor_homes,
+    resolve_gemini_homes,
+    resolve_opencode_homes,
+    resolve_qwen_homes,
+)
 from .multi_models import (
     DetectionConfidence,
     SessionStatus,
@@ -322,6 +329,11 @@ class MultiSessionMonitor:
                     stale_after=max(2 * self.config.quota_interval, 300),
                 )
                 if self.config.dashboard:
+                    opencode_homes = resolve_opencode_homes(None)
+                    cursor_homes = resolve_cursor_homes(None)
+                    gemini_homes = resolve_gemini_homes(None)
+                    qwen_homes = resolve_qwen_homes(None)
+                    aider_homes = resolve_aider_homes(None)
                     self._dashboard = DashboardServer(
                         registry=self.registry,
                         account_metadata={
@@ -345,7 +357,17 @@ class MultiSessionMonitor:
                         usage_aggregator=UsageAggregator(
                             cache_path=self.registry.state_dir / "usage-index.sqlite3",
                             background_indexing=True,
+                            opencode_homes=opencode_homes,
+                            cursor_homes=cursor_homes,
+                            gemini_homes=gemini_homes,
+                            qwen_homes=qwen_homes,
+                            aider_homes=aider_homes,
                         ),
+                        opencode_homes=opencode_homes,
+                        cursor_homes=cursor_homes,
+                        gemini_homes=gemini_homes,
+                        qwen_homes=qwen_homes,
+                        aider_homes=aider_homes,
                         # 中文注释：单账号进程不扫描流量，但仍展示同一状态目录里
                         # 已落盘的历史告警，避免和 daemon 的视图不一致。
                         alert_store=TrafficAlertStore(

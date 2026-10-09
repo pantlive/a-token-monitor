@@ -6,7 +6,9 @@ import base64
 import json
 import os
 import re
+import shutil
 import struct
+import subprocess
 import tempfile
 import time
 import unittest
@@ -45,6 +47,7 @@ from a_token_monitor.dashboard import (
     favicon_response,
 )
 from a_token_monitor.health import HealthTracker
+from a_token_monitor.i18n import substitute
 from a_token_monitor.retention import RetentionController, RetentionError
 from a_token_monitor.multi_models import (
     DetectionConfidence,
@@ -60,6 +63,106 @@ from a_token_monitor.usage import UsageAggregator
 
 class DashboardTests(unittest.TestCase):
     """验证网页只展示额度、会话和用量状态。"""
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证页面脚本")
+    def test_localized_javascript_is_valid(self) -> None:
+        """两种语言的真实脚本都必须可解析，防止译文引号破坏页面。"""
+
+        for page in (_DASHBOARD_HTML, _SETTINGS_HTML):
+            for language in ("zh", "en"):
+                scripts = re.findall(
+                    r"<script(?:\s[^>]*)?>(.*?)</script>",
+                    substitute(page, language),
+                    re.S,
+                )
+                for index, script in enumerate(scripts):
+                    with self.subTest(language=language, script=index):
+                        result = subprocess.run(
+                            [shutil.which("node"), "--check"],
+                            input=script,
+                            text=True,
+                            capture_output=True,
+                            timeout=10,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证实际页面渲染")
+    def test_alert_context_renders_purpose_instead_of_commands(self) -> None:
+        """执行真实渲染函数，展示目的、证据和对象，隐藏工具与命令。"""
+
+        # 中文注释：直接提取产品代码，避免另写一份渲染逻辑作为测试。
+        helpers = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const escapeHtml =") : _DASHBOARD_HTML.index(
+                "  const formatRelativeTime ="
+            )
+        ]
+        sizes = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const formatDataSize =") : _DASHBOARD_HTML.index(
+                "  const formatCredits ="
+            )
+        ]
+        renderer = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index(
+                "  const ALERT_CONTEXT_REASONS ="
+            ) : _DASHBOARD_HTML.index("  const renderAlertContextRow =")
+        ]
+        context = {
+            "found": True,
+            "content_enabled": False,
+            "activity_summary": ["发起图片上传", "发起代码推送"],
+            "events": [
+                {
+                    "kind": "tool",
+                    "label": "exec → exec_command",
+                    "detail": "curl -T file.png",
+                    "activities": [{"summary": "发起图片上传", "basis": "parameters"}],
+                },
+                {
+                    "kind": "tool_output",
+                    "label": "exec → exec_command",
+                    "activities": [
+                        {
+                            "summary": "发起图片上传",
+                            "basis": "parameters",
+                            "phase": "result",
+                        }
+                    ],
+                },
+                {"kind": "tool", "label": ""},
+                {
+                    "kind": "tool",
+                    "activities": [
+                        {
+                            "summary": '<img src=x onerror="alert(1)">',
+                            "basis": "unknown",
+                        }
+                    ],
+                },
+            ],
+        }
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module"],
+            input=(
+                helpers
+                + sizes
+                + renderer
+                + f"process.stdout.write(renderAlertContext({json.dumps(context)}));"
+            ),
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        self.assertIn("发起图片上传", result.stdout)
+        self.assertIn("发起代码推送", result.stdout)
+        self.assertIn("执行结果", result.stdout)
+        self.assertIn("用途无法判断", result.stdout)
+        self.assertIn("根据参数判断", result.stdout)
+        self.assertIn("行为类别仍可见", result.stdout)
+        self.assertNotIn("exec_command", result.stdout)
+        self.assertNotIn("curl", result.stdout)
+        self.assertIn("&lt;img", result.stdout)
+        self.assertNotIn("<img", result.stdout)
 
     def test_aggregates_quotas_without_mixing_accounts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -286,6 +389,10 @@ class DashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             )
             server.start()
             host, port = server.address
@@ -377,6 +484,10 @@ class DashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             )
             server.start()
             host, port = server.address
@@ -539,6 +650,10 @@ class DashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             )
             server.start()
             host, port = server.address
@@ -635,6 +750,10 @@ class DashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             )
             server.start()
             host, port = server.address
@@ -714,6 +833,10 @@ class DashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             )
             server.start()
             host, port = server.address
@@ -874,6 +997,10 @@ class DashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             )
             server.start()
             host, port = server.address
@@ -1003,6 +1130,10 @@ class AlertHistoryDashboardTests(unittest.TestCase):
             dsh_homes=(),
             commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             alert_store=alert_store,
         )
         server.start()
@@ -1124,6 +1255,163 @@ class AlertHistoryDashboardTests(unittest.TestCase):
                 else:
                     os.environ["CODEX_HOME"] = original_home
                 server.close()
+
+    def test_alert_context_uses_commandcode_and_grok_homes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            observed_at = time.time()
+            commandcode_home = root / "commandcode"
+            grok_home = root / "grok"
+            session_id = "72be7711-615e-4d09-b176-d8ec114aa8f8"
+            transcript = (
+                commandcode_home / "projects" / "home-dev-app" / f"{session_id}.jsonl"
+            )
+            transcript.parent.mkdir(parents=True)
+            grok_session = grok_home / "sessions" / "project" / "sess-grok"
+            grok_session.mkdir(parents=True)
+            (grok_session / "summary.json").write_text(
+                json.dumps({"info": {"cwd": "/home/dev/app", "id": "sess-grok"}}),
+                encoding="utf-8",
+            )
+
+            def iso(ts: float) -> str:
+                from datetime import datetime, timezone
+
+                return (
+                    datetime.fromtimestamp(ts, timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+
+            transcript.write_text(
+                "\n".join(
+                    json.dumps(line, ensure_ascii=False)
+                    for line in (
+                        {
+                            "type": "session",
+                            "cwd": "/home/dev/app",
+                            "timestamp": iso(observed_at - 60),
+                        },
+                        {
+                            "type": "message",
+                            "timestamp": iso(observed_at - 5),
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "tool_use",
+                                        "id": "tool-1",
+                                        "name": "shell_command",
+                                        "input": {
+                                            "command": (
+                                                "curl -F image=@/tmp/chart.png "
+                                                "https://example.org"
+                                            )
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (grok_session / "updates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "timestamp": int(observed_at - 5),
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "call-1",
+                                "rawInput": {"target_file": "/home/dev/app/main.py"},
+                                "_meta": {"x.ai/tool": {"name": "read_file"}},
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            store = TrafficAlertStore(root / "state")
+            store.record(
+                [
+                    TrafficAlert(
+                        level="warn",
+                        product="command-code",
+                        pid=21,
+                        kind="burst",
+                        bytes=20 * 1024 * 1024,
+                        window_seconds=15.0,
+                        message="command code 突发外发",
+                        observed_at=observed_at,
+                        remote="203.0.113.10:443",
+                        process_key="command-code:21:10",
+                        command="command-code",
+                        cwd="/home/dev/app",
+                    ),
+                    TrafficAlert(
+                        level="warn",
+                        product="grok",
+                        pid=22,
+                        kind="burst",
+                        bytes=20 * 1024 * 1024,
+                        window_seconds=15.0,
+                        message="grok 突发外发",
+                        observed_at=observed_at,
+                        remote="203.0.113.11:443",
+                        process_key="grok:22:10",
+                        command="grok",
+                        cwd="/home/dev/app",
+                    ),
+                ]
+            )
+            server = DashboardServer(
+                registry=MultiSessionRegistry(root / "monitor-state"),
+                config=DashboardConfig(port=0),
+                grok_homes=(grok_home,),
+                kimi_homes=(),
+                dsh_homes=(),
+                commandcode_homes=(commandcode_home,),
+                claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
+                alert_store=store,
+            )
+            server.start()
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/api/alerts", timeout=2) as response:
+                    alerts = json.load(response)["alerts"]
+                contexts = {}
+                for alert in alerts:
+                    with urlopen(
+                        f"{base_url}/api/alerts/context?id={alert['id']}",
+                        timeout=2,
+                    ) as response:
+                        contexts[alert["product"]] = json.load(response)["context"]
+            finally:
+                server.close()
+
+        command_context = contexts["command-code"]
+        grok_context = contexts["grok"]
+        self.assertTrue(command_context["found"])
+        self.assertEqual(command_context["session"]["session_id"], session_id)
+        self.assertEqual(
+            command_context["events"][0]["activities"][0]["summary"],
+            "发起图片上传",
+        )
+        self.assertTrue(grok_context["found"])
+        self.assertEqual(grok_context["session"]["session_id"], "sess-grok")
+        self.assertEqual(grok_context["events"][0]["label"], "read_file")
+        self.assertEqual(
+            grok_context["events"][0]["activities"][0]["summary"],
+            "读取代码",
+        )
 
     def test_api_without_store_reports_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1350,6 +1638,10 @@ class NoCodexDashboardTests(unittest.TestCase):
                 dsh_homes=(root / "missing" / "dsh",),
                 commandcode_homes=(root / "missing" / "commandcode",),
                 claude_homes=(root / "missing" / "claude",),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
@@ -1703,6 +1995,10 @@ class StylesheetIntegrityTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             server.start()
             base = f"http://{server.address[0]}:{server.address[1]}"
@@ -1757,6 +2053,10 @@ class StylesheetIntegrityTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             server.start()
             base = f"http://{server.address[0]}:{server.address[1]}"
@@ -2634,6 +2934,10 @@ class FaviconTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
@@ -2735,6 +3039,10 @@ class UsageSearchDashboardTests(unittest.TestCase):
             dsh_homes=(),
             commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             usage_aggregator=aggregator,
         )
         server.start()
@@ -3015,6 +3323,10 @@ class HousekeepingDashboardTests(unittest.TestCase):
             dsh_homes=(),
             commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             usage_aggregator=aggregator,
             housekeeping=monitor,
         )
@@ -3577,6 +3889,10 @@ class ScanDirsDashboardTests(unittest.TestCase):
             dsh_homes=(),
             commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             scan_dirs=controller,
         )
         server.start()
@@ -3630,11 +3946,26 @@ class ScanDirsDashboardTests(unittest.TestCase):
         self.assertTrue(payload["available"])
         self.assertIn("updated_at", payload)
         self.assertEqual(payload["priority"], ["web", "cli", "auto"])
-        self.assertEqual(len(payload["providers"]), 6)
+        self.assertEqual(len(payload["providers"]), 11)
         self.assertEqual(
             [provider["key"] for provider in payload["providers"]],
-            ["codex", "claude", "commandcode", "dsh", "grok", "kimi"],
+            [
+                "codex",
+                "claude",
+                "commandcode",
+                "dsh",
+                "grok",
+                "kimi",
+                "opencode",
+                "cursor",
+                "gemini",
+                "qwen",
+                "aider",
+            ],
         )
+        for provider in payload["providers"]:
+            name = provider["name"]
+            self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in name))
         codex = self._provider(payload, "codex")
         self.assertEqual(codex["source"], "auto")
         self.assertIsNone(codex["override_dirs"])
@@ -3872,6 +4203,10 @@ class ScanDirsDashboardTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             server.start()
             base_url = f"http://{server.address[0]}:{server.address[1]}"
@@ -3917,6 +4252,10 @@ class HealthEndpointTests(unittest.TestCase):
             "dsh_homes": (),
             "commandcode_homes": (),
             "claude_homes": (),
+            "opencode_homes": (),
+            "cursor_homes": (),
+            "gemini_homes": (),
+            "qwen_homes": (), "aider_homes": (),
             "health": health,
         }
         options.update(kwargs)
@@ -4215,7 +4554,11 @@ class HistoryDashboardTests(unittest.TestCase):
         controller = (
             RetentionController(
                 state_dir=root / "state",
-                cli_values={"usage_days": 90.0, "session_days": 30.0},
+                cli_values={
+                    "usage_days": 90.0,
+                    "session_days": 30.0,
+                    "alert_days": 14.0,
+                },
             )
             if with_controller
             else None
@@ -4228,6 +4571,10 @@ class HistoryDashboardTests(unittest.TestCase):
             dsh_homes=(),
             commandcode_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
             history=manager,
             retention=controller,
         )
@@ -4392,7 +4739,11 @@ class HistoryDashboardTests(unittest.TestCase):
                 server.close()
             reloaded = RetentionController(
                 state_dir=root / "state",
-                cli_values={"usage_days": 90.0, "session_days": 30.0},
+                cli_values={
+                    "usage_days": 90.0,
+                    "session_days": 30.0,
+                    "alert_days": 14.0,
+                },
             ).effective()
 
         self.assertEqual(status, 200)
@@ -4401,7 +4752,28 @@ class HistoryDashboardTests(unittest.TestCase):
         self.assertEqual(payload["retention"]["usage_days"]["source"], "web")
         self.assertEqual(payload["retention"]["session_days"]["value"], 10)
         # 中文注释:配置已落盘,新控制器能读到同样的覆盖。
-        self.assertEqual(reloaded, {"usage_days": 45.0, "session_days": 10.0})
+        self.assertEqual(
+            reloaded, {"usage_days": 45.0, "session_days": 10.0, "alert_days": 14.0}
+        )
+
+    def test_set_alert_retention_is_editable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "set-retention", "alert_days": 7},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["retention"]["alert_days"]["value"], 7)
+        self.assertEqual(payload["retention"]["alert_days"]["source"], "web")
+        self.assertEqual(payload["retention"]["usage_days"]["source"], "cli")
 
     def test_set_retention_rejects_invalid_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -4518,6 +4890,8 @@ class HistoryDashboardTests(unittest.TestCase):
         self.assertIn('id="history-preview-content"', _SETTINGS_HTML)
         self.assertIn("refreshHistory", _SETTINGS_HTML)
         self.assertIn("/api/history", _SETTINGS_HTML)
+        self.assertIn('data-history-days="alert_days"', _SETTINGS_HTML)
+        self.assertNotIn("只读，由运行配置决定", _SETTINGS_HTML)
         # 主页不出现历史数据设置区块。
         self.assertNotIn('id="history-settings"', _DASHBOARD_HTML)
         self.assertNotIn("/api/history", _DASHBOARD_HTML)

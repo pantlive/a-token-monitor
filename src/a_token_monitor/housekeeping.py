@@ -6,8 +6,10 @@
 预览，拒绝处理仍在运行的活动会话和过新的文件，并支持按项目（工作目录）
 筛选后压缩归档。
 
-Codex、Claude Code、Kimi Code、Grok、DeepSeek Harness、Command Code 的
-会话文件都可以归档/清理；监控状态目录只统计占用并提醒。
+Codex、Claude Code、Kimi Code、Grok、DeepSeek Harness、Command Code、
+Cursor、Gemini CLI、Qwen Code、Aider 的会话文件都可以归档/清理。OpenCode 的
+数据库包含全部会话，只统计目录占用，不作为可删除的会话文件。
+监控状态目录同样只统计占用并提醒。
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from .claude import claude_session_id
 from .commandcode import read_commandcode_session_info
 from .dsh import read_dsh_projcache
 from .grok import decode_grok_project
+from .local_agents import chat_project, cursor_session_id
 from .traffic import format_bytes
 from .usage import SessionUsage, session_id_from_path
 
@@ -1127,14 +1130,23 @@ _SESSION_SPECS = {
     "grok": _SessionSpec("sessions", "**/*"),
     "dsh": _SessionSpec("sessions", "**/*"),
     "command-code": _SessionSpec("projects", "**/*"),
+    "cursor": _SessionSpec("projects", "**/agent-transcripts/**/*.jsonl"),
+    "gemini": _SessionSpec("", "tmp/*/chats/*"),
+    "qwen": _SessionSpec("", "**/chats/*"),
+    "aider": _SessionSpec("", ".aider.chat.history.md"),
 }
+_CHAT_SUFFIXES = frozenset({".json", ".jsonl"})
 
 
 def default_sessions_root(product: str, home: Path) -> Path | None:
     """返回某产品的会话根目录；没有可归档会话布局的产品返回 None。"""
 
     spec = _SESSION_SPECS.get(product)
-    return home / spec.sessions_dir if spec is not None else None
+    if spec is None:
+        return None
+    if spec.sessions_dir == "":
+        return home
+    return home / spec.sessions_dir
 
 
 def scan_session_files(
@@ -1156,6 +1168,11 @@ def scan_session_files(
         except OSError:
             continue
         if not path.is_file():
+            continue
+        if (
+            target.product in {"gemini", "qwen"}
+            and path.suffix not in _CHAT_SUFFIXES
+        ):
             continue
         files.append(
             SessionFile(
@@ -1194,6 +1211,10 @@ def _resolve_session_id(target: AuditTarget, path: Path) -> str:
         for suffix in (".checkpoints.jsonl", ".meta.json", ".jsonl"):
             if name.endswith(suffix):
                 return name[: -len(suffix)] or path.stem
+    if product == "cursor":
+        return cursor_session_id(path)
+    if product == "aider":
+        return path.parent.name or path.stem
     return path.stem
 
 
@@ -1241,6 +1262,12 @@ def _extract_file_project(target: AuditTarget, path: Path) -> str | None:
         return _dsh_project(target.path, root, path)
     if product == "command-code":
         return _commandcode_project(path)
+    if product == "cursor":
+        return chat_project(target.path, path, product="cursor")
+    if product in {"gemini", "qwen"}:
+        return chat_project(target.path, path, product=product)
+    if product == "aider":
+        return str(path.parent)
     return None
 
 

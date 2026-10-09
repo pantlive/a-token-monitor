@@ -346,7 +346,20 @@ class ScanDirsControllerTests(unittest.TestCase):
 
             keys = [item["key"] for item in snapshot["providers"]]
             self.assertEqual(
-                keys, ["codex", "claude", "commandcode", "dsh", "grok", "kimi"]
+                keys,
+                [
+                    "codex",
+                    "claude",
+                    "commandcode",
+                    "dsh",
+                    "grok",
+                    "kimi",
+                    "opencode",
+                    "cursor",
+                    "gemini",
+                    "qwen",
+                    "aider",
+                ],
             )
             self.assertEqual(snapshot["priority"], ["web", "cli", "auto"])
 

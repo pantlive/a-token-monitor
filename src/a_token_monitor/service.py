@@ -70,6 +70,11 @@ class ServiceConfig:
     dsh_homes: tuple[Path, ...] = ()
     commandcode_homes: tuple[Path, ...] = ()
     claude_homes: tuple[Path, ...] = ()
+    opencode_homes: tuple[Path, ...] = ()
+    cursor_homes: tuple[Path, ...] = ()
+    gemini_homes: tuple[Path, ...] = ()
+    qwen_homes: tuple[Path, ...] = ()
+    aider_homes: tuple[Path, ...] = ()
     alert_context_content: bool = False
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
@@ -118,6 +123,18 @@ class ServiceConfig:
             "claude_homes",
             tuple(_absolute_path(path) for path in self.claude_homes),
         )
+        for name in (
+            "opencode_homes",
+            "cursor_homes",
+            "gemini_homes",
+            "qwen_homes",
+            "aider_homes",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                tuple(_absolute_path(path) for path in getattr(self, name)),
+            )
         if self.session_root is not None:
             object.__setattr__(
                 self,
@@ -189,6 +206,11 @@ class ServiceConfig:
                 str(path) for path in self.commandcode_homes
             ],
             "claude_homes": [str(path) for path in self.claude_homes],
+            "opencode_homes": [str(path) for path in self.opencode_homes],
+            "cursor_homes": [str(path) for path in self.cursor_homes],
+            "gemini_homes": [str(path) for path in self.gemini_homes],
+            "qwen_homes": [str(path) for path in self.qwen_homes],
+            "aider_homes": [str(path) for path in self.aider_homes],
             "budget_usd": self.budget_usd,
             "alert_context_content": self.alert_context_content,
             "upload_burst_warn_mb": self.upload_burst_warn_mb,
@@ -280,6 +302,11 @@ class ServiceConfig:
                 raw_payload, "commandcode_homes"
             ),
             claude_homes=_optional_path_tuple(raw_payload, "claude_homes"),
+            opencode_homes=_optional_path_tuple(raw_payload, "opencode_homes"),
+            cursor_homes=_optional_path_tuple(raw_payload, "cursor_homes"),
+            gemini_homes=_optional_path_tuple(raw_payload, "gemini_homes"),
+            qwen_homes=_optional_path_tuple(raw_payload, "qwen_homes"),
+            aider_homes=_optional_path_tuple(raw_payload, "aider_homes"),
             budget_usd=_optional_float(raw_payload, "budget_usd"),
             alert_context_content=raw_payload.get("alert_context_content") is True,
             upload_burst_warn_mb=_optional_float(
@@ -340,6 +367,11 @@ class ServiceConfig:
             "dsh": self.dsh_homes or None,
             "grok": self.grok_homes or None,
             "kimi": self.kimi_homes or None,
+            "opencode": self.opencode_homes or None,
+            "cursor": self.cursor_homes or None,
+            "gemini": self.gemini_homes or None,
+            "qwen": self.qwen_homes or None,
+            "aider": self.aider_homes or None,
         }
         controller = ScanDirsController(self.state_dir, cli_homes)
         effective_dirs = controller.effective()
@@ -380,6 +412,11 @@ class ServiceConfig:
             dsh_homes=_daemon_homes(effective_dirs.state("dsh")),
             commandcode_homes=_daemon_homes(effective_dirs.state("commandcode")),
             claude_homes=_daemon_homes(effective_dirs.state("claude")),
+            opencode_homes=_daemon_homes(effective_dirs.state("opencode")),
+            cursor_homes=_daemon_homes(effective_dirs.state("cursor")),
+            gemini_homes=_daemon_homes(effective_dirs.state("gemini")),
+            qwen_homes=_daemon_homes(effective_dirs.state("qwen")),
+            aider_homes=_daemon_homes(effective_dirs.state("aider")),
             scan_dirs_controller=controller,
         )
 

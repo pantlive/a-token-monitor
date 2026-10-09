@@ -7,56 +7,64 @@
 
 [中文](README.md) | English
 
-A local code-agent monitor: it reads the quota windows of Codex / Grok / Kimi /
-Command Code and other accounts, discovers running agent sessions, aggregates token
-usage and API-equivalent cost, and watches for abnormal upload traffic from Codex CLI,
-Grok CLI, Kimi Code, DeepSeek Harness, Command Code, Claude Code, OpenCode and similar
-processes. Everything is processed on this machine and shown through an embedded web
-Dashboard, or installed as a systemd / launchd / Windows scheduled-task background
-service.
+An always-on local console for code agents. Quota windows, live sessions, token usage,
+upload anomalies and disk archives share one web page. Data stays on this machine;
+the runtime has no third-party dependencies.
 
-This version only observes and reports: it never starts new agent tasks because of a
-quota state, and it offers no entry point for automatic handling after a quota
-interruption.
+It covers Codex, Grok, Kimi Code, DeepSeek Harness, Command Code, Claude Code,
+OpenCode, Cursor, Gemini CLI, Qwen Code and Aider. This version only observes and
+reports. Quota state does not start or interrupt an agent.
 
-## Feature overview
+## Highlights
 
-- **Accounts & quotas**: side-by-side cards for each subscription (Codex Plus, Grok
-  SuperGrok, Command Code GOAT, …) showing the 5-hour / weekly / monthly windows with
-  progress and reset time; the top of the page warns when a quota is exhausted or usage
-  passes 90%. Quota queries use the same read-only endpoints as each vendor's official
-  CLI and never send model prompts.
-- **Active sessions**: based on the session files processes actually hold open
-  (`/proc/<pid>/fd`, `lsof`, Windows Restart Manager), showing account, product, project,
-  model, status, tokens, start and last-activity time in one table; over-long sessions
-  (turn count or context above the thresholds) are flagged with “start a new session”.
-- **Usage & cost estimation**: JSONL is indexed incrementally by byte offset (resuming
-  from a checkpoint after a restart), aggregating API-equivalent amounts by day / model /
-  account / project, with a cost trend chart, cache savings and Top 5 accounts and
-  projects by cost; monthly budgets (`--budget-usd`) and progress alerts are supported.
-- **Insights**: local statistics for active hours, model cost distribution, conversation
-  size and the most expensive conversations, plus rule-based, quantifiable token-saving
-  advice. Only token metadata is read, never conversation content.
-- **Traffic anomaly monitoring**: per-process outbound TCP bytes (the kernel `tcp_info`
-  on Linux) with two-tier thresholds at 15 seconds / 5 minutes and alerts persisted for
-  search and read-state tracking; only the process, directory, peer and byte counts are
-  recorded, never connection content.
-- **Disk & session management**: usage of every agent data directory with threshold
-  reminders; sessions from every tool can be filtered by project (working directory),
-  archived as tar.gz (with manifest verification) or cleaned up, one session at a time,
-  and restored from an archive.
-- **Settings page**: manage each provider's scan directories from the web (hot reload,
-  index checkpoints preserved) along with history retention days (cleanup preview + safe
-  cleanup + VACUUM).
-- **Health checks**: `/healthz` (liveness) and `/readyz` (per-component readiness), with a
-  matching health badge in the Dashboard top bar for systemd, containers and reverse
-  proxies.
-- **Languages and themes**: UI / API / CLI in Chinese and English (auto-detected or
-  forced with `--lang`); light / dark theme follows the system or a manual switch.
+- **Official quotas and local usage, side by side.** Codex, Grok, Kimi, Command Code
+  and Claude Code use each vendor's read-only quota API (5-hour / week / month windows,
+  reset time, plan name). Local session logs are then counted per request into tokens
+  and API-equivalent cost, so the subscription percentage and the on-disk usage can be
+  compared.
+- **Every agent in one table.** The eleven products above, several data directories and
+  several accounts sit together; scan paths can be edited in the web UI, hot-reloaded,
+  without losing usage-index checkpoints.
+- **A session is active when a process holds the file.** Evidence comes from
+  `/proc/<pid>/fd`, `lsof` and the Windows Restart Manager. The table shows account,
+  product, project, model, tokens and last activity; over-long sessions (turns or
+  context) are flagged to start a new one.
+- **A traffic alert can show what the agent was doing.** On Linux, outbound TCP bytes
+  are counted per process, with 15-second and 5-minute thresholds. Alerts are matched
+  to local sessions by working directory and time window, and summarised as actions
+  such as pushing code or reading a file. Message text is hidden by default and is
+  never persisted.
+- **Sessions can be archived and restored.** Filter by project, pack a `tar.gz` with a
+  SHA-256 manifest; running sessions and files touched in the last 10 minutes are
+  always skipped.
+- **Install it and leave it running.** Python standard library only, so `pip install`
+  is enough. The Dashboard is embedded in the daemon and can be installed as systemd,
+  launchd or a Windows scheduled task. State lives in `~/.a-token-monitor` by default.
 
-Amounts are API-equivalent estimates from OpenAI / Anthropic and similar public pricing
-and do not represent your actual subscription bill; models without a known unit price
-still show tokens but are left out of money totals.
+Amounts are API-equivalent estimates from OpenAI / Anthropic and similar public
+pricing; they use a different meter from the subscription bill. Models without a
+known unit price still show tokens; money totals include only priced models.
+
+## Compared with similar tools
+
+Most tools in this space do one job: on-demand reports from local logs
+([ccusage](https://ccusage.com/)), or a live gauge for one or two vendors
+(Claude Code Usage Monitor, tokmeter, CodexBar, and similar). This project keeps
+quotas, sessions, usage, traffic and disk in one always-on process.
+
+| Capability | a-token-monitor | ccusage | Quota / burn-rate tools |
+| --- | --- | --- | --- |
+| Form | Always-on daemon, web Dashboard, CLI | On-demand CLI reports | TUI, menu bar, or one-shot dashboard |
+| Runtime dependencies | Python standard library only | Node.js | Varies |
+| Official quota windows | Codex / Grok / Kimi / Command Code / Claude Code | Mostly local logs | Usually one or two vendors |
+| Local token usage | 11 agents, incremental searchable index | Broader log coverage, one-shot reports | Usually one or two |
+| Live sessions | Files the process actually has open | No live discovery | Rare |
+| Traffic anomalies | Per-process egress bytes on Linux, with activity context | No | No |
+| Session archives | Preview, archive, restore; skips live files | No | No |
+| Chinese UI | CLI, API, Dashboard | English-first | Varies |
+
+One-shot history across many CLI log formats: ccusage.
+Quotas, sessions, traffic and disk that stay on screen: this tool.
 
 ## Installation
 
@@ -142,6 +150,18 @@ trusted first.
 
 All of these work on both `daemon` and `service install`.
 
+## Feature overview
+
+- **Accounts & quotas**: side-by-side cards, 5-hour / weekly / monthly progress and reset time; the page warns at exhaustion or above 90%.
+- **Active sessions**: account, product, project, model, status, tokens, start and last activity; over-long sessions are flagged.
+- **Usage & cost estimation**: aggregates by day / model / account / project, with trend, cache savings and Top 5; `--budget-usd` is supported.
+- **Insights**: active hours, model cost mix, conversation size, the most expensive conversations, and quantifiable token-saving advice. Token metadata only.
+- **Traffic anomaly monitoring**: 15-second / 5-minute thresholds; history is searchable and can be marked read.
+- **Disk & session management**: directory-size reminders; archive, clean up and restore by project.
+- **Settings page**: hot-reload scan directories; edit retention online, with cleanup preview and VACUUM.
+- **Health checks**: `/healthz` and `/readyz`, with a top-bar health badge.
+- **Languages and themes**: Chinese / English (`--lang` or auto-detect); light / dark theme.
+
 ## Dashboard
 
 - **Accounts & quotas**: one card per subscription, always showing the
@@ -165,11 +185,19 @@ All of these work on both `daemon` and `service install`.
   start collapsed into a single summary line and only fetch details when expanded; the
   expanded state is remembered in the browser.
 
-Alert details correlate local sessions by working directory and time window, showing event
-kinds, timestamps, and UTF-8 byte counts. These are local activity clues, not proof of the
+Alert details correlate local sessions by working directory and time window, prioritizing
+actions and object types such as initiating an image upload, pushing code, reading code,
+or providing an image to the model. Details currently cover Codex, Claude Code, Kimi
+Code, Command Code, Grok, DeepSeek Harness, OpenCode, Cursor, Gemini CLI, Qwen
+Code, and Aider. The `alerts` command prints the same activity summary under each alert. Image
+inputs come from recorded image message blocks;
+other purposes are inferred from recognizable parameters, with the evidence shown alongside.
+Local file reads are not labeled as uploads, unrecognized purposes remain unknown, and
+outputs are linked to their originating purposes by call ID. Timestamps and local record
+byte counts are also shown. These are local activity clues, not proof of the
 actual network payload. This feature reads session logs on demand; message, tool argument,
 and search excerpts are hidden from the page and API by default and are never persisted.
-To show excerpts, add `--alert-context-content` to `daemon` or `service install`.
+To show message excerpts and target filenames, add `--alert-context-content` to `daemon` or `service install`.
 It requires a loopback listening address, redacts common tokens, passwords, and API keys
 before truncation, and cannot be combined with `--dashboard-host 0.0.0.0`.
 
@@ -189,7 +217,8 @@ snapshot, and browser polling does not overlap slow requests.
 A separate `/settings` page with two blocks:
 
 - **Scan directories**: view, add, edit and remove the data directories of each provider
-  (Codex / Grok / Kimi Code / DeepSeek Harness / Command Code / Claude Code). Changes are
+  (Codex / Grok / Kimi Code / DeepSeek Harness / Command Code / Claude Code / OpenCode /
+  Cursor / Gemini CLI / Qwen Code / Aider). Changes are
   hot-reloaded without restarting the daemon and without losing usage-index checkpoints.
   Priority is **web config > CLI flags > auto-detection**, persisted in `scan-dirs.json`
   in the state directory; clearing a provider's directories disables it explicitly, and
@@ -198,13 +227,15 @@ A separate `/settings` page with two blocks:
   sensitive directories such as `~/.ssh` and the state directory itself cannot be
   configured, and the page offers no arbitrary path browsing.
 - **History data**: shows the disk usage of the state directory and each index, and edits
-  the retention of the usage index (90 days by default) and of session history (30 days
-  by default) online, persisted in `settings.json`. Cleanup is previewed first (what will
-  be deleted plus the expected space freed); the daemon cleans up automatically every day
-  according to the effective retention and VACUUMs afterwards. Cleanup only removes
-  expired rows and never touches active sessions or incremental-index checkpoints; a
-  failed automatic cleanup records the reason and surfaces it in the Dashboard top bar.
-  Alert retention is controlled by `--alert-retention-days` (30 days by default).
+  the retention of the usage index (90 days by default), session history (30 days
+  by default) and alert history (30 days by default) online, persisted in `settings.json`.
+  Priority is **web config > CLI flags > defaults**. `--alert-retention-days` is the
+  initial alert-history value when the page has not saved an override. Cleanup is previewed
+  first (what will be deleted plus the expected space freed); the daemon cleans up
+  automatically every day according to the effective retention and VACUUMs afterwards.
+  Cleanup only removes expired rows and never touches active sessions or incremental-index
+  checkpoints; a failed automatic cleanup records the reason and surfaces it in the
+  Dashboard top bar.
 
 ### Health checks
 
@@ -230,6 +261,11 @@ endpoints; click it for details about the failing components.
 | DeepSeek Harness | No local quota window | Open `session.lock` | projcache |
 | Command Code | `/alpha/whoami`, `/alpha/billing/*`, `/alpha/usage/summary` | Open session JSONL, falling back to a working-directory lookup | Session JSONL |
 | Claude Code | OAuth usage endpoint (5-hour / week / Design windows) | Open session JSONL (only the file header is read) | `message.usage` in session JSONL |
+| OpenCode | No local quota window | Running process | Assistant `tokens` in `opencode.db`; only recorded requests count |
+| Cursor | No local quota window | Open session file, falling back to working-directory matching | `usage` / `tokens` on a transcript line; otherwise 0, never estimated from text length |
+| Gemini CLI | No local quota window | Open session file, falling back to working-directory matching | Token summary on chat records |
+| Qwen Code | No local quota window | Open session file, falling back to working-directory matching | Same token summary parser as Gemini CLI |
+| Aider | No local quota window | Open `.aider.chat.history.md`, falling back to `{cwd}/.aider.chat.history.md` | `> Tokens:` lines in that file; counts of 1000 or more follow Aider's rounded display, not the raw API integer |
 
 Shared rules:
 

@@ -31,6 +31,17 @@ from .housekeeping import (
     default_sessions_root,
 )
 from .kimi import list_kimi_active_sessions, resolve_kimi_homes
+from .local_agents import (
+    list_aider_active_sessions,
+    list_cursor_active_sessions,
+    list_gemini_active_sessions,
+    list_qwen_active_sessions,
+    resolve_aider_homes,
+    resolve_cursor_homes,
+    resolve_gemini_homes,
+    resolve_opencode_homes,
+    resolve_qwen_homes,
+)
 from .monitor import MonitorConfig, MultiSessionMonitor
 from .registry import MultiSessionRegistry
 from .retention import HistoryDataManager, RetentionController
@@ -62,6 +73,10 @@ def external_active_session_paths(
     dsh_homes: Sequence[Path] = (),
     commandcode_homes: Sequence[Path] = (),
     claude_homes: Sequence[Path] = (),
+    cursor_homes: Sequence[Path] = (),
+    gemini_homes: Sequence[Path] = (),
+    qwen_homes: Sequence[Path] = (),
+    aider_homes: Sequence[Path] = (),
     logger: logging.Logger | None = None,
 ) -> set[str]:
     """返回非 Codex 产品仍在运行的会话路径（文件或会话目录）。
@@ -78,6 +93,10 @@ def external_active_session_paths(
         ("grok", grok_homes, list_grok_active_sessions),
         ("dsh", dsh_homes, list_dsh_active_sessions),
         ("command-code", commandcode_homes, list_commandcode_active_sessions),
+        ("cursor", cursor_homes, list_cursor_active_sessions),
+        ("gemini", gemini_homes, list_gemini_active_sessions),
+        ("qwen", qwen_homes, list_qwen_active_sessions),
+        ("aider", aider_homes, list_aider_active_sessions),
     )
     for product, homes, lister in collectors:
         for home in homes:
@@ -135,6 +154,11 @@ class MultiAccountMonitor:
         dsh_homes: tuple[Path, ...] | None = None,
         commandcode_homes: tuple[Path, ...] | None = None,
         claude_homes: tuple[Path, ...] | None = None,
+        opencode_homes: tuple[Path, ...] | None = None,
+        cursor_homes: tuple[Path, ...] | None = None,
+        gemini_homes: tuple[Path, ...] | None = None,
+        qwen_homes: tuple[Path, ...] | None = None,
+        aider_homes: tuple[Path, ...] | None = None,
         scan_dirs_controller: ScanDirsController | None = None,
     ) -> None:
         """创建多个单账号监控器。
@@ -167,6 +191,11 @@ class MultiAccountMonitor:
         self.dsh_homes = resolve_dsh_homes(dsh_homes)
         self.commandcode_homes = resolve_commandcode_homes(commandcode_homes)
         self.claude_homes = resolve_claude_homes(claude_homes)
+        self.opencode_homes = resolve_opencode_homes(opencode_homes)
+        self.cursor_homes = resolve_cursor_homes(cursor_homes)
+        self.gemini_homes = resolve_gemini_homes(gemini_homes)
+        self.qwen_homes = resolve_qwen_homes(qwen_homes)
+        self.aider_homes = resolve_aider_homes(aider_homes)
         self.scan_dirs_controller = scan_dirs_controller
         self.alert_store = TrafficAlertStore(
             self.state_dir,
@@ -244,6 +273,7 @@ class MultiAccountMonitor:
             {
                 "usage_days": self.config.usage_retention_days,
                 "session_days": self.config.session_retention_days,
+                "alert_days": self.config.alert_retention_days,
             },
         )
         effective_retention = self.retention_controller.effective()
@@ -253,13 +283,14 @@ class MultiAccountMonitor:
             alert_store=self.alert_store,
             usage_days=effective_retention["usage_days"],
             session_days=effective_retention["session_days"],
-            alert_days=self.config.alert_retention_days,
+            alert_days=effective_retention["alert_days"],
             logger=self.logger,
         )
         self.retention_controller.reload_callback = (
             lambda effective: self._history_manager.update_retention(
                 usage_days=effective["usage_days"],
                 session_days=effective["session_days"],
+                alert_days=effective["alert_days"],
             )
         )
         self._last_history_cleanup_at: float | None = None
@@ -330,6 +361,45 @@ class MultiAccountMonitor:
                     sessions_root=default_sessions_root("claude", home),
                 )
             )
+        for home in self.opencode_homes:
+            # 单个数据库保存全部会话，只统计占用，不纳入可删除会话。
+            targets.append(AuditTarget("OpenCode", "opencode", home))
+        for home in self.cursor_homes:
+            targets.append(
+                AuditTarget(
+                    "Cursor",
+                    "cursor",
+                    home,
+                    sessions_root=default_sessions_root("cursor", home),
+                )
+            )
+        for home in self.gemini_homes:
+            targets.append(
+                AuditTarget(
+                    "Gemini CLI",
+                    "gemini",
+                    home,
+                    sessions_root=default_sessions_root("gemini", home),
+                )
+            )
+        for home in self.qwen_homes:
+            targets.append(
+                AuditTarget(
+                    "Qwen Code",
+                    "qwen",
+                    home,
+                    sessions_root=default_sessions_root("qwen", home),
+                )
+            )
+        for home in self.aider_homes:
+            targets.append(
+                AuditTarget(
+                    "Aider",
+                    "aider",
+                    home,
+                    sessions_root=default_sessions_root("aider", home),
+                )
+            )
         targets.append(AuditTarget("监控状态目录", "state", self.state_dir))
         return tuple(targets)
 
@@ -348,6 +418,10 @@ class MultiAccountMonitor:
                 dsh_homes=self.dsh_homes,
                 commandcode_homes=self.commandcode_homes,
                 claude_homes=self.claude_homes,
+                cursor_homes=self.cursor_homes,
+                gemini_homes=self.gemini_homes,
+                qwen_homes=self.qwen_homes,
+                aider_homes=self.aider_homes,
                 logger=self.logger,
             )
         )
@@ -382,9 +456,16 @@ class MultiAccountMonitor:
         if aggregator is None:
             aggregator = UsageAggregator(
                 cache_path=self.state_dir / "usage-index.sqlite3",
-                grok_homes=self.grok_homes, kimi_homes=self.kimi_homes,
-                dsh_homes=self.dsh_homes, claude_homes=self.claude_homes,
+                grok_homes=self.grok_homes,
+                kimi_homes=self.kimi_homes,
+                dsh_homes=self.dsh_homes,
+                claude_homes=self.claude_homes,
                 commandcode_homes=self.commandcode_homes,
+                opencode_homes=self.opencode_homes,
+                cursor_homes=self.cursor_homes,
+                gemini_homes=self.gemini_homes,
+                qwen_homes=self.qwen_homes,
+                aider_homes=self.aider_homes,
             )
             self._advice_aggregator = aggregator
         # 中文注释：没有 Dashboard 时由后台线程保持用量索引可用，
@@ -504,7 +585,7 @@ class MultiAccountMonitor:
         """
 
         with self._scan_lock:
-            # 中文注释：effective 由控制器给出全部六个 provider；透传给
+            # 中文注释：effective 由控制器给出全部 provider；透传给
             # resolve_*_homes 做规范化去重，空元组保持显式禁用。
             self.grok_homes = resolve_grok_homes(effective.get("grok") or ())
             self.kimi_homes = resolve_kimi_homes(effective.get("kimi") or ())
@@ -513,6 +594,13 @@ class MultiAccountMonitor:
                 effective.get("commandcode") or ()
             )
             self.claude_homes = resolve_claude_homes(effective.get("claude") or ())
+            self.opencode_homes = resolve_opencode_homes(
+                effective.get("opencode") or ()
+            )
+            self.cursor_homes = resolve_cursor_homes(effective.get("cursor") or ())
+            self.gemini_homes = resolve_gemini_homes(effective.get("gemini") or ())
+            self.qwen_homes = resolve_qwen_homes(effective.get("qwen") or ())
+            self.aider_homes = resolve_aider_homes(effective.get("aider") or ())
 
             desired_homes: list[Path] = []
             seen_homes: set[Path] = set()
@@ -592,6 +680,11 @@ class MultiAccountMonitor:
                         dsh_homes=self.dsh_homes,
                         claude_homes=self.claude_homes,
                         commandcode_homes=self.commandcode_homes,
+                        opencode_homes=self.opencode_homes,
+                        cursor_homes=self.cursor_homes,
+                        gemini_homes=self.gemini_homes,
+                        qwen_homes=self.qwen_homes,
+                        aider_homes=self.aider_homes,
                     )
             if self._dashboard is not None:
                 self._dashboard.update_homes(
@@ -600,6 +693,11 @@ class MultiAccountMonitor:
                     dsh_homes=self.dsh_homes,
                     commandcode_homes=self.commandcode_homes,
                     claude_homes=self.claude_homes,
+                    opencode_homes=self.opencode_homes,
+                    cursor_homes=self.cursor_homes,
+                    gemini_homes=self.gemini_homes,
+                    qwen_homes=self.qwen_homes,
+                    aider_homes=self.aider_homes,
                 )
                 self._dashboard.update_accounts(
                     self.registries,
@@ -744,6 +842,11 @@ class MultiAccountMonitor:
                         dsh_homes=self.dsh_homes,
                         claude_homes=self.claude_homes,
                         commandcode_homes=self.commandcode_homes,
+                        opencode_homes=self.opencode_homes,
+                        cursor_homes=self.cursor_homes,
+                        gemini_homes=self.gemini_homes,
+                        qwen_homes=self.qwen_homes,
+                        aider_homes=self.aider_homes,
                     )
                     self._dashboard_aggregator = usage_aggregator
                     self._dashboard = DashboardServer(
@@ -762,6 +865,11 @@ class MultiAccountMonitor:
                         dsh_homes=self.dsh_homes,
                         commandcode_homes=self.commandcode_homes,
                         claude_homes=self.claude_homes,
+                        opencode_homes=self.opencode_homes,
+                        cursor_homes=self.cursor_homes,
+                        gemini_homes=self.gemini_homes,
+                        qwen_homes=self.qwen_homes,
+                        aider_homes=self.aider_homes,
                         traffic_monitor=self.traffic_monitor,
                         alert_store=self.alert_store,
                         housekeeping=self.housekeeping,

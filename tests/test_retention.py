@@ -132,7 +132,7 @@ class RetentionControllerTests(unittest.TestCase):
             applied: list[dict[str, float]] = []
             controller = RetentionController(
                 Path(temporary_directory),
-                {"usage_days": 90.0, "session_days": 30.0},
+                {"usage_days": 90.0, "session_days": 30.0, "alert_days": 30.0},
                 reload_callback=applied.append,
             )
 
@@ -142,20 +142,23 @@ class RetentionControllerTests(unittest.TestCase):
             self.assertEqual(retention["usage_days"]["value"], 45.0)
             self.assertEqual(retention["usage_days"]["source"], "web")
             self.assertEqual(retention["session_days"]["source"], "cli")
+            self.assertEqual(retention["alert_days"]["source"], "cli")
             self.assertEqual(
-                applied, [{"usage_days": 45.0, "session_days": 30.0}]
+                applied,
+                [{"usage_days": 45.0, "session_days": 30.0, "alert_days": 30.0}],
             )
             self.assertEqual(
-                controller.effective(), {"usage_days": 45.0, "session_days": 30.0}
+                controller.effective(),
+                {"usage_days": 45.0, "session_days": 30.0, "alert_days": 30.0},
             )
 
     def test_reset_restores_cli_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             controller = RetentionController(
                 Path(temporary_directory),
-                {"usage_days": 90.0, "session_days": 30.0},
+                {"usage_days": 90.0, "session_days": 30.0, "alert_days": 14.0},
             )
-            controller.apply("set", usage_days=45.0, session_days=10.0)
+            controller.apply("set", usage_days=45.0, session_days=10.0, alert_days=7.0)
 
             snapshot = controller.apply("reset")
 
@@ -163,6 +166,8 @@ class RetentionControllerTests(unittest.TestCase):
             self.assertEqual(retention["usage_days"]["value"], 90.0)
             self.assertEqual(retention["usage_days"]["source"], "cli")
             self.assertEqual(retention["session_days"]["value"], 30.0)
+            self.assertEqual(retention["alert_days"]["value"], 14.0)
+            self.assertEqual(retention["alert_days"]["source"], "cli")
             loaded = RetentionSettings.load(controller.config_path)
             self.assertEqual(dict(loaded.overrides), {})
 
@@ -170,7 +175,7 @@ class RetentionControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             controller = RetentionController(
                 Path(temporary_directory),
-                {"usage_days": 90.0, "session_days": 30.0},
+                {"usage_days": 90.0, "session_days": 30.0, "alert_days": 30.0},
             )
             with self.assertRaises(RetentionError):
                 controller.apply("set", usage_days=0)
@@ -178,7 +183,8 @@ class RetentionControllerTests(unittest.TestCase):
                 controller.apply("rename")
             with self.assertRaises(RetentionError):
                 RetentionController(
-                    Path(temporary_directory), {"usage_days": -1.0, "session_days": 30.0}
+                    Path(temporary_directory),
+                    {"usage_days": -1.0, "session_days": 30.0, "alert_days": 30.0},
                 )
 
 
@@ -282,6 +288,20 @@ class HistoryDataManagerTests(unittest.TestCase):
 
             with self.assertRaises(RetentionError):
                 manager.update_retention(usage_days=0)
+
+    def test_alert_retention_changes_prune_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager, _, alert_store, _ = self._manager(Path(temporary_directory))
+            alert_store.record([_alert(RECENT, "近几天的告警")], now=RECENT)
+
+            manager.update_retention(alert_days=1.0)
+            preview = manager.preview(now=NOW)
+            kinds = {item["kind"]: item for item in preview["kinds"]}
+
+            self.assertEqual(alert_store.retention_days, 1.0)
+            self.assertEqual(kinds["alerts"]["rows_to_delete"], 1)
+            self.assertEqual(manager.cleanup(now=NOW)["deleted"]["alerts"], 1)
+            self.assertEqual(alert_store.count_all(), 0)
 
     def test_cleanup_failure_keeps_partial_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -7,43 +7,55 @@
 
 [English](README.en.md) | 中文
 
-本地 code agent 监控器：读取 Codex / Grok / Kimi / Command Code 等账号的额度窗口，
-发现正在运行的 agent 会话，统计 token 用量与 API 等价成本，并监控 Codex CLI、
-Grok CLI、Kimi Code、DeepSeek Harness、Command Code、Claude Code、OpenCode 等
-进程的异常上传流量。所有数据在本机处理，通过内嵌的网页 Dashboard 展示，
-也可以安装为 systemd / launchd / Windows 计划任务后台常驻。
+本机常驻的 code agent 监控台。额度窗口、活动会话、token 用量、异常上传和磁盘归档
+放在同一张网页里；数据不出本机，运行时没有第三方依赖。
 
-当前版本只负责观察和统计，不会因为额度状态启动新的 agent 任务，也不提供
-额度中断后的自动处理入口。
+覆盖 Codex、Grok、Kimi Code、DeepSeek Harness、Command Code、Claude Code、
+OpenCode、Cursor、Gemini CLI、Qwen Code 和 Aider。当前版本只观察和统计，
+额度状态不会触发 agent 启停。
 
-## 功能概览
+## 亮点
 
-- **账号与额度看板**：各订阅（Codex Plus、Grok SuperGrok、Command Code GOAT 等）
-  并列卡片展示 5 小时 / 周 / 月窗口的进度与重置时间；配额耗尽或用量超过 90%
-  时页面顶部告警。额度查询走各官方 CLI 相同的只读接口，不发送模型提示词。
-- **活动会话**：以进程实际打开的会话文件为依据（`/proc/<pid>/fd`、`lsof`、
-  Windows Restart Manager），统一展示账号、产品、项目、模型、状态、token、
-  开始与最后活动时间；超长会话（轮数或上下文超阈值）提示「建议开新会话」。
-- **用量与成本估算**：JSONL 按字节偏移增量索引（重启后从检查点继续），按天 /
-  模型 / 账号 / 项目聚合 API 等价金额，含成本趋势图、缓存节省金额、账号与项目
-  成本 Top 5；支持每月预算（`--budget-usd`）和进度告警。
-- **习惯分析**：本地统计活跃时段、模型成本分布、对话规模、最贵对话，
-  并按规则给出可量化的省 token 建议。只读 token 元数据，不读对话内容。
-- **异常流量监控**：按进程跟踪 agent 的外发 TCP 字节（Linux 用内核
-  `tcp_info`），15 秒 / 5 分钟两档阈值分级告警，历史落盘可检索、可标记已读；
-  只记录进程、目录、对端和字节数，不读取连接内容。
-- **磁盘与会话管理**：统计各 agent 数据目录占用，超阈值提醒；各工具的会话
-  可按项目（工作目录）筛选后压缩归档（tar.gz + manifest 校验）或清理，
-  支持单会话归档与从归档恢复。
-- **设置页**：网页在线管理各 provider 的扫描目录（热重载、不丢索引检查点）和
-  历史数据保留天数（清理预览 + 安全清理 + VACUUM 压缩）。
-- **健康检查**：`/healthz`（存活）与 `/readyz`（逐组件就绪状态），Dashboard
-  顶栏同步显示健康徽标，便于 systemd、容器和反向代理监控。
-- **多语言与主题**：界面 / API / CLI 支持中文与英文（自动判断或 `--lang` 指定）；
-  白天 / 夜间主题跟随系统或手动切换。
+- **官方额度 + 本地用量，两套账一起看。** Codex、Grok、Kimi、Command Code、
+  Claude Code 走各家官方只读额度接口（5 小时 / 周 / 月窗口、重置时间、套餐名）；
+  本机会话日志再按请求累计 token 和 API 等价成本。订阅百分比和磁盘上的用量
+  可以对照。
+- **一张表看完全部 agent。** 上面 11 个产品、多个数据目录、多个账号并列；
+  扫描路径可在网页改，热重载，不丢用量索引检查点。
+- **活动会话认打开的文件。** 依据 `/proc/<pid>/fd`、`lsof`、Windows Restart Manager，
+  统一展示账号、产品、项目、模型、token 和最后活动时间；轮数或上下文超阈值
+  会提示开新会话。
+- **异常上传能回看当时在干什么。** Linux 按进程统计外发 TCP 字节，15 秒 / 5 分钟
+  两档告警；告警按工作目录和时间窗关联本地会话，归纳「发起代码推送」「读取代码」
+  这类操作。消息正文默认隐藏，也不会写入磁盘。
+- **会话能归档也能恢复。** 按项目筛选，打包 `tar.gz` 并写 SHA-256 manifest；
+  正在运行的会话和 10 分钟内改过的文件一律跳过。
+- **装完就能常驻。** 只使用 Python 标准库，`pip install` 即可。Dashboard 嵌在
+  daemon 里，可装成 systemd / launchd / Windows 计划任务。状态目录默认
+  `~/.a-token-monitor`。
 
-金额是 OpenAI / Anthropic 等官方 API 等价估算，不代表订阅的实际账单；
-没有已知单价的模型仍展示 token，但不计入金额合计。
+金额是 OpenAI / Anthropic 等官方 API 的等价估算，和订阅账单是两套口径；
+没有已知单价的模型仍展示 token，金额合计只计入有单价的模型。
+
+## 和其他工具比
+
+同类工具大多只做其中一件事：按需扫本地日志出用量报表（[ccusage](https://ccusage.com/)），
+或者盯一两家的额度 / 燃烧速度（Claude Code Usage Monitor、tokmeter、CodexBar 等）。
+本工具把额度、会话、用量、流量和磁盘放在同一个常驻进程里。
+
+| 能力 | a-token-monitor | ccusage | 额度 / 燃烧速度工具 |
+| --- | --- | --- | --- |
+| 形态 | 常驻 daemon、网页 Dashboard、CLI | 按需 CLI 报表 | TUI、菜单栏或一次性 Dashboard |
+| 运行时依赖 | 仅 Python 标准库 | Node.js | 各不相同 |
+| 官方额度窗口 | Codex / Grok / Kimi / Command Code / Claude Code | 以本地日志为主 | 通常一两家 |
+| 本地 token 用量 | 11 个 agent，增量索引可检索 | 日志源更广，一次命令出报表 | 通常一两家 |
+| 活动会话 | 以进程打开的会话文件为准 | 无实时发现 | 少见 |
+| 异常流量 | Linux 按进程统计外发字节，可回看操作 | 无 | 无 |
+| 会话归档 | 预览、归档、恢复，跳过活动文件 | 无 | 无 |
+| 中文 | CLI、API、Dashboard | 英文为主 | 各不相同 |
+
+一次性扫很多家 CLI 的历史用量，用 ccusage；
+额度、会话、流量和磁盘要一直挂着看，用本工具。
 
 ## 安装
 
@@ -125,6 +137,18 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
 
 以上参数在 `daemon` 与 `service install` 上都可用。
 
+## 功能概览
+
+- **账号与额度看板**：各订阅并列卡片，5 小时 / 周 / 月窗口进度与重置时间；配额耗尽或超过 90% 时顶部告警。
+- **活动会话**：账号、产品、项目、模型、状态、token、开始与最后活动时间；超长会话提示开新会话。
+- **用量与成本估算**：按天 / 模型 / 账号 / 项目聚合，含趋势图、缓存节省、Top 5；支持 `--budget-usd`。
+- **习惯分析**：活跃时段、模型成本分布、对话规模、最贵对话，以及可量化的省 token 建议。只读 token 元数据。
+- **异常流量监控**：15 秒 / 5 分钟两档阈值，历史可检索、可标记已读。
+- **磁盘与会话管理**：目录占用提醒；按项目归档、清理、恢复。
+- **设置页**：扫描目录热重载；保留天数在线改，带清理预览和 VACUUM。
+- **健康检查**：`/healthz`、`/readyz`，顶栏健康徽标。
+- **多语言与主题**：中 / 英（`--lang` 或自动判断）；白天 / 夜间主题。
+
 ## Dashboard
 
 - **账号与额度**：每个订阅一张卡片，固定展示 `5 小时 / 周 / 月` 三行窗口
@@ -142,10 +166,15 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
 - **按需折叠**：「告警历史」「用量检索」「磁盘与会话管理」默认折叠为一行结论，
   展开时才拉取明细，展开状态记在浏览器本地。
 
-告警详情按工作目录和时间窗关联本地会话，展示事件类型、时间与 UTF-8 字节数；
+告警详情按工作目录和时间窗关联本地会话，优先展示操作目的和对象类别，例如
+「发起图片上传」「发起代码推送」「读取代码」「向模型提供图片」，以及时间和本地记录字节数。
+明细目前覆盖 Codex、Claude Code、Kimi Code、Command Code、Grok、DeepSeek Harness、OpenCode、Cursor、Gemini CLI、Qwen Code 和 Aider。
+命令行 `alerts` 会在每条告警下附上这些行为摘要。
+图片输入来自日志中的图片消息块；其他用途根据可识别的调用参数归纳，并标明判断依据。
+普通文件读取不会被标为上传，无法识别的调用显示「用途无法判断」，工具输出按调用 ID 关联用途。
 这是本地活动线索，不能确认实际网络请求的载荷。此功能会按需读取会话日志，
 默认不向页面或 API 返回用户消息、工具参数和搜索词的内容摘要，也不持久化这些内容。
-需要摘要时可为 `daemon` 或 `service install` 添加 `--alert-context-content`：
+需要消息摘要和目标文件名时，可为 `daemon` 或 `service install` 添加 `--alert-context-content`：
 仅允许本机监听地址，摘要会先脱敏常见 token、密码和 API Key，再截断显示。
 此开关不适用于 `--dashboard-host 0.0.0.0`。
 
@@ -163,18 +192,20 @@ Dashboard 合并同时发生的状态刷新，浏览器在慢请求期间不会�
 独立的 `/settings` 页面，目前包含两块：
 
 - **扫描目录**：查看、添加、编辑和移除各 provider（Codex / Grok / Kimi Code /
-  DeepSeek Harness / Command Code / Claude Code）的数据目录，修改热重载生效，
+  DeepSeek Harness / Command Code / Claude Code / OpenCode / Cursor /
+  Gemini CLI / Qwen Code / Aider）的数据目录，修改热重载生效，
   无需重启 daemon，不丢失用量索引检查点。优先级为
   **Web 配置 > 命令行参数 > 自动探测**，持久化在状态目录的 `scan-dirs.json`；
   清空某 provider 的目录表示显式禁用，「重置」回退到命令行参数或自动探测。
   安全限制：只允许当前用户主目录之内、确实存在且可读的目录，`~/.ssh` 等敏感
   目录和状态目录本身不可配置，网页不提供任意路径浏览。
 - **历史数据**：展示状态目录与各类索引的磁盘占用，在线修改用量索引
-  （默认 90 天）与会话历史（默认 30 天）的保留天数，持久化在 `settings.json`。
+  （默认 90 天）、会话历史（默认 30 天）和告警历史（默认 30 天）的保留天数，
+  持久化在 `settings.json`。优先级为 **Web 配置 > 命令行参数 > 默认值**。
+  `--alert-retention-days` 在设置页尚未保存覆盖时作为告警历史的初始值。
   清理前给出预览（删除范围 + 预计释放空间）；daemon 每天按生效保留期自动清理
   并 VACUUM 压缩。清理只删过期历史行，绝不影响活动会话和增量索引检查点；
-  自动清理失败会记录原因并在 Dashboard 顶栏提示。告警历史的保留天数由
-  `--alert-retention-days`（默认 30 天）控制。
+  自动清理失败会记录原因并在 Dashboard 顶栏提示。
 
 ### 健康检查
 
@@ -197,6 +228,11 @@ Dashboard 顶栏据此显示「正常 / 部分降级 / 启动中 / 异常」徽�
 | DeepSeek Harness | 无本地额度窗口 | 打开的 `session.lock` | projcache |
 | Command Code | `/alpha/whoami`、`/alpha/billing/*`、`/alpha/usage/summary` | 打开的会话 JSONL，退回按工作目录反查 | 会话 JSONL |
 | Claude Code | OAuth usage 接口（5 小时 / 周 / Design 窗口） | 打开的会话 JSONL（只读文件头部） | 会话 JSONL 的 `message.usage` |
+| OpenCode | 无本地额度窗口 | 运行中的进程 | `opencode.db` 里 assistant 消息的 tokens，只计有记录的次数 |
+| Cursor | 无本地额度窗口 | 打开的会话文件，退回按工作目录匹配 | 转录中的 usage/tokens；没有该字段则计 0，不按文本长度估算 |
+| Gemini CLI | 无本地额度窗口 | 打开的会话文件，退回按工作目录匹配 | 聊天记录中的 tokens 摘要 |
+| Qwen Code | 无本地额度窗口 | 打开的会话文件，退回按工作目录匹配 | 与 Gemini CLI 相同的 tokens 摘要 |
+| Aider | 无本地额度窗口 | 打开的 `.aider.chat.history.md`，退回 `{cwd}/.aider.chat.history.md` | 该文件里的 `> Tokens:` 行；满 1000 后按 Aider 四舍五入的显示值计，不是原始接口整数 |
 
 共同口径：
 

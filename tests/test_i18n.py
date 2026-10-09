@@ -239,6 +239,24 @@ class CliLocalizationTests(unittest.TestCase):
                 # 中文是源语言，必须原样返回。
                 self.assertEqual(i18n.localize_line(line, "zh"), line)
 
+    def test_activity_summaries_translate_as_whole_phrases(self) -> None:
+        """行为摘要整句翻译；中文源语言保持原文。"""
+
+        self.assertEqual(
+            i18n.translate("发起上传图片", "en"),
+            "Initiate an image upload",
+        )
+        self.assertEqual(
+            i18n.translate("发起上传文件", "en"),
+            "Initiate a file upload",
+        )
+        line = "行为：读取代码 · 发起文件上传"
+        english = i18n.localize_line(line, "en")
+        self.assertIn("Read code", english)
+        self.assertIn("Initiate a file upload", english)
+        self.assertFalse(i18n.contains_cjk(english), english)
+        self.assertEqual(i18n.localize_line(line, "zh"), line)
+
 
 class PayloadLocalizationTests(unittest.TestCase):
     """API 负载本地化：拼出来的句子要翻到，用户数据不能被动。"""

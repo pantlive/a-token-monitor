@@ -39,8 +39,10 @@ from .alerts import (
     DEFAULT_RETENTION_DAYS,
     AlertQuery,
     AlertStoreError,
+    StoredAlert,
     TrafficAlertStore,
 )
+from .alert_context import configured_alert_context_roots, load_alert_context
 from .commandcode import (
     list_commandcode_active_sessions,
     read_commandcode_account,
@@ -62,7 +64,7 @@ from .kimi import (
     read_kimi_quota,
 )
 from .app_server import AppServerClient, AppServerConfig, AppServerError
-from .discovery import ProcessScanner
+from .discovery import ProcessScanner, default_session_root
 from .multi_account import MultiAccountMonitor, external_active_session_paths
 from .monitor import MonitorConfig
 from .multi_models import (
@@ -259,6 +261,56 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--opencode-home",
+        dest="opencode_homes",
+        type=Path,
+        action="append",
+        help=(
+            "OpenCode 数据目录，可重复传入；"
+            "默认在存在时使用 ~/.local/share/opencode 或 OPENCODE_DB"
+        ),
+    )
+    parser.add_argument(
+        "--cursor-home",
+        dest="cursor_homes",
+        type=Path,
+        action="append",
+        help=(
+            "Cursor 数据目录，可重复传入；"
+            "默认在存在时使用 ~/.cursor 或 CURSOR_CONFIG_DIR"
+        ),
+    )
+    parser.add_argument(
+        "--gemini-home",
+        dest="gemini_homes",
+        type=Path,
+        action="append",
+        help=(
+            "Gemini CLI 数据目录，可重复传入；"
+            "默认在存在时使用 ~/.gemini 或 GEMINI_CLI_HOME"
+        ),
+    )
+    parser.add_argument(
+        "--qwen-home",
+        dest="qwen_homes",
+        type=Path,
+        action="append",
+        help=(
+            "Qwen Code 数据目录，可重复传入；"
+            "默认在存在时使用 ~/.qwen、QWEN_HOME 或 QWEN_CODE_HOME"
+        ),
+    )
+    parser.add_argument(
+        "--aider-home",
+        dest="aider_homes",
+        type=Path,
+        action="append",
+        help=(
+            "Aider 数据目录，可重复传入；"
+            "默认在存在时使用 ~/.aider 或 AIDER_HOME"
+        ),
+    )
+    parser.add_argument(
         "--session-root",
         type=Path,
         default=None,
@@ -422,6 +474,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="以 JSON 输出告警列表",
+    )
+    alerts_parser.add_argument(
+        "--alert-context-content",
+        action="store_true",
+        help="显示脱敏后的告警会话内容摘要",
     )
     alerts_parser.add_argument(
         "--stats",
@@ -882,6 +939,11 @@ def _cli_scan_homes(args: argparse.Namespace) -> dict[str, Sequence[Path] | None
         "dsh": getattr(args, "dsh_homes", None),
         "grok": getattr(args, "grok_homes", None),
         "kimi": getattr(args, "kimi_homes", None),
+        "opencode": getattr(args, "opencode_homes", None),
+        "cursor": getattr(args, "cursor_homes", None),
+        "gemini": getattr(args, "gemini_homes", None),
+        "qwen": getattr(args, "qwen_homes", None),
+        "aider": getattr(args, "aider_homes", None),
     }
 
 
@@ -1623,10 +1685,16 @@ def _enrich_session_summaries(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """用统一用量入口给会话视图补充 token、轮数与切换提醒。"""
 
+    effective = _effective_scan_dirs(args)
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        claude_homes=_effective_scan_dirs(args).homes("claude"),
-        commandcode_homes=_effective_scan_dirs(args).homes("commandcode"),
+        claude_homes=effective.homes("claude"),
+        commandcode_homes=effective.homes("commandcode"),
+        opencode_homes=effective.homes("opencode"),
+        cursor_homes=effective.homes("cursor"),
+        gemini_homes=effective.homes("gemini"),
+        qwen_homes=effective.homes("qwen"),
+        aider_homes=effective.homes("aider"),
     )
     try:
         aggregator.refresh_index(
@@ -1801,10 +1869,22 @@ def _show_alerts(args: argparse.Namespace) -> int:
     stats = store.stats(since=query.since)
     if args.quiet:
         return 1 if stats["unread"] else 0
+    include_content = bool(getattr(args, "alert_context_content", False))
+    roots = _cli_alert_roots(args)
     if args.json:
-        sys.stdout.write(
-            f"{_dump_json({'stats': stats, 'alerts': [item.to_dict() for item in alerts], 'has_more': has_more})}\n"
-        )
+        payload = {
+            "stats": stats,
+            "alerts": [
+                _alert_with_context(
+                    item,
+                    include_content=include_content,
+                    roots=roots,
+                )
+                for item in alerts
+            ],
+            "has_more": has_more,
+        }
+        sys.stdout.write(f"{_dump_json(payload)}\n")
         return 1 if stats["unread"] else 0
     sys.stdout.write(
         f"匹配 {stats['total']} 条告警，未读 {stats['unread']} 条"
@@ -1828,11 +1908,143 @@ def _show_alerts(args: argparse.Namespace) -> int:
             f"{alert.window_seconds:g}s | {cwd} | {remote}"
             f"{f' | 合并 {alert.count} 次' if alert.count > 1 else ''}\n"
         )
+        _write_alert_context(
+            alert,
+            include_content=include_content,
+            roots=roots,
+        )
     if has_more:
         sys.stdout.write(
             f"还有更多记录，使用 --offset {query.offset + query.limit} 继续查看。\n"
         )
     return 1 if stats["unread"] else 0
+
+
+_ALERT_CONTEXT_REASONS = {
+    "no_session": "告警时间窗内没有匹配该工作目录的会话文件（可能已清理或归档）",
+    "unsupported_product": "该 agent 的会话格式暂不支持明细提取",
+    "unreadable": "会话文件无法读取",
+}
+
+
+def _cli_alert_roots(args: argparse.Namespace) -> object:
+    """按生效扫描目录组装告警会话根，同一轮只解析一次。"""
+
+    effective = _effective_scan_dirs(args)
+    codex_roots = []
+    for home in effective.homes("codex"):
+        sessions = Path(home) / "sessions"
+        if sessions.is_dir():
+            codex_roots.append(sessions)
+    if not codex_roots:
+        fallback = default_session_root()
+        if fallback.is_dir():
+            codex_roots.append(fallback)
+    return configured_alert_context_roots(
+        codex_sessions=tuple(codex_roots),
+        claude_homes=effective.homes("claude"),
+        kimi_homes=effective.homes("kimi"),
+        commandcode_homes=effective.homes("commandcode"),
+        grok_homes=effective.homes("grok"),
+        dsh_homes=effective.homes("dsh"),
+        opencode_homes=effective.homes("opencode"),
+        cursor_homes=effective.homes("cursor"),
+        gemini_homes=effective.homes("gemini"),
+        qwen_homes=effective.homes("qwen"),
+        aider_homes=effective.homes("aider"),
+    )
+
+
+def _load_cli_alert_context(
+    alert: StoredAlert,
+    roots: object,
+    *,
+    include_content: bool,
+) -> dict[str, object]:
+    """按本轮生效的会话目录读取告警当时的行为。"""
+
+    return load_alert_context(
+        alert,
+        roots,  # type: ignore[arg-type]
+        include_content=include_content,
+    )
+
+
+def _translated_summaries(summary: object) -> list[str]:
+    """把每条行为摘要按当前语言整句翻译，不拆用户内容。"""
+
+    if not isinstance(summary, list):
+        return []
+    language = active_language()
+    return [translate(str(item), language) for item in summary]
+
+
+def _alert_context_brief(
+    context: Mapping[str, object], *, include_content: bool
+) -> dict[str, object]:
+    """默认只带行为摘要；内容摘要留给显式开关。"""
+
+    brief: dict[str, object] = {
+        "found": context["found"],
+        "reason": context["reason"],
+        "activity_summary": _translated_summaries(context["activity_summary"]),
+        "fallback": context["fallback"],
+    }
+    if include_content:
+        brief["events"] = context["events"]
+    return brief
+
+
+def _alert_with_context(
+    alert: StoredAlert,
+    *,
+    include_content: bool,
+    roots: object,
+) -> dict[str, object]:
+    body = alert.to_dict()
+    context = _load_cli_alert_context(
+        alert,
+        roots,
+        include_content=include_content,
+    )
+    body["context"] = _alert_context_brief(
+        context, include_content=include_content
+    )
+    return body
+
+
+def _write_alert_context(
+    alert: StoredAlert,
+    *,
+    include_content: bool,
+    roots: object,
+) -> None:
+    """在告警行下面补一行当时的行为；没有会话时说明原因。"""
+
+    context = _load_cli_alert_context(
+        alert,
+        roots,
+        include_content=include_content,
+    )
+    summary = _translated_summaries(context["activity_summary"])
+    if summary:
+        label = translate("行为：", active_language())
+        sys.stdout.write(f"    {label}{' · '.join(summary)}\n")
+    else:
+        reason = _ALERT_CONTEXT_REASONS.get(str(context.get("reason") or ""))
+        if reason:
+            sys.stdout.write(f"    {reason}\n")
+    if not include_content:
+        return
+    events = context.get("events")
+    if not isinstance(events, list):
+        return
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        detail = str(event.get("detail") or event.get("label") or "")
+        if detail:
+            sys.stdout.write(f"    {event.get('kind', '')} {detail}\n")
 
 
 def _format_alert_time(timestamp: float) -> str:
@@ -1886,10 +2098,16 @@ def _format_count(value: object) -> str:
 def _show_usage_search(args: argparse.Namespace) -> int:
     """按日期、模型、账号和会话检索用量索引中的 token 历史记录。"""
 
+    effective = _effective_scan_dirs(args)
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        claude_homes=_effective_scan_dirs(args).homes("claude"),
-        commandcode_homes=_effective_scan_dirs(args).homes("commandcode"),
+        claude_homes=effective.homes("claude"),
+        commandcode_homes=effective.homes("commandcode"),
+        opencode_homes=effective.homes("opencode"),
+        cursor_homes=effective.homes("cursor"),
+        gemini_homes=effective.homes("gemini"),
+        qwen_homes=effective.homes("qwen"),
+        aider_homes=effective.homes("aider"),
     )
     since, until = _usage_search_bounds(args)
     search = aggregator.search(
@@ -2032,6 +2250,45 @@ def _housekeeping_targets(args: argparse.Namespace) -> tuple[AuditTarget, ...]:
                 "claude",
                 home,
                 sessions_root=default_sessions_root("claude", home),
+            )
+        )
+    for home in effective_dirs.homes("opencode"):
+        # 单个数据库保存全部会话，只统计占用。
+        targets.append(AuditTarget("OpenCode", "opencode", home))
+    for home in effective_dirs.homes("cursor"):
+        targets.append(
+            AuditTarget(
+                "Cursor",
+                "cursor",
+                home,
+                sessions_root=default_sessions_root("cursor", home),
+            )
+        )
+    for home in effective_dirs.homes("gemini"):
+        targets.append(
+            AuditTarget(
+                "Gemini CLI",
+                "gemini",
+                home,
+                sessions_root=default_sessions_root("gemini", home),
+            )
+        )
+    for home in effective_dirs.homes("qwen"):
+        targets.append(
+            AuditTarget(
+                "Qwen Code",
+                "qwen",
+                home,
+                sessions_root=default_sessions_root("qwen", home),
+            )
+        )
+    for home in effective_dirs.homes("aider"):
+        targets.append(
+            AuditTarget(
+                "Aider",
+                "aider",
+                home,
+                sessions_root=default_sessions_root("aider", home),
             )
         )
     targets.append(
@@ -2261,6 +2518,11 @@ def _active_session_paths(
             dsh_homes=effective_dirs.homes("dsh"),
             commandcode_homes=effective_dirs.homes("commandcode"),
             claude_homes=effective_dirs.homes("claude"),
+            opencode_homes=effective_dirs.homes("opencode"),
+            cursor_homes=effective_dirs.homes("cursor"),
+            gemini_homes=effective_dirs.homes("gemini"),
+            qwen_homes=effective_dirs.homes("qwen"),
+            aider_homes=effective_dirs.homes("aider"),
         )
         paths: set[str] = set()
         for item in monitor.account_monitors:
@@ -2274,6 +2536,10 @@ def _active_session_paths(
                 dsh_homes=effective_dirs.homes("dsh"),
                 commandcode_homes=effective_dirs.homes("commandcode"),
                 claude_homes=effective_dirs.homes("claude"),
+                cursor_homes=effective_dirs.homes("cursor"),
+                gemini_homes=effective_dirs.homes("gemini"),
+                qwen_homes=effective_dirs.homes("qwen"),
+                aider_homes=effective_dirs.homes("aider"),
             )
         )
         return paths
@@ -2327,6 +2593,11 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         dsh_homes=_daemon_homes(effective_dirs.state("dsh")),
         commandcode_homes=_daemon_homes(effective_dirs.state("commandcode")),
         claude_homes=_daemon_homes(effective_dirs.state("claude")),
+        opencode_homes=_daemon_homes(effective_dirs.state("opencode")),
+        cursor_homes=_daemon_homes(effective_dirs.state("cursor")),
+        gemini_homes=_daemon_homes(effective_dirs.state("gemini")),
+        qwen_homes=_daemon_homes(effective_dirs.state("qwen")),
+        aider_homes=_daemon_homes(effective_dirs.state("aider")),
         scan_dirs_controller=controller,
     )
 
@@ -2386,6 +2657,26 @@ def _service_config(args: argparse.Namespace) -> ServiceConfig:
         claude_homes=tuple(
             path.expanduser().resolve()
             for path in (getattr(args, "claude_homes", None) or ())
+        ),
+        opencode_homes=tuple(
+            path.expanduser().resolve()
+            for path in (getattr(args, "opencode_homes", None) or ())
+        ),
+        cursor_homes=tuple(
+            path.expanduser().resolve()
+            for path in (getattr(args, "cursor_homes", None) or ())
+        ),
+        gemini_homes=tuple(
+            path.expanduser().resolve()
+            for path in (getattr(args, "gemini_homes", None) or ())
+        ),
+        qwen_homes=tuple(
+            path.expanduser().resolve()
+            for path in (getattr(args, "qwen_homes", None) or ())
+        ),
+        aider_homes=tuple(
+            path.expanduser().resolve()
+            for path in (getattr(args, "aider_homes", None) or ())
         ),
     )
 

@@ -140,6 +140,11 @@ class ReadmeBilingualTest(unittest.TestCase):
                 "DeepSeek Harness",
                 "Command Code",
                 "Claude Code",
+                "OpenCode",
+                "Cursor",
+                "Gemini CLI",
+                "Qwen Code",
+                "Aider",
             ],
             "provider 表首列与支持列表不一致",
         )

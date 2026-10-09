@@ -859,8 +859,9 @@ def format_bytes(value: int) -> str:
 def read_tcp_socket_counters() -> dict[int, SocketCounters]:
     """通过 NETLINK SOCK_DIAG 读取已建立 TCP 连接的发送字节。
 
-    macOS 等平台没有 ``AF_NETLINK``：这里直接返回空表，让上层退化成
-    ``process-only``，而不是抛 ``AttributeError``。
+    macOS 和 Windows 没有 ``AF_NETLINK``：这里直接返回空表，让上层退化成
+    ``process-only``（能看到进程和远端，字节数为 0，也不产生流量告警），
+    而不是抛 ``AttributeError`` 或假装统计了字节。
     """
 
     if not hasattr(socket, "AF_NETLINK"):

@@ -195,6 +195,10 @@ class SessionEnrichmentTests(unittest.TestCase):
             kimi_homes=(),
             dsh_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
         )
         aggregator.snapshot(
             {"codex": MultiSessionRegistry(root / "state")},

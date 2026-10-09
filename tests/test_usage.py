@@ -2260,6 +2260,10 @@ class IndexHealthTests(unittest.TestCase):
             kimi_homes=(),
             dsh_homes=(),
             claude_homes=(),
+            opencode_homes=(),
+            cursor_homes=(),
+            gemini_homes=(),
+            qwen_homes=(), aider_homes=(),
         )
 
     def test_success_marks_last_indexed_at(self) -> None:

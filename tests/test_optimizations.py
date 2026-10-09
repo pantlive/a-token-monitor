@@ -145,6 +145,10 @@ class DashboardReloadTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             aggregator = UsageAggregator()
             server = DashboardServer(
@@ -155,6 +159,10 @@ class DashboardReloadTests(unittest.TestCase):
                 dsh_homes=(),
                 commandcode_homes=(),
                 claude_homes=(),
+                opencode_homes=(),
+                cursor_homes=(),
+                gemini_homes=(),
+                qwen_homes=(), aider_homes=(),
             )
             monitor._dashboard = server
             server.start()
@@ -188,6 +196,10 @@ class DashboardReloadTests(unittest.TestCase):
                         dsh_homes=(),
                         commandcode_homes=(new,),
                         claude_homes=(),
+                        opencode_homes=(),
+                        cursor_homes=(),
+                        gemini_homes=(),
+                        qwen_homes=(), aider_homes=(),
                     )
                     with urlopen(
                         Request(f"http://{host}:{port}/api/state", method="HEAD"),
@@ -235,6 +247,29 @@ class DashboardReloadTests(unittest.TestCase):
                                 "message": "inspect token=private-value",
                             },
                         },
+                        {
+                            "type": "response_item",
+                            "timestamp": datetime.fromtimestamp(
+                                now, timezone.utc
+                            ).isoformat(),
+                            "payload": {
+                                "type": "custom_tool_call",
+                                "name": "exec",
+                                "call_id": "wrapped",
+                                "input": 'await tools.exec_command({cmd: "cat /workspace/private-file.py; token=private-value"});',
+                            },
+                        },
+                        {
+                            "type": "response_item",
+                            "timestamp": datetime.fromtimestamp(
+                                now, timezone.utc
+                            ).isoformat(),
+                            "payload": {
+                                "type": "custom_tool_call_output",
+                                "call_id": "wrapped",
+                                "output": "private-value",
+                            },
+                        },
                     ]
                 )
                 + "\n",
@@ -272,6 +307,10 @@ class DashboardReloadTests(unittest.TestCase):
                     dsh_homes=(),
                     commandcode_homes=(),
                     claude_homes=(),
+                    opencode_homes=(),
+                    cursor_homes=(),
+                    gemini_homes=(),
+                    qwen_homes=(), aider_homes=(),
                 ) as server:
                     host, port = server.address
                     with urlopen(
@@ -281,6 +320,18 @@ class DashboardReloadTests(unittest.TestCase):
                 self.assertTrue(context["found"])
                 self.assertEqual(context["content_enabled"], enabled)
                 self.assertNotIn("private-value", json.dumps(context))
+                self.assertEqual(
+                    [event["label"] for event in context["events"][1:]],
+                    ["exec → exec_command", "exec → exec_command"],
+                )
+                activity = context["events"][1]["activities"][0]
+                self.assertEqual(activity["summary"], "读取代码")
+                self.assertEqual(
+                    activity["target"], "private-file.py" if enabled else ""
+                )
+                self.assertEqual(
+                    context["activity_summary"], ["向模型提供文字", "读取代码"]
+                )
                 detail = context["events"][0]["detail"]
                 self.assertEqual(detail, "inspect token=[REDACTED]" if enabled else "")
 

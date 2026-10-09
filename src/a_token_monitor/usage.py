@@ -62,6 +62,25 @@ from .kimi import (
     read_kimi_account,
     resolve_kimi_homes,
 )
+from .local_agents import (
+    CountedUsage,
+    chat_project,
+    list_aider_histories,
+    list_cursor_transcripts,
+    list_gemini_chats,
+    list_opencode_dbs,
+    list_qwen_chats,
+    opencode_db_path,
+    parse_aider_chunk,
+    parse_chat_blob,
+    parse_chat_chunk,
+    read_opencode_usage,
+    resolve_aider_homes,
+    resolve_cursor_homes,
+    resolve_gemini_homes,
+    resolve_opencode_homes,
+    resolve_qwen_homes,
+)
 from .registry import MultiSessionRegistry
 
 _TOKEN_FIELDS = (
@@ -2478,6 +2497,11 @@ class UsageAggregator:
         dsh_homes: Sequence[Path] | None = None,
         claude_homes: Sequence[Path] | None = None,
         commandcode_homes: Sequence[Path] | None = None,
+        opencode_homes: Sequence[Path] | None = None,
+        cursor_homes: Sequence[Path] | None = None,
+        gemini_homes: Sequence[Path] | None = None,
+        qwen_homes: Sequence[Path] | None = None,
+        aider_homes: Sequence[Path] | None = None,
     ) -> None:
         """创建有刷新间隔、持久化检查点和单轮磁盘预算的用量缓存。"""
 
@@ -2512,6 +2536,26 @@ class UsageAggregator:
         )
         self._claude_sidechain_cache: dict[Path, tuple[float, bool]] = {}
         self._commandcode_homes = resolve_commandcode_homes(commandcode_homes or ())
+        # 中文注释：聚合器的 None 表示不扫描，避免单测把本机 OpenCode 库读进来。
+        # 监控进程要自动探测时先 resolve，再把结果元组传进来。
+        self._opencode_homes = (
+            resolve_opencode_homes(opencode_homes)
+            if opencode_homes is not None
+            else ()
+        )
+        self._cursor_homes = (
+            resolve_cursor_homes(cursor_homes) if cursor_homes is not None else ()
+        )
+        self._gemini_homes = (
+            resolve_gemini_homes(gemini_homes) if gemini_homes is not None else ()
+        )
+        self._qwen_homes = (
+            resolve_qwen_homes(qwen_homes) if qwen_homes is not None else ()
+        )
+        self._aider_homes = (
+            resolve_aider_homes(aider_homes) if aider_homes is not None else ()
+        )
+        self._chat_partial: dict[Path, tuple[Any, ...]] = {}
         self._cache: dict[Path, _CachedFile] = {}
         self._rollups: dict[Path, _FileRollup] = {}
         self._discovered: dict[Path, tuple[Path, ...]] = {}
@@ -2608,6 +2652,11 @@ class UsageAggregator:
         dsh_homes: Sequence[Path] | None = None,
         claude_homes: Sequence[Path] | None = None,
         commandcode_homes: Sequence[Path] | None = None,
+        opencode_homes: Sequence[Path] | None = None,
+        cursor_homes: Sequence[Path] | None = None,
+        gemini_homes: Sequence[Path] | None = None,
+        qwen_homes: Sequence[Path] | None = None,
+        aider_homes: Sequence[Path] | None = None,
     ) -> None:
         """热更新各 provider 的扫描目录；None 保持不变，显式元组（含空）替换。
 
@@ -2652,6 +2701,16 @@ class UsageAggregator:
                     for home, cached in self._claude_sidechain_cache.items()
                     if home in self._claude_homes
                 }
+            if opencode_homes is not None:
+                self._opencode_homes = resolve_opencode_homes(opencode_homes)
+            if cursor_homes is not None:
+                self._cursor_homes = resolve_cursor_homes(cursor_homes)
+            if gemini_homes is not None:
+                self._gemini_homes = resolve_gemini_homes(gemini_homes)
+            if qwen_homes is not None:
+                self._qwen_homes = resolve_qwen_homes(qwen_homes)
+            if aider_homes is not None:
+                self._aider_homes = resolve_aider_homes(aider_homes)
             # 中文注释：目录变化后立即丢弃展示缓存，不能继续显示旧账号或旧筛选项。
             with self._snapshot_lock:
                 self._snapshot_scope = None
@@ -3359,6 +3418,21 @@ class UsageAggregator:
         commandcode_scope = tuple(
             ("command-code", str(home), "", "") for home in self._commandcode_homes
         )
+        opencode_scope = tuple(
+            ("opencode", str(home), "", "") for home in self._opencode_homes
+        )
+        cursor_scope = tuple(
+            ("cursor", str(home), "", "") for home in self._cursor_homes
+        )
+        gemini_scope = tuple(
+            ("gemini", str(home), "", "") for home in self._gemini_homes
+        )
+        qwen_scope = tuple(
+            ("qwen", str(home), "", "") for home in self._qwen_homes
+        )
+        aider_scope = tuple(
+            ("aider", str(home), "", "") for home in self._aider_homes
+        )
         return (
             registry_scope
             + grok_scope
@@ -3366,6 +3440,11 @@ class UsageAggregator:
             + dsh_scope
             + claude_scope
             + commandcode_scope
+            + opencode_scope
+            + cursor_scope
+            + gemini_scope
+            + qwen_scope
+            + aider_scope
         )
 
     def _build_sources(
@@ -3467,6 +3546,65 @@ class UsageAggregator:
                     account_id=account.account_id,
                     codex_home=str(home),
                     product="command-code",
+                )
+        for home in self._opencode_homes:
+            for path in self._cached_paths(
+                home / ".usage-opencode",
+                lambda home=home: list_opencode_dbs((home,)),
+            ):
+                sources[path] = _UsageSource(
+                    profile_name="opencode",
+                    account_id=None,
+                    codex_home=str(home),
+                    product="opencode",
+                )
+        for home in self._cursor_homes:
+            for path in self._cached_paths(
+                home / ".usage-cursor",
+                lambda home=home: list_cursor_transcripts(home),
+            ):
+                sources[path] = _UsageSource(
+                    profile_name="cursor",
+                    account_id=None,
+                    codex_home=str(home),
+                    project=chat_project(home, path, product="cursor"),
+                    product="cursor",
+                )
+        for home in self._gemini_homes:
+            for path in self._cached_paths(
+                home / ".usage-gemini",
+                lambda home=home: list_gemini_chats(home),
+            ):
+                sources[path] = _UsageSource(
+                    profile_name="gemini",
+                    account_id=None,
+                    codex_home=str(home),
+                    project=chat_project(home, path, product="gemini"),
+                    product="gemini",
+                )
+        for home in self._qwen_homes:
+            for path in self._cached_paths(
+                home / ".usage-qwen",
+                lambda home=home: list_qwen_chats(home),
+            ):
+                sources[path] = _UsageSource(
+                    profile_name="qwen",
+                    account_id=None,
+                    codex_home=str(home),
+                    project=chat_project(home, path, product="qwen"),
+                    product="qwen",
+                )
+        for home in self._aider_homes:
+            for path in self._cached_paths(
+                home / ".usage-aider",
+                lambda home=home: list_aider_histories(home),
+            ):
+                sources[path] = _UsageSource(
+                    profile_name="aider",
+                    account_id=None,
+                    codex_home=str(home),
+                    project=str(home),
+                    product="aider",
                 )
         return sources
 
@@ -3575,6 +3713,9 @@ class UsageAggregator:
         for path in tuple(self._cache):
             if path not in sources:
                 del self._cache[path]
+        for path in tuple(self._chat_partial):
+            if path not in sources:
+                del self._chat_partial[path]
         if self._persistent is not None:
             self._persistent.prune(sources)
 
@@ -3646,6 +3787,16 @@ class UsageAggregator:
 
         if claude_home_for(path, self._claude_homes) is not None:
             return self._read_claude_transcript(path, maximum_bytes)
+
+        if self._opencode_home_for(path) is not None:
+            return self._read_opencode_db(path, maximum_bytes)
+
+        if self._aider_home_for(path) is not None:
+            return self._read_aider_history(path, maximum_bytes)
+
+        chat_product = self._chat_product_for(path)
+        if chat_product is not None:
+            return self._read_chat_file(path, maximum_bytes, chat_product)
 
         try:
             stat_result = path.stat()
@@ -3722,6 +3873,339 @@ class UsageAggregator:
                 replace_deltas=replace_deltas,
             )
         return cached_file
+
+    def _cached_paths(
+        self,
+        key: Path,
+        loader: Any,
+    ) -> tuple[Path, ...]:
+        """按发现间隔缓存一次目录列举。key 只做缓存身份，不是扫描根。"""
+
+        current_time = time.time()
+        previous_time = self._discovered_at.get(key, 0)
+        if current_time - previous_time < self.discovery_interval:
+            return self._discovered.get(key, ())
+        try:
+            paths = tuple(loader())
+        except OSError:
+            paths = ()
+        self._discovered[key] = paths
+        self._discovered_at[key] = current_time
+        return paths
+
+    def _aider_home_for(self, path: Path) -> Path | None:
+        for home in self._aider_homes:
+            if path == home / ".aider.chat.history.md":
+                return home
+        return None
+
+    def _read_aider_history(
+        self,
+        path: Path,
+        maximum_bytes: int,
+    ) -> _CachedFile | None:
+        """签名变化后从上次偏移继续。模型名和会话起点随偏移一起记住。"""
+
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        signature = (
+            stat_result.st_ino,
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+        )
+        cached = self._load_cached(path)
+        if cached is not None and cached.signature == signature and cached.complete:
+            unchanged = replace(cached, last_read_bytes=0)
+            self._cache[path] = unchanged
+            return unchanged
+        home = self._aider_home_for(path)
+        project = str(home) if home is not None else None
+        partial = self._chat_partial.get(path)
+        if (
+            partial is not None
+            and partial[0] == signature[0]
+            and stat_result.st_size >= partial[1]
+        ):
+            offset = partial[1]
+            order = partial[2]
+            current = dict(partial[3])
+            model = partial[4] if len(partial) > 4 else ""
+            session_timestamp = partial[5] if len(partial) > 5 else None
+        else:
+            offset = 0
+            order = ()
+            current = {}
+            model = ""
+            session_timestamp = None
+        parsed = parse_aider_chunk(
+            path,
+            offset,
+            project=project,
+            fallback_timestamp=stat_result.st_mtime,
+            maximum_bytes=maximum_bytes,
+            model=model if isinstance(model, str) else "",
+            session_timestamp=(
+                session_timestamp
+                if isinstance(session_timestamp, float)
+                else None
+            ),
+        )
+        order, current = _merge_counted(
+            order,
+            current,
+            parsed.events,
+            replace=False,
+        )
+        self._chat_partial[path] = (
+            signature[0],
+            parsed.next_offset,
+            order,
+            current,
+            parsed.model,
+            parsed.session_timestamp,
+        )
+        deltas = tuple(current[key] for key in order)
+        cached_file = _CachedFile(
+            signature=signature,
+            next_offset=parsed.next_offset,
+            total_deltas=deltas,
+            fallback_deltas=(),
+            state=_UsageParseState(
+                has_total_usage=True,
+                project=project or _single_project(deltas),
+                previous_timestamp=stat_result.st_mtime,
+            ),
+            last_read_bytes=parsed.bytes_read,
+            complete=parsed.reached_eof,
+        )
+        self._store_replaced(path, cached_file, deltas)
+        return cached_file
+
+    def _opencode_home_for(self, path: Path) -> Path | None:
+        for home in self._opencode_homes:
+            if path == opencode_db_path(home):
+                return home
+        return None
+
+    def _chat_product_for(self, path: Path) -> str | None:
+        if _path_under(path, self._cursor_homes) and "agent-transcripts" in path.parts:
+            return "cursor"
+        if _path_under(path, self._gemini_homes):
+            return "gemini"
+        if _path_under(path, self._qwen_homes):
+            return "qwen"
+        return None
+
+    def _read_opencode_db(
+        self,
+        path: Path,
+        maximum_bytes: int,
+    ) -> _CachedFile | None:
+        """签名变化时整库重读。SQL 不能按偏移追加，字节数按文件大小计入预算。"""
+
+        del maximum_bytes
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        signature = (
+            stat_result.st_ino,
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+        )
+        cached = self._load_cached(path)
+        if cached is not None and cached.signature == signature and cached.complete:
+            unchanged = replace(cached, last_read_bytes=0)
+            self._cache[path] = unchanged
+            return unchanged
+        events = read_opencode_usage(path)
+        if events is None:
+            return None
+        deltas = tuple(_delta_from_counted(event) for event in events)
+        cached_file = _CachedFile(
+            signature=signature,
+            next_offset=stat_result.st_size,
+            total_deltas=deltas,
+            fallback_deltas=(),
+            state=_UsageParseState(
+                has_total_usage=True,
+                project=_single_project(deltas),
+                previous_timestamp=stat_result.st_mtime,
+            ),
+            last_read_bytes=stat_result.st_size,
+            complete=True,
+        )
+        self._store_replaced(path, cached_file, deltas)
+        return cached_file
+
+    def _read_chat_file(
+        self,
+        path: Path,
+        maximum_bytes: int,
+        product: str,
+    ) -> _CachedFile | None:
+        """Gemini / Qwen 按消息 ID 后者覆盖前者；Cursor 只累计带 usage 的行。"""
+
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        signature = (
+            stat_result.st_ino,
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+        )
+        cached = self._load_cached(path)
+        if cached is not None and cached.signature == signature and cached.complete:
+            unchanged = replace(cached, last_read_bytes=0)
+            self._cache[path] = unchanged
+            return unchanged
+        home = _owning_home(
+            path,
+            self._cursor_homes
+            if product == "cursor"
+            else self._gemini_homes
+            if product == "gemini"
+            else self._qwen_homes,
+        )
+        project = (
+            chat_project(home, path, product=product) if home is not None else None
+        )
+        if path.suffix == ".json":
+            return self._read_chat_blob(
+                path,
+                signature,
+                stat_result.st_size,
+                stat_result.st_mtime,
+                product,
+                project,
+            )
+        partial = self._chat_partial.get(path)
+        if (
+            partial is not None
+            and partial[0] == signature[0]
+            and stat_result.st_size >= partial[1]
+        ):
+            offset = partial[1]
+            order: tuple[str, ...] = partial[2]
+            current = dict(partial[3])
+        else:
+            # 内存里没有 ID 映射时从头读，避免只把尾部写回索引、丢掉前半段。
+            offset = 0
+            order = ()
+            current = {}
+        parsed = parse_chat_chunk(
+            path,
+            offset,
+            product="cursor" if product == "cursor" else "gemini",
+            project=project,
+            fallback_timestamp=stat_result.st_mtime,
+            maximum_bytes=maximum_bytes,
+        )
+        order, current = _merge_counted(
+            order,
+            current,
+            parsed.events,
+            replace=product != "cursor",
+        )
+        self._chat_partial[path] = (signature[0], parsed.next_offset, order, current)
+        deltas = tuple(current[key] for key in order)
+        cached_file = _CachedFile(
+            signature=signature,
+            next_offset=parsed.next_offset,
+            total_deltas=deltas,
+            fallback_deltas=(),
+            state=_UsageParseState(
+                has_total_usage=True,
+                project=project or _single_project(deltas),
+                previous_timestamp=stat_result.st_mtime,
+            ),
+            last_read_bytes=parsed.bytes_read,
+            complete=parsed.reached_eof,
+        )
+        self._store_replaced(path, cached_file, deltas)
+        return cached_file
+
+    def _read_chat_blob(
+        self,
+        path: Path,
+        signature: tuple[int, int, int],
+        size: int,
+        modified_at: float,
+        product: str,
+        project: str | None,
+    ) -> _CachedFile:
+        if size > 32 * 1024 * 1024:
+            cached_file = _CachedFile(
+                signature=signature,
+                next_offset=size,
+                total_deltas=(),
+                fallback_deltas=(),
+                state=_UsageParseState(has_total_usage=True, project=project),
+                last_read_bytes=0,
+                complete=True,
+            )
+            self._store_replaced(path, cached_file, ())
+            return cached_file
+        events = parse_chat_blob(
+            path,
+            product="cursor" if product == "cursor" else "gemini",
+            project=project,
+            fallback_timestamp=modified_at,
+        )
+        if events is None:
+            events = ()
+        order, current = _merge_counted(
+            (),
+            {},
+            events,
+            replace=product != "cursor",
+        )
+        deltas = tuple(current[key] for key in order)
+        cached_file = _CachedFile(
+            signature=signature,
+            next_offset=size,
+            total_deltas=deltas,
+            fallback_deltas=(),
+            state=_UsageParseState(
+                has_total_usage=True,
+                project=project or _single_project(deltas),
+                previous_timestamp=modified_at,
+            ),
+            last_read_bytes=size,
+            complete=True,
+        )
+        self._store_replaced(path, cached_file, deltas)
+        return cached_file
+
+    def _load_cached(self, path: Path) -> _CachedFile | None:
+        cached = self._cache.get(path)
+        if cached is None and self._persistent is not None:
+            cached = self._persistent.load(path)
+            if cached is not None:
+                self._cache[path] = cached
+        return cached
+
+    def _store_replaced(
+        self,
+        path: Path,
+        cached_file: _CachedFile,
+        deltas: tuple[UsageDelta, ...],
+    ) -> None:
+        """整表替换这一文件的增量。同 ID 覆盖后不能再按尾部追加。"""
+
+        self._cache[path] = cached_file
+        self._rollups.pop(path, None)
+        if self._persistent is not None:
+            self._persistent.save(
+                path,
+                cached_file,
+                deltas,
+                (),
+                replace_deltas=True,
+            )
 
     def _grok_home_for_log(self, path: Path) -> Path | None:
         """判断路径是否为某个 GROK_HOME 的统一用量日志。"""
@@ -5828,3 +6312,77 @@ def _round_number(value: float) -> float:
     """避免 API 中出现浮点计算噪声。"""
 
     return round(value, 8)
+
+
+def _delta_from_counted(event: CountedUsage) -> UsageDelta:
+    """把一次真实记录的用量变成索引增量。"""
+
+    usage = TokenUsage(
+        input_tokens=event.input_tokens,
+        cached_input_tokens=event.cached_input_tokens,
+        cache_write_input_tokens=event.cache_write_input_tokens,
+        output_tokens=event.output_tokens,
+        reasoning_output_tokens=event.reasoning_output_tokens,
+        total_tokens=event.total_tokens,
+    )
+    return UsageDelta(
+        timestamp=event.timestamp,
+        model=event.model,
+        usage=usage,
+        billing_usage=usage,
+        project=event.project,
+    )
+
+
+def _merge_counted(
+    order: tuple[str, ...],
+    current: dict[str, UsageDelta],
+    events: tuple[CountedUsage, ...],
+    *,
+    replace: bool,
+) -> tuple[tuple[str, ...], dict[str, UsageDelta]]:
+    """Gemini / Qwen 同 ID 以后写为准；Cursor 同 ID 只保留第一次。"""
+
+    keys = list(order)
+    merged = dict(current)
+    for event in events:
+        key = event.dedupe_key
+        if key in merged:
+            if replace:
+                merged[key] = _delta_from_counted(event)
+            continue
+        merged[key] = _delta_from_counted(event)
+        keys.append(key)
+    return tuple(keys), merged
+
+
+def _single_project(deltas: tuple[UsageDelta, ...]) -> str | None:
+    projects = {delta.project for delta in deltas if delta.project}
+    if len(projects) == 1:
+        return next(iter(projects))
+    return None
+
+
+def _path_under(path: Path, homes: Sequence[Path]) -> bool:
+    return _owning_home(path, homes) is not None
+
+
+def _owning_home(path: Path, homes: Sequence[Path]) -> Path | None:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    matches: list[Path] = []
+    for home in homes:
+        try:
+            home_resolved = home.resolve()
+        except OSError:
+            home_resolved = home
+        try:
+            resolved.relative_to(home_resolved)
+        except ValueError:
+            continue
+        matches.append(home)
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item.parts))

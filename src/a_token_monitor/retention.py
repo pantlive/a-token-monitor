@@ -28,7 +28,7 @@ DEFAULT_SESSION_RETENTION_DAYS = 30.0
 MAX_RETENTION_DAYS = 3650.0
 SETTINGS_FILENAME = "settings.json"
 
-RETENTION_KEYS = ("usage_days", "session_days")
+RETENTION_KEYS = ("usage_days", "session_days", "alert_days")
 
 _SECONDS_PER_DAY = 86400.0
 
@@ -158,7 +158,7 @@ class RetentionController:
         self._reload_callback = callback
 
     def effective(self) -> dict[str, float]:
-        """返回两个保留期键的生效值。"""
+        """返回三个保留期键的生效值。"""
 
         with self._lock:
             return {
@@ -188,22 +188,27 @@ class RetentionController:
         *,
         usage_days: float | None = None,
         session_days: float | None = None,
+        alert_days: float | None = None,
     ) -> dict[str, object]:
         """应用修改,持久化后触发热生效,返回最新状态。"""
 
         with self._lock:
             if action == "set":
                 config = self._config
-                if usage_days is not None:
-                    config = config.with_override("usage_days", usage_days)
-                if session_days is not None:
-                    config = config.with_override("session_days", session_days)
+                updates = {
+                    "usage_days": usage_days,
+                    "session_days": session_days,
+                    "alert_days": alert_days,
+                }
+                for key, value in updates.items():
+                    if value is not None:
+                        config = config.with_override(key, value)
                 if config is self._config:
                     return self.snapshot()
             elif action == "reset":
-                config = self._config.without_override(
-                    "usage_days"
-                ).without_override("session_days")
+                config = self._config
+                for key in RETENTION_KEYS:
+                    config = config.without_override(key)
             else:
                 raise RetentionError(f"不支持的操作: {action}")
             config.save(self.config_path)
@@ -275,14 +280,21 @@ class HistoryDataManager:
         self,
         usage_days: float | None = None,
         session_days: float | None = None,
+        alert_days: float | None = None,
     ) -> None:
-        """热更新保留天数;None 表示不变。"""
+        """热更新保留天数;None 表示不变。告警天数同时改清理用的截止时间。"""
 
+        store_days: float | None = None
         with self._lock:
             if usage_days is not None:
                 self._usage_days = _check_days(usage_days)
             if session_days is not None:
                 self._session_days = _check_days(session_days)
+            if alert_days is not None:
+                self._alert_days = _check_days(alert_days)
+                store_days = self._alert_days
+        if store_days is not None and self._alert_store is not None:
+            self._alert_store.set_retention_days(store_days)
 
     @property
     def retention_days(self) -> dict[str, float]:

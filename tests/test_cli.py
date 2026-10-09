@@ -10,6 +10,7 @@ import socket
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -69,6 +70,11 @@ def _missing_provider_env(root: Path) -> dict[str, str]:
         "DSH_HOME": str(root / "missing-dsh"),
         "COMMANDCODE_HOME": str(root / "missing-commandcode"),
         "CLAUDE_CONFIG_DIR": str(root / "missing-claude"),
+        "OPENCODE_DB": str(root / "missing-opencode" / "opencode.db"),
+        "CURSOR_CONFIG_DIR": str(root / "missing-cursor"),
+        "GEMINI_CLI_HOME": str(root / "missing-gemini"),
+        "QWEN_HOME": str(root / "missing-qwen"),
+        "AIDER_HOME": str(root / "missing-aider"),
     }
 
 
@@ -657,9 +663,24 @@ class CliTests(unittest.TestCase):
             state_dir = Path(temporary_directory)
             store = TrafficAlertStore(state_dir)
             store.record([_sample_alert(time.time() - 3 * 86400)], now=time.time())
+            isolated = _missing_provider_env(state_dir)
+            isolated.update(
+                {
+                    "OPENCODE_DB": str(state_dir / "missing-opencode.db"),
+                    "CURSOR_CONFIG_DIR": str(state_dir / "missing-cursor"),
+                    "GEMINI_CLI_HOME": str(state_dir / "missing-gemini"),
+                    "QWEN_HOME": str(state_dir / "missing-qwen"),
+                    "AIDER_HOME": str(state_dir / "missing-aider"),
+                    "XDG_DATA_HOME": str(state_dir / "missing-xdg"),
+                    "XDG_CONFIG_HOME": str(state_dir / "missing-xdg-config"),
+                }
+            )
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
                 listed = main(
                     [
                         "--state-dir",
@@ -677,7 +698,10 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("SECRET", buffer.getvalue())
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
                 acked = main(
                     [
                         "--state-dir",
@@ -691,7 +715,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(store.stats()["unread"], 0)
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
                 quiet = main(
                     [
                         "--state-dir",
@@ -705,7 +732,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(buffer.getvalue(), "")
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
                 preview = main(
                     [
                         "--state-dir",
@@ -721,7 +751,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(store.stats()["total"], 1)
 
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
                 cleared = main(
                     [
                         "--state-dir",
@@ -759,6 +792,121 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(confirmed, 0)
             self.assertEqual(store.stats()["total"], 0)
+
+    def test_alerts_command_prints_session_activity(self) -> None:
+        """alerts 默认只展示行为摘要，内容摘要要显式打开。"""
+
+        moment = 1_789_000_000.0
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state_dir = root / "state"
+            codex = root / "codex"
+            started = datetime.fromtimestamp(moment - 60)
+            session = (
+                codex
+                / "sessions"
+                / started.strftime("%Y")
+                / started.strftime("%m")
+                / started.strftime("%d")
+                / (
+                    "rollout-"
+                    f"{started.strftime('%Y-%m-%dT%H-%M-%S')}-"
+                    "019ed409-4ff8-7083-98a5-2502125735ce.jsonl"
+                )
+            )
+            session.parent.mkdir(parents=True)
+            inside = datetime.fromtimestamp(moment - 10, tz=timezone.utc).isoformat()
+            inside = inside.replace("+00:00", "Z")
+            meta_time = datetime.fromtimestamp(moment - 80, tz=timezone.utc).isoformat()
+            lines = [
+                {
+                    "timestamp": meta_time.replace("+00:00", "Z"),
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "019ed409-4ff8-7083-98a5-2502125735ce",
+                        "cwd": "/home/dev/project",
+                    },
+                },
+                {
+                    "timestamp": inside,
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "机密正文"},
+                },
+                {
+                    "timestamp": inside,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "cat /tmp/main.py"}),
+                        "call_id": "c1",
+                    },
+                },
+            ]
+            session.write_text(
+                "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(session, (moment, moment))
+            store = TrafficAlertStore(state_dir)
+            alert = _sample_alert(moment)
+            store.record([alert], now=moment)
+            isolated = _missing_provider_env(root)
+            isolated["CODEX_HOME"] = str(codex)
+            isolated.update(
+                {
+                    "OPENCODE_DB": str(root / "missing-opencode.db"),
+                    "CURSOR_CONFIG_DIR": str(root / "missing-cursor"),
+                    "GEMINI_CLI_HOME": str(root / "missing-gemini"),
+                    "QWEN_HOME": str(root / "missing-qwen"),
+                    "AIDER_HOME": str(root / "missing-aider"),
+                }
+            )
+
+            buffer = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
+                listed = main(["--state-dir", str(state_dir), "alerts"])
+            text = buffer.getvalue()
+            self.assertEqual(listed, 1)
+            self.assertIn("行为：", text)
+            self.assertIn("读取代码", text)
+            self.assertNotIn("机密正文", text)
+
+            buffer = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
+                main(["--state-dir", str(state_dir), "alerts", "--json"])
+            payload = json.loads(buffer.getvalue())
+            context = payload["alerts"][0]["context"]
+            self.assertTrue(context["found"])
+            self.assertIn("读取代码", context["activity_summary"])
+            self.assertNotIn("events", context)
+            self.assertNotIn("机密正文", buffer.getvalue())
+
+            buffer = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, isolated, clear=False),
+                contextlib.redirect_stdout(buffer),
+            ):
+                main(
+                    [
+                        "--state-dir",
+                        str(state_dir),
+                        "alerts",
+                        "--json",
+                        "--alert-context-content",
+                    ]
+                )
+            revealed = json.loads(buffer.getvalue())
+            events = revealed["alerts"][0]["context"]["events"]
+            self.assertTrue(
+                any("机密正文" in str(event.get("detail") or "") for event in events)
+            )
 
 
     def test_usage_command_searches_token_history(self) -> None:

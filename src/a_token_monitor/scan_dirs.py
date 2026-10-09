@@ -21,6 +21,18 @@ from .commandcode import default_commandcode_home, resolve_commandcode_homes
 from .dsh import default_dsh_home, resolve_dsh_homes
 from .grok import default_grok_home, resolve_grok_homes
 from .kimi import default_kimi_home, resolve_kimi_homes
+from .local_agents import (
+    default_aider_home,
+    default_cursor_home,
+    default_gemini_home,
+    default_opencode_home,
+    default_qwen_home,
+    resolve_aider_homes,
+    resolve_cursor_homes,
+    resolve_gemini_homes,
+    resolve_opencode_homes,
+    resolve_qwen_homes,
+)
 
 
 SCAN_DIRS_FILENAME = "scan-dirs.json"
@@ -129,6 +141,46 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             markers=("sessions",),
             default_home=default_kimi_home,
             resolver=resolve_kimi_homes,
+        ),
+        ProviderSpec(
+            key="opencode",
+            display_name="OpenCode",
+            cli_option="--opencode-home",
+            markers=("opencode.db",),
+            default_home=default_opencode_home,
+            resolver=resolve_opencode_homes,
+        ),
+        ProviderSpec(
+            key="cursor",
+            display_name="Cursor",
+            cli_option="--cursor-home",
+            markers=("projects",),
+            default_home=default_cursor_home,
+            resolver=resolve_cursor_homes,
+        ),
+        ProviderSpec(
+            key="gemini",
+            display_name="Gemini CLI",
+            cli_option="--gemini-home",
+            markers=("tmp", "projects.json"),
+            default_home=default_gemini_home,
+            resolver=resolve_gemini_homes,
+        ),
+        ProviderSpec(
+            key="qwen",
+            display_name="Qwen Code",
+            cli_option="--qwen-home",
+            markers=("projects", "tmp"),
+            default_home=default_qwen_home,
+            resolver=resolve_qwen_homes,
+        ),
+        ProviderSpec(
+            key="aider",
+            display_name="Aider",
+            cli_option="--aider-home",
+            markers=(".aider.chat.history.md", "analytics.json"),
+            default_home=default_aider_home,
+            resolver=resolve_aider_homes,
         ),
     )
 }
