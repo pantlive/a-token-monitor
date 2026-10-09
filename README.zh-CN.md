@@ -7,35 +7,62 @@
 
 [English](README.md) | 中文
 
-本机常驻的 code agent 监控台。额度窗口、活动会话、token 用量、异常上传和磁盘归档
-放在同一张网页里；数据不出本机，运行时没有第三方依赖。
+**你在付费用的每个 code agent，一张本地网页全看清。** Codex、Claude Code、Grok、
+Kimi Code 等 11 个 agent 的额度窗口、活动会话、token 花费和异常上传，放在同一个常驻
+页面里。数据不出本机，只用 Python 标准库就能跑。
 
-覆盖 Codex、Grok、Kimi Code、DeepSeek Harness、Command Code、Claude Code、
-OpenCode、Cursor、Gemini CLI、Qwen Code 和 Aider。当前版本只观察和统计，
-额度状态不会触发 agent 启停。
+![a-token-monitor Dashboard 总览：流量、会话、额度窗口和今日金额](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/overview-zh.png)
 
-## 亮点
+<sub>截图使用 [`docs/screenshots/generate.py`](docs/screenshots/generate.py) 生成的演示数据，
+不含任何真实账号。</sub>
 
-- **官方额度 + 本地用量，两套账一起看。** Codex、Grok、Kimi、Command Code、
-  Claude Code 走各家官方只读额度接口（5 小时 / 周 / 月窗口、重置时间、套餐名）；
-  本机会话日志再按请求累计 token 和 API 等价成本。订阅百分比和磁盘上的用量
-  可以对照。
-- **一张表看完全部 agent。** 上面 11 个产品、多个数据目录、多个账号并列；
-  扫描路径可在网页改，热重载，不丢用量索引检查点。
-- **活动会话认打开的文件。** 依据 `/proc/<pid>/fd`、`lsof`、Windows Restart Manager，
-  统一展示账号、产品、项目、模型、token 和最后活动时间；轮数或上下文超阈值
-  会提示开新会话。
-- **异常上传能回看当时在干什么。** Linux 按进程统计外发 TCP 字节，15 秒 / 5 分钟
-  两档告警；告警按工作目录和时间窗关联本地会话，归纳「发起代码推送」「读取代码」
-  这类操作。消息正文默认隐藏，也不会写入磁盘。
-- **会话能归档也能恢复。** 按项目筛选，打包 `tar.gz` 并写 SHA-256 manifest；
-  正在运行的会话和 10 分钟内改过的文件一律跳过。
-- **装完就能常驻。** 只使用 Python 标准库，`pip install` 即可。Dashboard 嵌在
-  daemon 里，可装成 systemd / launchd / Windows 计划任务。状态目录默认
-  `~/.a-token-monitor`。
+## 快速开始
 
-金额是 OpenAI / Anthropic 等官方 API 的等价估算，和订阅账单是两套口径；
-没有已知单价的模型仍展示 token，金额合计只计入有单价的模型。
+```bash
+pip install a-token-monitor
+a-token-monitor daemon --dashboard
+```
+
+打开 <http://127.0.0.1:8765/>。默认位置的 agent（`~/.codex`、`~/.claude`、`~/.grok`、
+`~/.kimi-code` 等）会被自动发现，不需要写配置文件。想关掉终端后继续运行，用
+`a-token-monitor service install --dashboard` 装成后台服务（systemd、launchd 或
+Windows 计划任务）。
+
+## 为什么用它
+
+- **额度还剩多少，不用再猜。** Codex、Claude Code、Grok、Kimi Code、Command Code
+  直接读各家官方的只读额度接口：5 小时 / 周 / 月窗口、重置时间和套餐名，所有账号并排看。
+- **token 花在哪里，一目了然。** 本机会话日志按请求建索引，换算成 token 和 API 等价金额，
+  可按天、账号、模型、项目查看，带月度预算进度、缓存节省和可检索的历史。
+- **跑偏的会话早发现。** 只有进程正打开着会话文件才算活动会话；轮数太多、上下文太长的
+  会话会提示「建议开新会话」。
+- **知道 agent 当时在上传什么。** Linux 上按 agent 进程统计外发 TCP 字节；告警会关联到
+  当时正在运行的本地会话，归纳成「推送代码」「读取文件」这类操作。消息正文默认隐藏，
+  需要时才打开。
+- **agent 数据目录不再越堆越大。** 按项目把旧会话打包成带 SHA-256 manifest 的 `tar.gz`，
+  随时可以恢复；正在运行的会话一律不碰。
+- **装好就不用管。** 11 个 agent、多账号、零运行时依赖；中英文界面，白天 / 夜间主题。
+
+金额是按各家公开价目表换算的 API 等价估算，和订阅账单是两套口径。
+
+## 功能导览
+
+### 所有订阅和额度窗口，一屏看完
+
+![账号与额度：每个订阅一张卡片，展示 5 小时与周额度窗口](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/accounts-zh.png)
+
+### 用量与 API 等价金额
+
+先看近 30 天的金额趋势，再按账号、模型或项目拆开，支持筛选、Top 5 排行和月度预算。
+
+![用量与费用：30 天趋势、筛选、预算和按账号明细](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-zh.png)
+
+### 使用习惯与省 token 建议
+
+只用 token 元数据（从不读取提示词）：活跃时段、各模型成本、对话规模、最贵的对话，
+以及具体能在哪里省 token 的建议。
+
+![习惯分析：使用画像、活跃时段、模型成本和最贵对话](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/insights-zh.png)
 
 ## 和其他工具比
 
@@ -137,19 +164,7 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
 
 以上参数在 `daemon` 与 `service install` 上都可用。
 
-## 功能概览
-
-- **账号与额度看板**：各订阅并列卡片，5 小时 / 周 / 月窗口进度与重置时间；配额耗尽或超过 90% 时顶部告警。
-- **活动会话**：账号、产品、项目、模型、状态、token、开始与最后活动时间；超长会话提示开新会话。
-- **用量与成本估算**：按天 / 模型 / 账号 / 项目聚合，含趋势图、缓存节省、Top 5；支持 `--budget-usd`。
-- **习惯分析**：活跃时段、模型成本分布、对话规模、最贵对话，以及可量化的省 token 建议。只读 token 元数据。
-- **异常流量监控**：15 秒 / 5 分钟两档阈值，历史可检索、可标记已读。
-- **磁盘与会话管理**：目录占用提醒；按项目归档、清理、恢复。
-- **设置页**：扫描目录热重载；保留天数在线改，带清理预览和 VACUUM。
-- **健康检查**：`/healthz`、`/readyz`，顶栏健康徽标。
-- **多语言与主题**：中 / 英（`--lang` 或自动判断）；白天 / 夜间主题。
-
-## Dashboard
+## Dashboard 详解
 
 - **账号与额度**：每个订阅一张卡片，固定展示 `5 小时 / 周 / 月` 三行窗口
   （缺的周期占位「不适用」，卡片之间严格对齐）；卡片标题是订阅类型
@@ -380,10 +395,14 @@ Dashboard 除页面和只读接口外，只额外接受少数写接口（`POST /
 ```bash
 python -m pytest tests/ -q    # 或 python -m unittest discover -s tests -v
 ruff check src tests
+python -m mypy                # 类型检查（范围见 pyproject.toml）
+python -m coverage run -m pytest -q && python -m coverage report
 ```
 
 CI 在 Linux / macOS / Windows × Python 3.10 / 3.13 全矩阵跑同一套测试；
-平台专有能力（符号链接、POSIX 权限位、`/proc`）由测试装饰器显式跳过。
+平台专有能力（符号链接、POSIX 权限位、`/proc`）由测试装饰器显式跳过。覆盖率（门槛 78%）
+和 mypy 只在 ubuntu / 3.13 跑一次。代码结构、新增 agent 的步骤和项目约定见
+[CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
