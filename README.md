@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
 [![Python](https://img.shields.io/pypi/pyversions/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![GitHub: pantlive](https://img.shields.io/badge/GitHub-pantlive-181717?logo=github)](https://github.com/pantlive)
 
 English | [中文](README.zh-CN.md)
 
@@ -497,7 +498,7 @@ agent, and project conventions.
 GNU General Public License v3.0 or later (`GPL-3.0-or-later`); see [LICENSE](LICENSE) for
 the full terms.
 
-Copyright (C) 2026 pantlive
+Copyright (C) 2026 [pantlive](https://github.com/pantlive)
 
 You are free to use, modify and distribute this program; but when you distribute it or a
 modified version, you must license it under the GPL as well and provide the complete

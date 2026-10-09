@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
 [![Python](https://img.shields.io/pypi/pyversions/a-token-monitor.svg)](https://pypi.org/project/a-token-monitor/)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![GitHub: pantlive](https://img.shields.io/badge/GitHub-pantlive-181717?logo=github)](https://github.com/pantlive)
 
 [English](README.md) | 中文
 
@@ -434,7 +435,7 @@ CI 在 Linux / macOS / Windows × Python 3.10 / 3.13 全矩阵跑同一套测试
 GNU General Public License v3.0 或更新版本（`GPL-3.0-or-later`），完整条款见
 [LICENSE](LICENSE)。
 
-Copyright (C) 2026 pantlive
+Copyright (C) 2026 [pantlive](https://github.com/pantlive)
 
 可以自由使用、修改和分发本程序；但分发本程序或其修改版时，必须同样以 GPL
 授权，并一并向接收者提供完整源码，不得附加额外限制。

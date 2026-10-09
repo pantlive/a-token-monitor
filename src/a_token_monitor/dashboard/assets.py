@@ -75,6 +75,10 @@ _LANGUAGE_TOGGLE_HTML = _asset("language-toggle.html")
 _THEME_TOGGLE_HTML = _asset("theme-toggle.html")
 
 
+# 中文注释：顶栏右侧的作者 GitHub 链接，两页共用。
+_GITHUB_LINK_HTML = _asset("github-link.html")
+
+
 _LANGUAGE_SCRIPT = _asset("language.js")
 
 
@@ -83,7 +87,7 @@ _THEME_SCRIPT = _asset("theme.js")
 
 _PAGE_THEME_REPLACEMENTS = (
     ("__THEME_BOOT__", _THEME_BOOT_SCRIPT + _LANGUAGE_BOOT_SCRIPT),
-    ("__THEME_TOGGLE__", _LANGUAGE_TOGGLE_HTML + _THEME_TOGGLE_HTML),
+    ("__THEME_TOGGLE__", _LANGUAGE_TOGGLE_HTML + _THEME_TOGGLE_HTML + _GITHUB_LINK_HTML),
     ("__THEME_SCRIPT__", _THEME_SCRIPT + _LANGUAGE_SCRIPT),
     ("__FAVICON__", _FAVICON_LINK),
     ("__BRAND_MARK__", _brand_mark_svg()),

@@ -376,6 +376,9 @@
     .theme-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
     .theme-toggle:hover { border-color: var(--violet); color: var(--text); background: var(--surface-raised); }
     .theme-toggle svg { width: 15px; height: 15px; display: none; }
+    .github-link { display: inline-flex; align-items: center; justify-content: center; padding: 7px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); transition: border-color .15s ease, color .15s ease, background .15s ease; }
+    .github-link:hover { border-color: var(--violet); color: var(--text); background: var(--surface-raised); }
+    .github-link svg { width: 15px; height: 15px; }
     /* 中文注释：三种模式各用一个图标，用 html 上的 data-theme-mode 决定显示哪个。 */
     html[data-theme-mode="system"] .theme-icon-system, html[data-theme-mode="light"] .theme-icon-light, html[data-theme-mode="dark"] .theme-icon-dark { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
