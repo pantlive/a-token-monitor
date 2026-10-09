@@ -45,6 +45,9 @@ class DashboardConfig:
     port: int = 8765
     budget_usd: float | None = None
     alert_context_content: bool = False
+    # 中文注释：常驻 daemon 启动时在后台预先生成英文页面（约 1 秒 CPU）；测试与一次性
+    # 场景默认关闭，避免大量短命实例在后台抢 CPU。
+    warm_english_pages: bool = False
 
     def __post_init__(self) -> None:
         """校验监听地址和端口。"""
@@ -168,11 +171,12 @@ class DashboardServer:
         self._server = server
         # 中文注释：英文页面整页翻译约 1 秒，后台预热后首个英文请求直接命中缓存；
         # 缓存是进程级的，重复启动不会重复计算。
-        Thread(
-            target=warm_localized_pages,
-            name="a-token-monitor-dashboard-warmup",
-            daemon=True,
-        ).start()
+        if self.config.warm_english_pages:
+            Thread(
+                target=warm_localized_pages,
+                name="a-token-monitor-dashboard-warmup",
+                daemon=True,
+            ).start()
         self._thread = Thread(
             target=server.serve_forever,
             name="a-token-monitor-dashboard",

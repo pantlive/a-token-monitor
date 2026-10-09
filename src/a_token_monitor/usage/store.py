@@ -389,7 +389,9 @@ class _UsageIndexStore:
                     "FROM usage_delta LEFT JOIN "
                     f"({_FILE_ACCOUNT_VIEW}) AS accounts "
                     "ON accounts.account_path = usage_delta.path"
-                    f"{where} ORDER BY timestamp DESC, rowid DESC"
+                    # 中文注释：JOIN 了账号视图，rowid 必须写明表名；较老的 SQLite
+                    # （如 3.46）会把裸 rowid 判为歧义列名，查询失败后检索结果变空。
+                    f"{where} ORDER BY timestamp DESC, usage_delta.rowid DESC"
                 )
                 if limit is not None:
                     statement += " LIMIT ?"

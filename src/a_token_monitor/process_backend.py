@@ -681,6 +681,10 @@ def _read_open_paths(directory: Path) -> tuple[Path, ...]:
         except OSError:
             continue
         text = str(target)
+        # 中文注释：在 Windows 上按 /proc 语义读取（测试与容器）时，readlink 可能返回
+        # 带 \\?\ 前缀的扩展路径，去掉前缀才能和会话目录比较。
+        if text.startswith("\\\\?\\"):
+            text = text[4:]
         if text.startswith(("socket:", "pipe:", "anon_inode:")):
             continue
         if text.endswith(" (deleted)"):

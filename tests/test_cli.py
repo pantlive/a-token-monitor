@@ -1390,7 +1390,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
+            with (
+                mock.patch("a_token_monitor.service.sys.platform", "linux"),
+                contextlib.redirect_stdout(buffer),
+            ):
                 code = main(
                     ["--state-dir", str(root / "state"), "service", "plist"]
                 )

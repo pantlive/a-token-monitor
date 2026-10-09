@@ -11,11 +11,16 @@
 界面语言同理：CLI 与 Dashboard 在未显式指定时按 ``LC_ALL`` / ``LC_MESSAGES`` / ``LANG``
 自动选择中文或英文，而用例按默认中文断言。CI 的 macOS / Windows runner 默认是英文
 locale，这里移除这些变量，让被测代码回到默认语言；专门测语言判断的用例都显式传入 env。
+
+临时目录用解析后的真实路径：macOS 的 ``/var/folders`` 是指向 ``/private/var`` 的符号链接，
+Windows runner 的临时目录带 8.3 短文件名（``RUNNER~1``）。被测代码会把路径规范化，
+用例若拿未解析的路径比较就会对不上。
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import timedelta, timezone
 
 from a_token_monitor.local_time import set_local_timezone
@@ -24,3 +29,5 @@ set_local_timezone(timezone(timedelta(hours=8), "UTC+8"))
 
 for _language_variable in ("LC_ALL", "LC_MESSAGES", "LANG"):
     os.environ.pop(_language_variable, None)
+
+tempfile.tempdir = os.path.realpath(tempfile.gettempdir())
