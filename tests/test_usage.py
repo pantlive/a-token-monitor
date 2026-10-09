@@ -2360,6 +2360,39 @@ class IndexRetentionTests(unittest.TestCase):
         self.assertEqual(remaining, 0)
         self.assertEqual(remaining_after_reopen, 0)
 
+class LongContextRulesTests(unittest.TestCase):
+    """长上下文计价规则变化后，已落盘的标记要按新规则重算，而不是沿用旧值。"""
+
+    def test_stale_long_context_flags_are_recomputed_on_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            index_path = Path(temporary_directory) / "usage-index.sqlite3"
+            _UsageIndexStore(index_path)
+            usage = {
+                "input_tokens": 150_000,
+                "cached_input_tokens": 0,
+                "output_tokens": 1_000,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 151_000,
+            }
+            with sqlite3.connect(index_path) as connection:
+                # 中文注释：模拟旧版本按 272K 统一阈值写下的标记，以及旧的规则版本。
+                connection.execute(
+                    "INSERT INTO usage_delta(path, kind, timestamp, model, usage_json, "
+                    "long_context) VALUES ('a.jsonl', 'total', 1.0, 'claude-haiku-5-5', ?, 0)",
+                    (json.dumps(usage),),
+                )
+                connection.execute(
+                    "UPDATE usage_meta SET value = '1' WHERE key = 'long_context_rules'"
+                )
+            _UsageIndexStore(index_path)
+            with sqlite3.connect(index_path) as connection:
+                flag = connection.execute(
+                    "SELECT long_context FROM usage_delta WHERE path = 'a.jsonl'"
+                ).fetchone()[0]
+
+        # 中文注释：Haiku 5.5 提示超过 100K 即按长上下文计价。
+        self.assertEqual(flag, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

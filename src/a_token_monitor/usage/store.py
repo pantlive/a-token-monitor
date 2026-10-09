@@ -69,6 +69,12 @@ def _sql_local_day_function() -> Callable[[float | None], str | None]:
     return local_day
 
 
+
+# 中文注释：长上下文计价规则的版本。修改 pricing.py 里任何模型的长上下文阈值或
+# 分档方式时加 1，已索引的标记会在下次打开索引时按新规则重算。
+# 2：Claude 改按官方规则（4.6+ 不分档、Haiku 5.5 超过 100K ×5、Sonnet 4/4.5 超过 200K）。
+_LONG_CONTEXT_RULES_VERSION = 2
+
 class _UsageIndexStore:
     """把已解析的偏移和 token 增量保存到轻量 SQLite 索引。"""
 
@@ -207,6 +213,21 @@ class _UsageIndexStore:
                 if "long_context" not in delta_columns:
                     connection.execute(
                         "ALTER TABLE usage_delta ADD COLUMN long_context INTEGER"
+                    )
+                # 中文注释：长上下文的计价规则（阈值、哪些模型分档）变化后，已落盘的
+                # 标记就过期了；清空后由下面的回填按当前价目表重算，不重读 JSONL。
+                rules_row = connection.execute(
+                    "SELECT value FROM usage_meta WHERE key = 'long_context_rules'"
+                ).fetchone()
+                if rules_row is None or rules_row[0] != str(_LONG_CONTEXT_RULES_VERSION):
+                    connection.execute("UPDATE usage_delta SET long_context = NULL")
+                    connection.execute(
+                        """
+                        INSERT INTO usage_meta(key, value)
+                        VALUES ('long_context_rules', ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (str(_LONG_CONTEXT_RULES_VERSION),),
                     )
                 # 中文注释：旧索引按行回填一次，避免为了聚合重读所有 JSONL；
                 # 回填中断后再次打开会继续补齐。

@@ -87,6 +87,19 @@ class ModelPricing:
         )
 
 
+def _claude_pricing(input_usd: float, cached_input_usd: float, output_usd: float) -> ModelPricing:
+    """Claude 模型的 API 等价单价：整个上下文窗口内不分档加价。"""
+
+    return ModelPricing(
+        input_usd=input_usd,
+        cached_input_usd=cached_input_usd,
+        output_usd=output_usd,
+        long_input_multiplier=1.0,
+        long_cached_multiplier=1.0,
+        long_output_multiplier=1.0,
+    )
+
+
 # 这些是官方 API 等价单价；Plus/OAuth 的本地 JSONL 没有可反推的 credits 单价。
 # 只收录当前官方模型页有依据的型号；其他历史或第三方型号按未定价处理。
 _MODEL_PRICING: dict[str, ModelPricing] = {
@@ -290,51 +303,54 @@ _MODEL_PRICING: dict[str, ModelPricing] = {
         long_cached_multiplier=1.0,
         long_output_multiplier=1.0,
     ),
-    "claude-opus-4-5": ModelPricing(
-        input_usd=5,
-        cached_input_usd=0.5,
-        output_usd=25,
-    ),
-    "claude-opus-4-1": ModelPricing(
-        input_usd=15,
-        cached_input_usd=1.5,
-        output_usd=75,
-    ),
-    "claude-opus-4": ModelPricing(
-        input_usd=15,
-        cached_input_usd=1.5,
-        output_usd=75,
-    ),
+    # 中文注释：Claude 单价取自 Anthropic 官方价格页（输入 / 缓存读取 / 输出，每百万
+    # token）。Claude 4.6 及之后的模型在整个 1M 上下文内按标准价计费，Haiku 5.5 例外；
+    # 4.5 及更早的多数模型上下文只有 200K，本来就到不了长上下文档。所以默认不加价，
+    # 避免落到全局 272K 的 GPT 长上下文规则。缓存写入按输入价的 1.25 倍统一估算。
+    "claude-fable-5-1": _claude_pricing(10, 0.25, 50),
+    "claude-mythos-5-1": _claude_pricing(10, 0.25, 50),
+    "claude-fable-5": _claude_pricing(10, 1, 50),
+    "claude-mythos-5": _claude_pricing(10, 1, 50),
+    "claude-opus-5-5": _claude_pricing(4, 0.2, 20),
+    "claude-opus-5": _claude_pricing(5, 0.5, 25),
+    "claude-opus-4-8": _claude_pricing(5, 0.5, 25),
+    "claude-opus-4-7": _claude_pricing(5, 0.5, 25),
+    "claude-opus-4-6": _claude_pricing(5, 0.5, 25),
+    "claude-opus-4-5": _claude_pricing(5, 0.5, 25),
+    "claude-opus-4-1": _claude_pricing(15, 1.5, 75),
+    "claude-opus-4": _claude_pricing(15, 1.5, 75),
+    "claude-sonnet-5-5": _claude_pricing(2, 0.1, 10),
+    "claude-sonnet-5": _claude_pricing(2, 0.2, 10),
+    "claude-sonnet-4-6": _claude_pricing(3, 0.3, 15),
+    # 中文注释：Sonnet 4 / 4.5 的 1M 上下文（beta）对超过 200K 输入的请求按
+    # 输入 2×、输出 1.5× 计价，缓存读写随输入同倍。
     "claude-sonnet-4-5": ModelPricing(
         input_usd=3,
         cached_input_usd=0.3,
         output_usd=15,
+        long_context_threshold=200_000,
     ),
     "claude-sonnet-4": ModelPricing(
         input_usd=3,
         cached_input_usd=0.3,
         output_usd=15,
+        long_context_threshold=200_000,
     ),
-    "claude-haiku-4-5": ModelPricing(
-        input_usd=1,
-        cached_input_usd=0.1,
-        output_usd=5,
+    # 中文注释：Haiku 5.5 按提示长度分档：提示（含缓存读写）超过 100K token 时，
+    # 输入、缓存与输出单价都变为 5 倍（$0.50 / $0.05 / $2.50）。
+    "claude-haiku-5-5": ModelPricing(
+        input_usd=0.1,
+        cached_input_usd=0.01,
+        output_usd=0.5,
+        long_context_threshold=100_000,
+        long_input_multiplier=5.0,
+        long_cached_multiplier=5.0,
+        long_output_multiplier=5.0,
     ),
-    "claude-3-7-sonnet": ModelPricing(
-        input_usd=3,
-        cached_input_usd=0.3,
-        output_usd=15,
-    ),
-    "claude-3-5-sonnet": ModelPricing(
-        input_usd=3,
-        cached_input_usd=0.3,
-        output_usd=15,
-    ),
-    "claude-3-5-haiku": ModelPricing(
-        input_usd=0.8,
-        cached_input_usd=0.08,
-        output_usd=4,
-    ),
+    "claude-haiku-4-5": _claude_pricing(1, 0.1, 5),
+    "claude-3-7-sonnet": _claude_pricing(3, 0.3, 15),
+    "claude-3-5-sonnet": _claude_pricing(3, 0.3, 15),
+    "claude-3-5-haiku": _claude_pricing(0.8, 0.08, 4),
 }
 
 

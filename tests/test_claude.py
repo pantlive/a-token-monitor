@@ -29,7 +29,7 @@ from a_token_monitor.claude import (
     subagent_transcripts,
 )
 from a_token_monitor.registry import MultiSessionRegistry
-from a_token_monitor.usage import UsageAggregator, _lookup_pricing
+from a_token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage, _lookup_pricing
 
 
 def _assistant_line(
@@ -740,6 +740,51 @@ class ClaudeUsageAggregatorTests(unittest.TestCase):
         ):
             self.assertIsNotNone(_lookup_pricing(model), model)
 
+    def test_claude_models_use_official_api_prices(self) -> None:
+        # 中文注释：(输入, 缓存读取, 输出) 美元 / 百万 token，取自 Anthropic 官方价格页。
+        official = {
+            "claude-fable-5-1": (10, 0.25, 50),
+            "claude-fable-5": (10, 1, 50),
+            "claude-opus-5-5": (4, 0.2, 20),
+            "claude-opus-5": (5, 0.5, 25),
+            "claude-opus-4-8": (5, 0.5, 25),
+            "claude-opus-4-7": (5, 0.5, 25),
+            "claude-opus-4-6": (5, 0.5, 25),
+            "claude-opus-4-5-20251101": (5, 0.5, 25),
+            "claude-opus-4-1-20250805": (15, 1.5, 75),
+            "claude-sonnet-5-5": (2, 0.1, 10),
+            "claude-sonnet-5": (2, 0.2, 10),
+            "claude-sonnet-4-6": (3, 0.3, 15),
+            "claude-haiku-5-5": (0.1, 0.01, 0.5),
+            "claude-haiku-4-5": (1, 0.1, 5),
+        }
+        for model, prices in official.items():
+            with self.subTest(model=model):
+                pricing = _lookup_pricing(model)
+                self.assertIsNotNone(pricing)
+                self.assertEqual(
+                    (pricing.input_usd, pricing.cached_input_usd, pricing.output_usd),
+                    prices,
+                )
+
+    def test_claude_long_context_rules(self) -> None:
+        def cost(model: str, input_tokens: int, output_tokens: int) -> float:
+            usage = TokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+            )
+            return _estimate_usage(usage, model)["estimated_cost_usd"]
+
+        # 中文注释：4.6 及之后在 1M 上下文内不加价（超过全局 272K 阈值也一样）。
+        self.assertEqual(cost("claude-opus-5-5", 1_000_000, 1_000_000), 24.0)
+        self.assertEqual(cost("claude-opus-4-8", 1_000_000, 0), 5.0)
+        # 中文注释：Haiku 5.5 提示超过 100K 时全部单价 ×5。
+        self.assertEqual(cost("claude-haiku-5-5", 100_000, 0), 0.01)
+        self.assertEqual(cost("claude-haiku-5-5", 150_000, 10_000), 0.1)
+        # 中文注释：Sonnet 4.5 超过 200K 输入时输入 2×、输出 1.5×。
+        self.assertEqual(cost("claude-sonnet-4-5", 300_000, 10_000), 2.025)
+
 
 def _timestamp(value: str) -> float:
     """把 ISO8601 时间转成 Unix 秒。"""
@@ -793,9 +838,6 @@ class ClaudeLongLineTests(unittest.TestCase):
         self.assertEqual(offset, size)
         self.assertEqual([event.message_id for event in events], ["msg_after"])
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()
