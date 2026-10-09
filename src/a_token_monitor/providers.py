@@ -104,6 +104,10 @@ class ProviderSpec:
     # Dashboard 上显示为独立账号卡片；read_quota 返回 None 表示暂无额度数据。
     read_account: Callable[[Path], Any] | None = None
     read_quota: Callable[[Path], Any] | None = None
+    # 中文注释：quota 命令输出里表示登录状态的账号属性名（如 logged_in）；
+    # 拿不到额度时，有 missing_quota_error 的记为错误，否则输出空额度条目。
+    login_field: str | None = None
+    missing_quota_error: str | None = None
 
     @property
     def product_id(self) -> str:
@@ -181,6 +185,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             active_sessions=list_claude_active_sessions,
             read_account=read_claude_account,
             read_quota=read_claude_quota,
+            login_field="has_credentials",
         ),
         ProviderSpec(
             key="commandcode",
@@ -197,6 +202,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             active_sessions=list_commandcode_active_sessions,
             read_account=read_commandcode_account,
             read_quota=read_commandcode_quota,
+            login_field="logged_in",
         ),
         ProviderSpec(
             key="dsh",
@@ -212,6 +218,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             active_sessions=list_dsh_active_sessions,
             read_account=read_dsh_account,
             read_quota=read_dsh_quota,
+            login_field="has_credentials",
         ),
         ProviderSpec(
             key="grok",
@@ -224,6 +231,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             active_sessions=list_grok_active_sessions,
             read_account=read_grok_account,
             read_quota=read_grok_quota,
+            missing_quota_error="未找到 Grok billing 额度日志",
         ),
         ProviderSpec(
             key="kimi",
@@ -239,6 +247,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             active_sessions=list_kimi_active_sessions,
             read_account=read_kimi_account,
             read_quota=read_kimi_quota,
+            login_field="logged_in",
         ),
         ProviderSpec(
             key="opencode",
