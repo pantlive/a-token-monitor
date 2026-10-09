@@ -448,10 +448,20 @@
     /* 告警上下文：展开行展示告警时间窗内的会话事件明细。 */
     .alert-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .alert-context-row > td { background: var(--panel-soft); }
+    /* 中文注释：告警表比容器宽、会横向滚动；展开的上下文限制在可视宽度内并贴左，
+       不随整表撑宽，长句不用横向拖动就能读完。 */
+    .alert-history-wrap { container-type: inline-size; }
+    .alert-history-wrap .alert-context { position: sticky; left: 12px; box-sizing: border-box; max-width: calc(100cqi - 24px); }
     .alert-context .ctx-event { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; padding: 4px 0; border-bottom: 1px dashed var(--line); font-size: 11px; }
     .alert-context .ctx-event:last-child { border-bottom: none; }
     .alert-context .ctx-time { flex-shrink: 0; color: var(--muted); }
     .alert-context .ctx-body { min-width: 0; overflow-wrap: anywhere; color: var(--muted-strong); }
+    .alert-diagnosis { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--blue-border); border-radius: 8px; background: var(--blue-soft); color: var(--text); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+    .alert-diagnosis.warn { border-color: var(--yellow-border); background: var(--yellow-soft); }
+    .alert-diagnosis .diagnosis-title { margin-bottom: 4px; font-weight: 700; color: var(--blue-text); }
+    .alert-diagnosis.warn .diagnosis-title { color: var(--yellow-text); }
+    .alert-diagnosis .diagnosis-advice { margin-top: 4px; color: var(--muted-strong); }
+    .alert-diagnosis .diagnosis-breakdown { margin-top: 4px; font-size: 11px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
     .cell-main { color: var(--muted-strong); font-size: 12px; }
     .cell-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }

@@ -11,6 +11,7 @@ from ..alert_activity import describe_tool_activity, describe_user_text
 from .common import (
     _Extraction,
     _MTIME_SLACK_SECONDS,
+    _Request,
     _ToolCall,
     _claude_slug,
     _excerpt,
@@ -20,6 +21,8 @@ from .common import (
     _remember_tool_call,
     _tool_detail,
     _tool_output_info,
+    _token_count,
+    _with_requests,
 )
 
 
@@ -48,17 +51,50 @@ def _claude_recent_files(
     return files
 
 
+def _remember_claude_request(
+    requests: dict[str, _Request],
+    record: Mapping[str, Any],
+    message: Mapping[str, Any],
+    timestamp: float,
+) -> None:
+    """记下一次模型请求的上下文大小：未缓存输入 + 读缓存 + 写缓存。
+
+    同一次请求会按内容块拆成多条 assistant 记录，用 requestId（或消息 ID）去重。
+    """
+
+    usage = message.get("usage")
+    if not isinstance(usage, Mapping):
+        return
+    tokens = sum(
+        _token_count(usage.get(key))
+        for key in (
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    )
+    key = record.get("requestId") or message.get("id")
+    if not tokens or not isinstance(key, str) or not key:
+        return
+    previous = requests.get(key)
+    if previous is None or tokens > previous[1]:
+        requests[key] = (previous[0] if previous else timestamp, tokens)
+
+
 def _claude_map(
     record: Mapping[str, Any],
     timestamp: float,
     *,
     tool_calls: dict[str, _ToolCall] | None = None,
+    requests: dict[str, _Request] | None = None,
 ) -> list[tuple[dict[str, Any], int, int]]:
     if record.get("isSidechain"):
         return []
     message = record.get("message")
     if not isinstance(message, Mapping):
         return []
+    if requests is not None and record.get("type") == "assistant":
+        _remember_claude_request(requests, record, message, timestamp)
     content = message.get("content")
     items: list[tuple[dict[str, Any], int, int]] = []
     if record.get("type") == "user":
@@ -158,10 +194,12 @@ def _claude_map(
 
 
 def _extract_claude(path: Path, start: float, end: float) -> _Extraction:
-    return _finish(
+    requests: dict[str, _Request] = {}
+    extraction = _finish(
         path,
         parse_ts=_iso_record_ts,
-        map_record=partial(_claude_map, tool_calls={}),
+        map_record=partial(_claude_map, tool_calls={}, requests=requests),
         start=start,
         end=end,
     )
+    return _with_requests(extraction, requests.values(), start, end)

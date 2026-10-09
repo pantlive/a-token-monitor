@@ -17,6 +17,7 @@ from ..discovery import JsonlSessionReader
 from .common import (
     _Extraction,
     _MTIME_SLACK_SECONDS,
+    _Request,
     _ToolCall,
     _WINDOW_TRAIL_SECONDS,
     _cwd_matches,
@@ -27,6 +28,8 @@ from .common import (
     _remember_tool_call,
     _tool_detail,
     _tool_output_info,
+    _token_count,
+    _with_requests,
 )
 
 
@@ -191,17 +194,45 @@ def _codex_user_events(
     return result
 
 
+def _remember_codex_request(
+    requests: dict[int, _Request],
+    payload: Mapping[str, Any],
+    timestamp: float,
+) -> None:
+    """token_count 事件里的 last_token_usage 是最近一次请求；input_tokens 已含缓存部分。
+
+    只更新额度信息时 Codex 会重复写出同一份用量，按累计 total_tokens 去重。
+    """
+
+    info = payload.get("info")
+    if not isinstance(info, Mapping):
+        return
+    last = info.get("last_token_usage")
+    total = info.get("total_token_usage")
+    if not isinstance(last, Mapping) or not isinstance(total, Mapping):
+        return
+    tokens = _token_count(last.get("input_tokens"))
+    key = _token_count(total.get("total_tokens"))
+    if tokens and key not in requests:
+        requests[key] = (timestamp, tokens)
+
+
 def _codex_map(
     record: Mapping[str, Any],
     timestamp: float,
     *,
     tool_calls: dict[str, _ToolCall] | None = None,
     user_inputs: deque[tuple[float, str, str]] | None = None,
+    requests: dict[int, _Request] | None = None,
 ) -> list[tuple[dict[str, Any], int, int]]:
     payload = record.get("payload")
     if not isinstance(payload, Mapping):
         return []
     kind = payload.get("type")
+    if kind == "token_count" and record.get("type") == "event_msg":
+        if requests is not None:
+            _remember_codex_request(requests, payload, timestamp)
+        return []
     if (record.get("type") == "event_msg" and kind == "user_message") or (
         record.get("type") == "response_item"
         and kind == "message"
@@ -279,10 +310,17 @@ def _codex_map(
 
 
 def _extract_codex(path: Path, start: float, end: float) -> _Extraction:
-    return _finish(
+    requests: dict[int, _Request] = {}
+    extraction = _finish(
         path,
         parse_ts=_iso_record_ts,
-        map_record=partial(_codex_map, tool_calls={}, user_inputs=deque(maxlen=16)),
+        map_record=partial(
+            _codex_map,
+            tool_calls={},
+            user_inputs=deque(maxlen=16),
+            requests=requests,
+        ),
         start=start,
         end=end,
     )
+    return _with_requests(extraction, requests.values(), start, end)

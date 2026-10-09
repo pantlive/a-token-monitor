@@ -65,8 +65,11 @@ more than usual. On Linux, outbound TCP bytes are counted per agent process (loo
 excluded, contents never read), with a 15-second burst threshold and a 5-minute
 cumulative threshold. Alerts are kept in a searchable history, and each one can be
 linked to the local session that was running in that directory at the time, summarised
-as actions such as "pushed code" or "read a file". On macOS and Windows the panel lists
-agent processes and their connections without byte counts.
+as actions such as "pushed code" or "read a file". Each alert also gets a likely cause:
+a long context re-uploaded with every model request, large new content such as images or
+tool output, or traffic the session log cannot account for, with the numbers behind it
+and a tip. On macOS and Windows the panel lists agent processes and their connections
+without byte counts.
 
 ![Traffic anomaly: one agent process over the 15-second threshold, flagged as an anomalous upload](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/traffic-en.png)
 

@@ -56,8 +56,9 @@ agent、每个账号目录占了多少空间，超过阈值时提醒（默认单
 code agent 会把你的代码发给远端 API，某个 agent 突然发得比平时多得多时，值得知道。
 Linux 上按 agent 进程统计外发 TCP 字节（回环不计入，从不读取内容），设有 15 秒突发和
 5 分钟累计两档阈值。告警会存进可检索的历史，每条都能关联到当时在该目录下运行的本地
-会话，归纳成「推送代码」「读取文件」这类操作。macOS 和 Windows 上只列出 agent 进程
-及其连接，不统计字节数。
+会话，归纳成「推送代码」「读取文件」这类操作。每条告警还会给出可能的原因：长上下文在
+每次模型请求时整份重发、图片或工具输出等大块新增内容，或者会话日志解释不了的流量，
+并附上依据的数字和建议。macOS 和 Windows 上只列出 agent 进程及其连接，不统计字节数。
 
 ![异常流量监控：一个 agent 进程 15 秒外发超过阈值，被标为异常上传](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/traffic-zh.png)
 

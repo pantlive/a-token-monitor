@@ -52,6 +52,7 @@ from .cursor import (
     _default_cursor_projects,
     _extract_cursor,
 )
+from .diagnosis import diagnose_upload
 from .dsh import (
     _dsh_candidates,
     _extract_dsh,
@@ -105,6 +106,7 @@ def load_alert_context(
         "totals": {"events": 0, "input_bytes": 0, "output_bytes": 0},
         "events": [],
         "activity_summary": [],
+        "diagnosis": None,
     }
     if alert.product not in SUPPORTED_PRODUCTS:
         payload["reason"] = "unsupported_product"
@@ -177,6 +179,7 @@ def load_alert_context(
         },
         events=events,
         activity_summary=summaries,
+        diagnosis=diagnose_upload(alert, extraction, events),
     )
     return payload
 
@@ -303,8 +306,8 @@ def configured_alert_context_roots(
 def default_alert_context_roots() -> AlertContextRoots:
     """命令行使用各产品的默认数据目录；目录不存在就不扫。"""
 
-    from .discovery import default_session_root
-    from .providers import resolve_provider_homes
+    from ..discovery import default_session_root
+    from ..providers import resolve_provider_homes
 
     codex = default_session_root()
     return configured_alert_context_roots(

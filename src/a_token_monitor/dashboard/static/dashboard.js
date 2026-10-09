@@ -1166,6 +1166,58 @@
     tool: '根据调用类型判断',
     unknown: '证据不足',
   };
+  // 中文注释：上传原因分析。模型 API 不保存对话，每次请求都整份上传上下文；
+  // 后端把请求次数 × 上下文大小、新增内容折算成字节，和观测峰值对照后给出主因。
+  const ALERT_DIAGNOSIS_TITLES = {
+    context_resend: '主因：长上下文在每次请求时整份重发',
+    new_content: '主因：新增的大块内容随请求上传',
+    tool_network: '可能原因：工具调用自己在向外发数据',
+    unexplained: '原因不明：会话日志解释不了这次上传',
+  };
+  const renderAlertDiagnosis = (diagnosis) => {
+    if (!diagnosis || !diagnosis.cause) return '';
+    const observed = escapeHtml(formatDataSize(diagnosis.observed_bytes || 0));
+    const estimated = escapeHtml(formatDataSize(diagnosis.estimated_bytes || 0));
+    const requests = Number(diagnosis.requests || 0);
+    const tokens = escapeHtml(formatTokens(diagnosis.context_tokens || 0));
+    const perRequest = escapeHtml(formatDataSize(diagnosis.per_request_bytes || 0));
+    const largest = (Array.isArray(diagnosis.largest) ? diagnosis.largest : []).map((item) => {
+      const kindLabel = ALERT_CONTEXT_KINDS[item.kind] || '事件';
+      const name = item.summary || item.label || kindLabel;
+      return `${escapeHtml(name)} (${escapeHtml(kindLabel)}, ${escapeHtml(formatDataSize(item.size || 0))})`;
+    }).join(' · ');
+    const network = (Array.isArray(diagnosis.network_activities) ? diagnosis.network_activities : []).map(escapeHtml).join(' · ');
+    const newSize = escapeHtml(formatDataSize(diagnosis.new_bytes || 0));
+    let explanation = '';
+    let advice = '';
+    if (diagnosis.cause === 'context_resend') {
+      const toPeak = diagnosis.requests_to_peak ? `告警峰值 ${observed} 约相当于 ${escapeHtml(String(diagnosis.requests_to_peak))} 次请求。` : '';
+      explanation = `时间窗内 ${requests} 次模型请求，每次携带约 ${tokens} token 上下文（约 ${perRequest} / 次）。模型 API 不保存对话，每次请求都会重新上传完整上下文，提示缓存只减少计费、不减少上传。${toPeak}`;
+      advice = '建议：上下文已经很长时先压缩（如 /compact）或开新会话；少把整份大文件、长日志读进对话。';
+    } else if (diagnosis.cause === 'new_content') {
+      const largestNote = largest ? `最大的几条：${largest}。` : '';
+      explanation = diagnosis.new_before_window
+        ? `告警前新增内容约 ${newSize}。${largestNote}这些内容进入上下文后随下一次请求上传，之后每次请求还会重复携带。`
+        : `时间窗内新增内容约 ${newSize}。${largestNote}这些内容进入上下文后随下一次请求上传，之后每次请求还会重复携带。`;
+      advice = '建议：图片和截图先缩小再交给模型；读文件、看日志时用 head、grep 只取需要的部分，避免整份输出。';
+    } else if (diagnosis.cause === 'tool_network') {
+      explanation = `会话日志估算的上传量约 ${estimated}，远小于观测峰值 ${observed}；时间窗内有这些与网络相关的工具调用：${network}。agent 启动的子进程（git push、curl、上传脚本等）的流量也计在 agent 名下。`;
+      advice = '建议：打开内容摘要查看这些调用的具体命令和目标，确认是否是预期的上传。';
+    } else {
+      explanation = `会话日志估算的上传量约 ${estimated}，远小于观测峰值 ${observed}。外发可能来自没有写进会话日志的连接（例如 MCP 服务、插件或遥测），也可能匹配到的不是产生流量的那个会话。`;
+      advice = '建议：结合主要对端地址和同一时间运行的其他会话一起判断。';
+    }
+    const breakdown = requests || Number(diagnosis.new_bytes || 0)
+      ? `<div class="diagnosis-breakdown muted">估算：重发上下文 ${escapeHtml(formatDataSize(diagnosis.resend_bytes || 0))} · 新增内容 ${escapeHtml(formatDataSize(diagnosis.new_bytes || 0))} · 观测峰值 ${observed}（按每 token 约 ${escapeHtml(String(diagnosis.bytes_per_token || 4))} 字节折算，只用于判断量级）</div>`
+      : '';
+    const tone = diagnosis.cause === 'unexplained' || diagnosis.cause === 'tool_network' ? 'warn' : 'info';
+    return `<div class="alert-diagnosis ${tone}">
+      <div class="diagnosis-title">${escapeHtml(ALERT_DIAGNOSIS_TITLES[diagnosis.cause] || ALERT_DIAGNOSIS_TITLES.unexplained)}</div>
+      <div>${explanation}</div>
+      <div class="diagnosis-advice">${escapeHtml(advice)}</div>
+      ${breakdown}
+    </div>`;
+  };
   const renderAlertContext = (context) => {
     if (!context || !context.found) {
       const reason = ALERT_CONTEXT_REASONS[(context && context.reason) || ''] || '未能定位会话';
@@ -1196,6 +1248,7 @@
       ? '告警时间窗内该会话没有新事件；以下是告警发生前最近的活动，不能确认它们对应本次外发。'
       : `时间窗内 ${Number(totals.events || 0)} 条事件 · 本地输入记录 ${escapeHtml(formatDataSize(totals.input_bytes || 0))} · 工具输出 ${escapeHtml(formatDataSize(totals.output_bytes || 0))}${truncated}。行为来自本地日志，不能确认实际外发内容或上传成功。`;
     return `<div class="alert-context">
+      ${renderAlertDiagnosis(context.diagnosis)}
       <div class="usage-note">会话 <span class="mono">${escapeHtml(session.path || '')}</span><br>${statsNote}${privacyNote}</div>
       ${activityOverview}
       ${items || '<div class="empty-state"><span class="empty-hint">时间窗内没有提取到事件明细。</span></div>'}
@@ -1294,7 +1347,7 @@
     const pager = totalPages > 1
       ? `<div class="table-actions"><button class="btn" type="button" data-alert-page="-1" ${alertHistoryPage === 0 ? 'disabled' : ''}>上一页</button><span class="muted">第 ${alertHistoryPage + 1} / ${totalPages} 页 · 共 ${escapeHtml(formatNumber(stats.total || 0))} 条</span><button class="btn" type="button" data-alert-page="1" ${alertHistoryPage >= totalPages - 1 ? 'disabled' : ''}>下一页</button></div>`
       : '';
-    container.innerHTML = `<div class="table-wrap"><table class="tight alert-history-table">
+    container.innerHTML = `<div class="table-wrap alert-history-wrap"><table class="tight alert-history-table">
         <thead><tr><th>时间</th><th>级别</th><th>Agent / 进程</th><th>工作目录</th><th>外发峰值 / 规则</th><th>主要对端</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>${pager}`;

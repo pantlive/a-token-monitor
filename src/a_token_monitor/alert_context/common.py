@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -77,6 +77,11 @@ class _Candidate:
     session_id: str | None = None
 
 
+# 中文注释：一次模型请求 =（时间, 这次请求携带的上下文 token 数）。模型 API 无状态，
+# 每次请求都把整段上下文重新上传，用它估算「重发上下文」占了多少外发流量。
+_Request = tuple[float, int]
+
+
 @dataclass(frozen=True)
 class _Extraction:
     """一次会话明细提取的结果；events 为 None 表示文件不可读。"""
@@ -87,6 +92,31 @@ class _Extraction:
     output_bytes: int
     fallback: bool = False
     event_count: int | None = None
+    requests: tuple[_Request, ...] = ()
+
+
+def _with_requests(
+    extraction: _Extraction,
+    requests: Iterable[_Request],
+    start: float,
+    end: float,
+) -> _Extraction:
+    """把扫描时记下的模型请求按时间窗过滤后挂到提取结果上。"""
+
+    if extraction.events is None:
+        return extraction
+    in_window = tuple(
+        sorted((at, tokens) for at, tokens in requests if start <= at <= end and tokens > 0)
+    )
+    return replace(extraction, requests=in_window)
+
+
+def _token_count(value: object) -> int:
+    """日志里的 token 数；缺失或格式不对时按 0。"""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, int(value))
 
 
 @dataclass(frozen=True)
