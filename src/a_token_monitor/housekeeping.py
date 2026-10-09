@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Callable, Mapping, Sequence
 
 from .local_time import to_local
@@ -733,7 +733,7 @@ class HousekeepingMonitor:
                             "会话在归档前发生变化；未删除任何原文件"
                         )
                     signatures[item.path] = signature
-                    handle.add(str(item.path), arcname=str(item.path).lstrip("/"))
+                    handle.add(str(item.path), arcname=_archive_member_name(item.path))
                     bytes_done += item.size
                     _report_progress(
                         progress,
@@ -1564,10 +1564,21 @@ def _report_progress(
         logging.getLogger(__name__).debug("归档进度回调失败，已忽略", exc_info=True)
 
 
+def _archive_member_name(path: PurePath) -> str:
+    """会话文件在归档里的成员名，与 tarfile 写入时的规范化一致。
+
+    tarfile 会去掉盘符、把 Windows 的 ``\\`` 换成 ``/`` 并去掉开头的 ``/``；
+    校验时若直接用 ``str(path)``，Windows 上每个成员都对不上，归档会被判失败。
+    """
+
+    _, name = os.path.splitdrive(str(path))
+    return name.replace(os.sep, "/").lstrip("/")
+
+
 def _missing_members(archive: Path, files: Sequence[SessionFile]) -> set[str]:
     """校验归档里是否包含全部待删除文件。"""
 
-    expected = {str(item.path).lstrip("/"): item.size for item in files}
+    expected = {_archive_member_name(item.path): item.size for item in files}
     try:
         with tarfile.open(archive, "r:gz") as handle:
             members: set[str] = set()

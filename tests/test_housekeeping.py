@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import ntpath
 import os
 import tarfile
 import tempfile
 import time
+import types
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from unittest import mock
 
 from a_token_monitor.housekeeping import (
     AuditTarget,
@@ -17,6 +20,7 @@ from a_token_monitor.housekeeping import (
     DiskThresholds,
     HousekeepingError,
     HousekeepingMonitor,
+    _archive_member_name,
     default_sessions_root,
     empty_housekeeping_report,
     scan_session_files,
@@ -703,6 +707,24 @@ class ArchiveAndCleanTests(unittest.TestCase):
         self.assertIs(first, cached)
         self.assertEqual(forced["observed_at"], 1_010.0)
         self.assertEqual(monitor.latest()["observed_at"], 1_010.0)
+
+
+class ArchiveMemberNameTests(unittest.TestCase):
+    """归档成员名与 tarfile 的规范化一致，校验才对得上。"""
+
+    def test_posix_path_drops_leading_slash(self) -> None:
+        self.assertEqual(
+            _archive_member_name(Path("/home/dev/.codex/sessions/a.jsonl")),
+            "home/dev/.codex/sessions/a.jsonl",
+        )
+
+    def test_windows_path_drops_drive_and_uses_slashes(self) -> None:
+        windows_os = types.SimpleNamespace(sep="\\", path=ntpath)
+        with mock.patch("a_token_monitor.housekeeping.os", windows_os):
+            name = _archive_member_name(
+                PureWindowsPath(r"C:\Users\dev\.codex\sessions\a.jsonl")
+            )
+        self.assertEqual(name, "Users/dev/.codex/sessions/a.jsonl")
 
 
 class SingleSessionArchiveTests(unittest.TestCase):

@@ -115,10 +115,14 @@ def _cwd_matches(alert_cwd: str, session_cwd: str) -> bool:
 
     会话目录是告警目录的上级时算匹配（进程在项目子目录里）。反过来，
     一个很短的告警目录不能把下面每个项目都算进来。空的会话目录也不匹配。
+    Windows 路径的 ``\\`` 分隔符按 ``/`` 处理：会话头里的 cwd 经 ``Path``
+    读出后带反斜杠，进程侧拿到的目录写法未必一致。
     """
 
     if not session_cwd or not alert_cwd:
         return False
+    alert_cwd = alert_cwd.replace("\\", "/")
+    session_cwd = session_cwd.replace("\\", "/")
     if alert_cwd == session_cwd:
         return True
     prefix = session_cwd.rstrip("/")

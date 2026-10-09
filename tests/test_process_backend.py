@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -65,7 +66,11 @@ class BackendSelectionTests(unittest.TestCase):
                 reason = process_backend.netlink_reason()
             self.assertIsNotNone(reason)
             self.assertIn("netlink", reason or "")
-        self.assertIsNone(process_backend.netlink_reason())
+        # 中文注释：用带 AF_NETLINK 的替身模拟 Linux，不依赖运行测试的真实平台。
+        with mock.patch.object(
+            process_backend, "socket", types.SimpleNamespace(AF_NETLINK=16)
+        ):
+            self.assertIsNone(process_backend.netlink_reason())
 
 
 class MacosProcessTests(unittest.TestCase):

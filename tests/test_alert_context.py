@@ -155,6 +155,13 @@ class AlertContextCodexTests(unittest.TestCase):
             )
             self.assertTrue(context["found"])
 
+    def test_backslash_separators_match_like_slashes(self) -> None:
+        # 中文注释：Windows 上会话头的 cwd 经 Path 读出后是反斜杠写法。
+        self.assertTrue(_cwd_matches("/home/dev/project", "\\home\\dev\\project"))
+        self.assertTrue(_cwd_matches("C:\\work\\proj\\src", "C:\\work\\proj"))
+        self.assertTrue(_cwd_matches("C:/work/proj/src", "C:\\work\\proj\\"))
+        self.assertFalse(_cwd_matches("C:\\work\\project", "C:\\work\\proj"))
+
     def test_parent_alert_cwd_does_not_match_child_session(self) -> None:
         self.assertFalse(_cwd_matches("/home/dev", ""))
         self.assertFalse(_cwd_matches("/home/dev", "/home/dev/project"))

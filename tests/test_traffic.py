@@ -27,6 +27,12 @@ _MIB = 1024 * 1024
 class TrafficMonitorTests(unittest.TestCase):
     """验证外发增量告警，且回环和大基线不会误报。"""
 
+    def setUp(self) -> None:
+        # 中文注释：这些用例用合成 /proc 加注入的 socket reader 模拟 Linux 的
+        # inet-diag 路径；macOS / Windows 没有 netlink，会退化成 process-only，
+        # 这里固定为「netlink 可用」，让三个平台走同一条代码路径。
+        _assume_netlink(self)
+
     @requires_symlinks
     def test_first_sample_is_baseline_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -450,6 +456,7 @@ class PlatformDegradationTests(unittest.TestCase):
         def broken_reader() -> dict[int, SocketCounters]:
             raise AttributeError("module 'socket' has no attribute 'AF_NETLINK'")
 
+        _assume_netlink(self)
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             _write_process(root, pid=10, comm="grok", command=("grok",))
@@ -466,6 +473,14 @@ class PlatformDegradationTests(unittest.TestCase):
 
     def test_reset_cache_clears_process_backend(self) -> None:
         reset_cache()  # 不应抛异常，供测试与信号处理调用
+
+
+def _assume_netlink(test: unittest.TestCase) -> None:
+    """在当前用例内假定 netlink 可用（模拟 Linux），用例结束自动恢复。"""
+
+    patcher = mock.patch("a_token_monitor.traffic.netlink_reason", return_value=None)
+    patcher.start()
+    test.addCleanup(patcher.stop)
 
 
 def _small_thresholds() -> TrafficThresholds:
