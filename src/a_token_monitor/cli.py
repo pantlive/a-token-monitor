@@ -14,7 +14,6 @@ from typing import Callable, Mapping, Sequence
 from .local_time import local_date_end, local_date_start, to_local
 from .accounts import CodexAccount, build_account_specs
 from .claude import (
-    list_claude_active_sessions,
     read_claude_account,
     read_claude_quota,
 )
@@ -45,22 +44,18 @@ from .alerts import (
 )
 from .alert_context import configured_alert_context_roots, load_alert_context
 from .commandcode import (
-    list_commandcode_active_sessions,
     read_commandcode_account,
     read_commandcode_quota,
 )
 from .grok import (
-    list_grok_active_sessions,
     read_grok_account,
     read_grok_quota,
 )
 from .dsh import (
-    list_dsh_active_sessions,
     read_dsh_account,
     read_dsh_quota,
 )
 from .kimi import (
-    list_kimi_active_sessions,
     read_kimi_account,
     read_kimi_quota,
 )
@@ -821,6 +816,7 @@ def _add_upload_threshold_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+
 # 中文注释：会话视图与用量检索命令扫描的 provider（不含 Grok / Kimi / DSH）。
 _SESSION_USAGE_PROVIDERS = (
     "claude",
@@ -1443,95 +1439,27 @@ def _show_sessions(args: argparse.Namespace) -> int:
         for session in account_sessions
     ]
     extra_sessions: list[tuple[str, TrackedSession]] = []
-    for grok_home in effective_dirs.homes("grok"):
-        if not grok_home.is_dir():
+    for spec in home_providers():
+        if spec.read_account is None or spec.active_sessions is None:
             continue
-        try:
-            grok_account = read_grok_account(grok_home)
-            for session in list_grok_active_sessions(grok_home):
-                extra_sessions.append((grok_account.display_name, session))
-                summaries.append(
-                    session_view(
-                        session,
-                        grok_account.display_name,
-                        account_id=grok_account.account_id,
-                        profile_name=grok_account.profile_name,
-                        product="grok",
+        for home in effective_dirs.homes(spec.key):
+            if not home.is_dir():
+                continue
+            try:
+                provider_account = spec.read_account(home)
+                for session in spec.active_sessions(home):
+                    extra_sessions.append((provider_account.display_name, session))
+                    summaries.append(
+                        session_view(
+                            session,
+                            provider_account.display_name,
+                            account_id=provider_account.account_id,
+                            profile_name=provider_account.profile_name,
+                            product=spec.product_id,
+                        )
                     )
-                )
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Grok', grok_home)
-    for kimi_home in effective_dirs.homes("kimi"):
-        if not kimi_home.is_dir():
-            continue
-        try:
-            kimi_account = read_kimi_account(kimi_home)
-            for session in list_kimi_active_sessions(kimi_home):
-                extra_sessions.append((kimi_account.display_name, session))
-                summaries.append(
-                    session_view(
-                        session,
-                        kimi_account.display_name,
-                        account_id=kimi_account.account_id,
-                        profile_name=kimi_account.profile_name,
-                        product="kimi",
-                    )
-                )
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Kimi', kimi_home)
-    for dsh_home in effective_dirs.homes("dsh"):
-        if not dsh_home.is_dir():
-            continue
-        try:
-            dsh_account = read_dsh_account(dsh_home)
-            for session in list_dsh_active_sessions(dsh_home):
-                extra_sessions.append((dsh_account.display_name, session))
-                summaries.append(
-                    session_view(
-                        session,
-                        dsh_account.display_name,
-                        account_id=dsh_account.account_id,
-                        profile_name=dsh_account.profile_name,
-                        product="dsh",
-                    )
-                )
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('DeepSeek Harness', dsh_home)
-    for commandcode_home in effective_dirs.homes("commandcode"):
-        if not commandcode_home.is_dir():
-            continue
-        try:
-            commandcode_account = read_commandcode_account(commandcode_home)
-            for session in list_commandcode_active_sessions(commandcode_home):
-                extra_sessions.append((commandcode_account.display_name, session))
-                summaries.append(
-                    session_view(
-                        session,
-                        commandcode_account.display_name,
-                        account_id=commandcode_account.account_id,
-                        profile_name=commandcode_account.profile_name,
-                        product="command-code",
-                    )
-                )
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider('Command Code', commandcode_home)
-    for claude_home in effective_dirs.homes("claude"):
-        if not claude_home.is_dir():
-            continue
-        try:
-            claude_account = read_claude_account(claude_home)
-            for session in list_claude_active_sessions(claude_home):
-                extra_sessions.append((claude_account.display_name, session))
-                summaries.append(
-                    session_view(
-                        session,
-                        claude_account.display_name,
-                        account_id=claude_account.account_id,
-                        profile_name=claude_account.profile_name,
-                    )
-                )
-        except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider("Claude Code", claude_home)
+            except Exception:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+                _guard_provider(spec.display_name, home)
 
     thresholds = SessionSwitchThresholds(
         turn_warn=args.session_turn_warn,

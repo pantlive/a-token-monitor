@@ -56,6 +56,7 @@ from a_token_monitor.multi_models import (
 )
 from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
 from a_token_monitor.providers import home_keys
+from _provider_patch import patch_provider
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.scan_dirs import ScanDirsController
 from a_token_monitor.traffic import TrafficAlert
@@ -499,8 +500,9 @@ class DashboardTests(unittest.TestCase):
             server.start()
             host, port = server.address
             try:
-                with mock.patch(
-                    "a_token_monitor.dashboard.state.read_kimi_quota",
+                with patch_provider(
+                    "kimi",
+                    "read_quota",
                     return_value=None,
                 ):
                     with urlopen(
@@ -572,8 +574,9 @@ class DashboardTests(unittest.TestCase):
             server.start()
             host, port = server.address
             try:
-                with mock.patch(
-                    "a_token_monitor.dashboard.state.read_commandcode_quota",
+                with patch_provider(
+                    "commandcode",
+                    "read_quota",
                     return_value=quota,
                 ):
                     with urlopen(
@@ -773,8 +776,9 @@ class DashboardTests(unittest.TestCase):
             server.start()
             host, port = server.address
             try:
-                with mock.patch(
-                    "a_token_monitor.dashboard.state.read_kimi_quota",
+                with patch_provider(
+                    "kimi",
+                    "read_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -859,8 +863,9 @@ class DashboardTests(unittest.TestCase):
             server.start()
             host, port = server.address
             try:
-                with mock.patch(
-                    "a_token_monitor.dashboard.state.read_kimi_quota",
+                with patch_provider(
+                    "kimi",
+                    "read_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -977,12 +982,14 @@ class DashboardTests(unittest.TestCase):
                 pids=(70,),
             )
             with (
-                mock.patch(
-                    "a_token_monitor.dashboard.state.list_kimi_active_sessions",
+                patch_provider(
+                    "kimi",
+                    "active_sessions",
                     return_value=(kimi_session,),
                 ),
-                mock.patch(
-                    "a_token_monitor.dashboard.state.list_dsh_active_sessions",
+                patch_provider(
+                    "dsh",
+                    "active_sessions",
                     return_value=(dsh_session,),
                 ),
             ):
@@ -1587,12 +1594,14 @@ class GrokSessionDashboardTests(unittest.TestCase):
             grok_home.mkdir(parents=True)
             registry = MultiSessionRegistry(root / "state")
             with (
-                mock.patch(
-                    "a_token_monitor.dashboard.state.list_grok_active_sessions",
+                patch_provider(
+                    "grok",
+                    "active_sessions",
                     return_value=(session,),
                 ),
-                mock.patch(
-                    "a_token_monitor.dashboard.state.read_grok_quota",
+                patch_provider(
+                    "grok",
+                    "read_quota",
                     return_value=None,
                 ),
             ):
@@ -1709,8 +1718,9 @@ class NoCodexDashboardTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                mock.patch(
-                    "a_token_monitor.dashboard.state.read_grok_account",
+                patch_provider(
+                    "grok",
+                    "read_account",
                     side_effect=RuntimeError("模拟 Grok 目录损坏"),
                 ),
                 self.assertLogs("a_token_monitor.dashboard", level="ERROR") as captured,
@@ -1762,12 +1772,14 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
             claude_home.mkdir(parents=True)
             registry = MultiSessionRegistry(root / "state")
             with (
-                mock.patch(
-                    "a_token_monitor.dashboard.state.list_claude_active_sessions",
+                patch_provider(
+                    "claude",
+                    "active_sessions",
                     return_value=(session,),
                 ),
-                mock.patch(
-                    "a_token_monitor.dashboard.state.read_grok_quota",
+                patch_provider(
+                    "grok",
+                    "read_quota",
                     return_value=None,
                 ),
             ):
@@ -4507,8 +4519,9 @@ class HealthEndpointTests(unittest.TestCase):
             base_url = f"http://{server.address[0]}:{server.address[1]}"
             try:
                 with (
-                    mock.patch(
-                        "a_token_monitor.dashboard.state.read_grok_account",
+                    patch_provider(
+                        "grok",
+                        "read_account",
                         side_effect=RuntimeError("模拟 Grok 目录损坏"),
                     ),
                     self.assertLogs("a_token_monitor.dashboard", level="ERROR"),

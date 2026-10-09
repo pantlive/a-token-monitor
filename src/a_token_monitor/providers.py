@@ -24,16 +24,38 @@ from .accounts import default_codex_home
 from .claude import (
     default_claude_home,
     list_claude_active_sessions,
+    read_claude_account,
+    read_claude_quota,
     resolve_claude_homes,
 )
 from .commandcode import (
     default_commandcode_home,
     list_commandcode_active_sessions,
+    read_commandcode_account,
+    read_commandcode_quota,
     resolve_commandcode_homes,
 )
-from .dsh import default_dsh_home, list_dsh_active_sessions, resolve_dsh_homes
-from .grok import default_grok_home, list_grok_active_sessions, resolve_grok_homes
-from .kimi import default_kimi_home, list_kimi_active_sessions, resolve_kimi_homes
+from .dsh import (
+    default_dsh_home,
+    list_dsh_active_sessions,
+    read_dsh_account,
+    read_dsh_quota,
+    resolve_dsh_homes,
+)
+from .grok import (
+    default_grok_home,
+    list_grok_active_sessions,
+    read_grok_account,
+    read_grok_quota,
+    resolve_grok_homes,
+)
+from .kimi import (
+    default_kimi_home,
+    list_kimi_active_sessions,
+    read_kimi_account,
+    read_kimi_quota,
+    resolve_kimi_homes,
+)
 from .local_agents import (
     default_aider_home,
     default_cursor_home,
@@ -78,6 +100,10 @@ class ProviderSpec:
     cli_help: str = ""
     # 中文注释：列出某个数据目录下仍在运行的会话；没有活动会话概念的 provider 为 None。
     active_sessions: Callable[[Path], Iterable[Any]] | None = None
+    # 中文注释：读取登录账号与官方额度。登记了 read_account 的 provider 会在
+    # Dashboard 上显示为独立账号卡片；read_quota 返回 None 表示暂无额度数据。
+    read_account: Callable[[Path], Any] | None = None
+    read_quota: Callable[[Path], Any] | None = None
 
     @property
     def product_id(self) -> str:
@@ -153,6 +179,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
                 "默认在存在时使用 ~/.claude 或 CLAUDE_CONFIG_DIR"
             ),
             active_sessions=list_claude_active_sessions,
+            read_account=read_claude_account,
+            read_quota=read_claude_quota,
         ),
         ProviderSpec(
             key="commandcode",
@@ -167,6 +195,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
                 "默认在存在时使用 ~/.commandcode 或 COMMANDCODE_HOME"
             ),
             active_sessions=list_commandcode_active_sessions,
+            read_account=read_commandcode_account,
+            read_quota=read_commandcode_quota,
         ),
         ProviderSpec(
             key="dsh",
@@ -180,6 +210,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
                 "默认在存在时使用 ~/.dsh 或 DSH_HOME"
             ),
             active_sessions=list_dsh_active_sessions,
+            read_account=read_dsh_account,
+            read_quota=read_dsh_quota,
         ),
         ProviderSpec(
             key="grok",
@@ -190,6 +222,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             resolver=resolve_grok_homes,
             cli_help="Grok 登录目录，可重复传入；默认在存在时使用 ~/.grok 或 GROK_HOME",
             active_sessions=list_grok_active_sessions,
+            read_account=read_grok_account,
+            read_quota=read_grok_quota,
         ),
         ProviderSpec(
             key="kimi",
@@ -203,6 +237,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
                 "默认在存在时使用 ~/.kimi-code 或 KIMI_CODE_HOME"
             ),
             active_sessions=list_kimi_active_sessions,
+            read_account=read_kimi_account,
+            read_quota=read_kimi_quota,
         ),
         ProviderSpec(
             key="opencode",

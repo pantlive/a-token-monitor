@@ -12,32 +12,7 @@ from ..accounts import read_codex_plan_type
 from ..housekeeping import (
     HousekeepingMonitor,
 )
-from ..claude import (
-    list_claude_active_sessions,
-    read_claude_account,
-    read_claude_quota,
-)
-from ..commandcode import (
-    list_commandcode_active_sessions,
-    read_commandcode_account,
-    read_commandcode_quota,
-)
-from ..dsh import (
-    list_dsh_active_sessions,
-    read_dsh_account,
-    read_dsh_quota,
-)
-from ..grok import (
-    list_grok_active_sessions,
-    read_grok_account,
-    read_grok_quota,
-)
 from ..health import HealthTracker
-from ..kimi import (
-    list_kimi_active_sessions,
-    read_kimi_account,
-    read_kimi_quota,
-)
 from ..multi_models import TrackedSession, session_view
 from ..quota import (
     QuotaSnapshot,
@@ -45,6 +20,7 @@ from ..quota import (
     quota_period_label,
     quota_window_duration,
 )
+from ..providers import ProviderSpec, home_providers
 from ..registry import MultiSessionRegistry
 from ..traffic import TrafficSnapshot, empty_traffic_snapshot
 from ..usage import (
@@ -343,292 +319,25 @@ def build_multi_dashboard_state(
         if profile not in account["profiles"]:
             account["profiles"].append(profile)
 
-    for grok_home in (homes or {}).get("grok", ()):
-        if not grok_home.is_dir():
+    # 中文注释：登记了账号读取的 provider（Claude Code、Command Code、DSH、Grok、
+    # Kimi）各自成为账号卡片；额度经各家官方接口读取（带缓存），失败时只展示身份。
+    for spec in home_providers():
+        if spec.read_account is None:
             continue
-        try:
-            grok_account = read_grok_account(grok_home)
-            grok_quota = read_grok_quota(grok_home)
-            account_key = grok_account.account_key
-            account = accounts_by_key.setdefault(
-                account_key,
-                {
-                    "name": grok_account.display_name,
-                    "account_id": grok_account.account_id,
-                    "product": "grok",
-                    "profiles": [],
-                    "quota": None,
-                    "counts": {},
-                },
-            )
-            account["product"] = "grok"
-            profile = {
-                "name": grok_account.profile_name,
-                "codex_home": str(grok_home),
-            }
-            if profile not in account["profiles"]:
-                account["profiles"].append(profile)
-            if grok_quota is not None:
-                quota_with_account = _quota_summary(grok_quota)
-                if quota_with_account is not None:
-                    quota_with_account["account"] = grok_account.display_name
-                    quota_with_account["account_id"] = grok_account.account_id
-                    quota_with_account["profile_name"] = grok_account.profile_name
-                    quota_with_account["codex_home"] = str(grok_home)
-                    quota_with_account["product"] = "grok"
-                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                        quota_with_account
-                    )
-            for session in list_grok_active_sessions(grok_home):
-                sessions.append(
-                    session_view(
-                        session,
-                        account_name=grok_account.display_name,
-                        account_id=grok_account.account_id,
-                        profile_name=grok_account.profile_name,
-                        codex_home=str(grok_home),
-                        product="grok",
-                    )
+        for home in (homes or {}).get(spec.key, ()):
+            if not home.is_dir():
+                continue
+            try:
+                _merge_provider_home(spec, home, accounts_by_key, quota_by_key, sessions)
+                _record_provider_success(health, spec.product_id)
+            except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
+                _guard_provider(
+                    spec.display_name,
+                    home,
+                    health=health,
+                    provider_key=spec.product_id,
+                    error=error,
                 )
-            _record_provider_success(health, 'grok')
-        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider(
-                'Grok',
-                grok_home,
-                health=health,
-                provider_key='grok',
-                error=error,
-            )
-    # Kimi 配额经官方 /usages 接口读取（带缓存）；失败时账号卡片只展示身份。
-    for kimi_home in (homes or {}).get("kimi", ()):
-        if not kimi_home.is_dir():
-            continue
-        try:
-            kimi_account = read_kimi_account(kimi_home)
-            kimi_quota = read_kimi_quota(kimi_home)
-            account_key = kimi_account.account_key
-            account = accounts_by_key.setdefault(
-                account_key,
-                {
-                    "name": kimi_account.display_name,
-                    "account_id": kimi_account.account_id,
-                    "product": "kimi",
-                    "profiles": [],
-                    "quota": None,
-                    "counts": {},
-                },
-            )
-            account["product"] = "kimi"
-            profile = {
-                "name": kimi_account.profile_name,
-                "codex_home": str(kimi_home),
-            }
-            if profile not in account["profiles"]:
-                account["profiles"].append(profile)
-            if kimi_quota is not None:
-                quota_with_account = _quota_summary(kimi_quota)
-                if quota_with_account is not None:
-                    quota_with_account["account"] = kimi_account.display_name
-                    quota_with_account["account_id"] = kimi_account.account_id
-                    quota_with_account["profile_name"] = kimi_account.profile_name
-                    quota_with_account["codex_home"] = str(kimi_home)
-                    quota_with_account["product"] = "kimi"
-                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                        quota_with_account
-                    )
-            for session in list_kimi_active_sessions(kimi_home):
-                sessions.append(
-                    session_view(
-                        session,
-                        account_name=kimi_account.display_name,
-                        account_id=kimi_account.account_id,
-                        profile_name=kimi_account.profile_name,
-                        codex_home=str(kimi_home),
-                        product="kimi",
-                    )
-                )
-            _record_provider_success(health, 'kimi')
-        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider(
-                'Kimi',
-                kimi_home,
-                health=health,
-                provider_key='kimi',
-                error=error,
-            )
-    for dsh_home in (homes or {}).get("dsh", ()):
-        if not dsh_home.is_dir():
-            continue
-        try:
-            dsh_account = read_dsh_account(dsh_home)
-            dsh_quota = read_dsh_quota(dsh_home)
-            account_key = dsh_account.account_key
-            account = accounts_by_key.setdefault(
-                account_key,
-                {
-                    "name": dsh_account.display_name,
-                    "account_id": dsh_account.account_id,
-                    "product": "dsh",
-                    "profiles": [],
-                    "quota": None,
-                    "counts": {},
-                },
-            )
-            account["product"] = "dsh"
-            profile = {
-                "name": dsh_account.profile_name,
-                "codex_home": str(dsh_home),
-            }
-            if profile not in account["profiles"]:
-                account["profiles"].append(profile)
-            if dsh_quota is not None:
-                quota_with_account = _quota_summary(dsh_quota)
-                if quota_with_account is not None:
-                    quota_with_account["account"] = dsh_account.display_name
-                    quota_with_account["account_id"] = dsh_account.account_id
-                    quota_with_account["profile_name"] = dsh_account.profile_name
-                    quota_with_account["codex_home"] = str(dsh_home)
-                    quota_with_account["product"] = "dsh"
-                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                        quota_with_account
-                    )
-            for session in list_dsh_active_sessions(dsh_home):
-                sessions.append(
-                    session_view(
-                        session,
-                        account_name=dsh_account.display_name,
-                        account_id=dsh_account.account_id,
-                        profile_name=dsh_account.profile_name,
-                        codex_home=str(dsh_home),
-                        product="dsh",
-                    )
-                )
-            _record_provider_success(health, 'dsh')
-        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider(
-                'DeepSeek Harness',
-                dsh_home,
-                health=health,
-                provider_key='dsh',
-                error=error,
-            )
-    # Claude Code 订阅额度经 OAuth usage 接口读取（带缓存）；失败时只展示账号身份。
-    for claude_home in (homes or {}).get("claude", ()):
-        if not claude_home.is_dir():
-            continue
-        try:
-            claude_account = read_claude_account(claude_home)
-            claude_quota = read_claude_quota(claude_home)
-            account_key = claude_account.account_key
-            account = accounts_by_key.setdefault(
-                account_key,
-                {
-                    "name": claude_account.display_name,
-                    "account_id": claude_account.account_id,
-                    "product": "claude",
-                    "profiles": [],
-                    "quota": None,
-                    "counts": {},
-                },
-            )
-            account["product"] = "claude"
-            profile = {
-                "name": claude_account.profile_name,
-                "codex_home": str(claude_home),
-            }
-            if profile not in account["profiles"]:
-                account["profiles"].append(profile)
-            if claude_quota is not None:
-                quota_with_account = _quota_summary(claude_quota)
-                if quota_with_account is not None:
-                    quota_with_account["account"] = claude_account.display_name
-                    quota_with_account["account_id"] = claude_account.account_id
-                    quota_with_account["profile_name"] = (
-                        claude_account.profile_name
-                    )
-                    quota_with_account["codex_home"] = str(claude_home)
-                    quota_with_account["product"] = "claude"
-                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                        quota_with_account
-                    )
-            for session in list_claude_active_sessions(claude_home):
-                sessions.append(
-                    session_view(
-                        session,
-                        claude_account.display_name,
-                        account_id=claude_account.account_id,
-                        profile_name=claude_account.profile_name,
-                        codex_home=str(claude_home),
-                    )
-                )
-            _record_provider_success(health, 'claude')
-        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider(
-                'Claude Code',
-                claude_home,
-                health=health,
-                provider_key='claude',
-                error=error,
-            )
-    # Command Code 订阅额度经官方后台接口读取（带缓存）；失败时只展示账号身份。
-    for commandcode_home in (homes or {}).get("commandcode", ()):
-        if not commandcode_home.is_dir():
-            continue
-        try:
-            commandcode_account = read_commandcode_account(commandcode_home)
-            commandcode_quota = read_commandcode_quota(commandcode_home)
-            account_key = commandcode_account.account_key
-            account = accounts_by_key.setdefault(
-                account_key,
-                {
-                    "name": commandcode_account.display_name,
-                    "account_id": commandcode_account.account_id,
-                    "product": "command-code",
-                    "profiles": [],
-                    "quota": None,
-                    "counts": {},
-                },
-            )
-            account["product"] = "command-code"
-            profile = {
-                "name": commandcode_account.profile_name,
-                "codex_home": str(commandcode_home),
-            }
-            if profile not in account["profiles"]:
-                account["profiles"].append(profile)
-            if commandcode_quota is not None:
-                quota_with_account = _quota_summary(commandcode_quota)
-                if quota_with_account is not None:
-                    quota_with_account["account"] = commandcode_account.display_name
-                    quota_with_account["account_id"] = commandcode_account.account_id
-                    quota_with_account["profile_name"] = (
-                        commandcode_account.profile_name
-                    )
-                    quota_with_account["codex_home"] = str(commandcode_home)
-                    quota_with_account["product"] = "command-code"
-                    quota_by_key[(account_key, "snapshot", "snapshot")] = (
-                        quota_with_account
-                    )
-            for session in list_commandcode_active_sessions(commandcode_home):
-                sessions.append(
-                    session_view(
-                        session,
-                        account_name=commandcode_account.display_name,
-                        account_id=commandcode_account.account_id,
-                        profile_name=commandcode_account.profile_name,
-                        codex_home=str(commandcode_home),
-                        product="command-code",
-                    )
-                )
-            _record_provider_success(health, 'command-code')
-        except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
-            _guard_provider(
-                'Command Code',
-                commandcode_home,
-                health=health,
-                provider_key='command-code',
-                error=error,
-            )
     counts: dict[str, int] = {}
     for account in accounts_by_key.values():
         account["counts"] = {}
@@ -679,6 +388,61 @@ def build_multi_dashboard_state(
             else empty_traffic_snapshot().to_dict()
         ),
     }
+
+
+def _merge_provider_home(
+    spec: ProviderSpec,
+    home: Path,
+    accounts_by_key: dict[str, dict[str, Any]],
+    quota_by_key: dict[tuple[str, str, str], dict[str, Any]],
+    sessions: list[dict[str, Any]],
+) -> None:
+    """把一个 provider 数据目录的账号、额度和活动会话并入 Dashboard 状态。"""
+
+    product = spec.product_id
+    provider_account = spec.read_account(home)
+    provider_quota = spec.read_quota(home) if spec.read_quota is not None else None
+    account_key = provider_account.account_key
+    account = accounts_by_key.setdefault(
+        account_key,
+        {
+            "name": provider_account.display_name,
+            "account_id": provider_account.account_id,
+            "product": product,
+            "profiles": [],
+            "quota": None,
+            "counts": {},
+        },
+    )
+    account["product"] = product
+    profile = {
+        "name": provider_account.profile_name,
+        "codex_home": str(home),
+    }
+    if profile not in account["profiles"]:
+        account["profiles"].append(profile)
+    if provider_quota is not None:
+        quota_with_account = _quota_summary(provider_quota)
+        if quota_with_account is not None:
+            quota_with_account["account"] = provider_account.display_name
+            quota_with_account["account_id"] = provider_account.account_id
+            quota_with_account["profile_name"] = provider_account.profile_name
+            quota_with_account["codex_home"] = str(home)
+            quota_with_account["product"] = product
+            quota_by_key[(account_key, "snapshot", "snapshot")] = quota_with_account
+    if spec.active_sessions is None:
+        return
+    for session in spec.active_sessions(home):
+        sessions.append(
+            session_view(
+                session,
+                account_name=provider_account.display_name,
+                account_id=provider_account.account_id,
+                profile_name=provider_account.profile_name,
+                codex_home=str(home),
+                product=product,
+            )
+        )
 
 
 def _record_account_id(record: Mapping[str, Any]) -> str | None:
