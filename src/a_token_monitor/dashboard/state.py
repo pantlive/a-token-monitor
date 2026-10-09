@@ -400,6 +400,8 @@ def _merge_provider_home(
     """把一个 provider 数据目录的账号、额度和活动会话并入 Dashboard 状态。"""
 
     product = spec.product_id
+    if spec.read_account is None:
+        return
     provider_account = spec.read_account(home)
     provider_quota = spec.read_quota(home) if spec.read_quota is not None else None
     account_key = provider_account.account_key

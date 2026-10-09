@@ -121,7 +121,8 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         self._discovered: TimedCache[Path, tuple[Path, ...]] = TimedCache()
         self._snapshot_cache: dict[str, Any] | None = None
         self._snapshot_cached_at = 0.0
-        self._snapshot_scope: tuple[tuple[str, str, str, str], ...] = ()
+        # 中文注释：None 表示目录刚变化、展示缓存已作废。
+        self._snapshot_scope: tuple[tuple[str, str, str, str], ...] | None = ()
         self._facets_cache: dict[str, Any] | None = None
         self._facets_cached_at = 0.0
         self._search_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
@@ -613,14 +614,16 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
             aggregates.items(),
             key=lambda item: item[0],
         ):
-            source = account_sources.get(account_key)
-            if source is None:
-                source = _source_for_account_key(account_key, sources)
+            account_source = account_sources.get(account_key)
+            if account_source is None:
+                account_source = _source_for_account_key(account_key, sources)
             accounts.append(
                 _aggregate_to_dict(
                     aggregate,
-                    account_name=(source.account_name if source else account_key),
-                    account_id=(source.account_id if source else None),
+                    account_name=(
+                        account_source.account_name if account_source else account_key
+                    ),
+                    account_id=(account_source.account_id if account_source else None),
                     profiles=aggregate.profiles,
                 )
             )
@@ -644,7 +647,7 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         index: dict[str, dict[str, Any]] = {}
         for offset in range(self._DAILY_TREND_DAYS - 1, -1, -1):
             key = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
-            entry = {
+            entry: dict[str, Any] = {
                 "date": key,
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
@@ -656,15 +659,15 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         for path, deltas in file_deltas.items():
             for delta, estimate in self._rollup_entries(path, deltas, first_start, now):
                 key = local_day_key(delta.timestamp)
-                entry = index.get(key)
-                if entry is None:
+                day_entry = index.get(key)
+                if day_entry is None:
                     continue
-                entry["total_tokens"] += delta.usage.total_tokens
+                day_entry["total_tokens"] += delta.usage.total_tokens
                 cost = estimate.get("estimated_cost_usd")
                 if cost is None:
-                    entry["has_unpriced"] = True
+                    day_entry["has_unpriced"] = True
                 else:
-                    entry["estimated_cost_usd"] += float(cost)
+                    day_entry["estimated_cost_usd"] += float(cost)
         for entry in days:
             entry["estimated_cost_usd"] = _round_number(entry["estimated_cost_usd"])
         return days

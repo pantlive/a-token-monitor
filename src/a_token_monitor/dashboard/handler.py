@@ -853,8 +853,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     raise HousekeepingError(f"该会话当前不能归档：{reason}")
                 criteria = CleanupCriteria(paths=(session_path,))
             elif all_sessions:
+                # 中文注释：all_sessions 只在给了 project 时才为真。
                 criteria = CleanupCriteria(
-                    projects=(project,),
+                    projects=(project,) if project else (),
                     any_age=True,
                 )
             else:
@@ -1198,7 +1199,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(self._query)
         except ValueError:
             query = {}
-        override = (query.get("lang") or [None])[0]
+        languages = query.get("lang")
+        override = languages[0] if languages else None
         header = (
             self.headers.get("Accept-Language")
             if hasattr(self, "headers")

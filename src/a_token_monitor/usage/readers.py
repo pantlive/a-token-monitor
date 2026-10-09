@@ -51,9 +51,10 @@ from .records import (
     _CachedFile,
     _UsageParseState,
 )
+from .state import _AggregatorState
 
 
-class _FileReaderMixin:
+class _FileReaderMixin(_AggregatorState):
     """``UsageAggregator`` 的混入类；依赖其 ``__init__`` 建立的实例属性。"""
 
     def _read_file(

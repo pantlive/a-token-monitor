@@ -47,7 +47,7 @@ _USAGE_INDEX_VERSION = 6
 _LOCAL_DAY_BUCKET_SECONDS = 900
 
 
-def _sql_local_day_function() -> Callable[[object], str | None]:
+def _sql_local_day_function() -> Callable[[float | None], str | None]:
     """SQLite 回调：把时间戳换算为本地自然日，空值原样返回。
 
     逐行调 Python 比 SQLite 内置 'localtime' 慢，按 900 秒分桶缓存后，一次检索
@@ -56,7 +56,7 @@ def _sql_local_day_function() -> Callable[[object], str | None]:
 
     cache: dict[int, str] = {}
 
-    def local_day(timestamp: object) -> str | None:
+    def local_day(timestamp: float | None) -> str | None:
         if timestamp is None:
             return None
         bucket = math.floor(float(timestamp) / _LOCAL_DAY_BUCKET_SECONDS)

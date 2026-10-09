@@ -601,7 +601,10 @@ def _sql_search_page(
     # 中文注释：大检索的中间结果由 SQLite 管理，允许落临时文件，避免 Python fetchall。
     connection.execute("PRAGMA temp_store=FILE")
     connection.create_function("usage_project", 1, projects.get)
-    connection.create_aggregate("usage_search_bucket", 2, _SqlSearchBucket)
+    # 中文注释：typeshed 把聚合类的 step 参数写死成单参数协议，这里是两个参数。
+    connection.create_aggregate(
+        "usage_search_bucket", 2, _SqlSearchBucket  # type: ignore[arg-type]
+    )
     connection.execute(
         "CREATE TEMP TABLE search_base AS SELECT *, usage_project(path) AS project "
         f"FROM ({statement})",

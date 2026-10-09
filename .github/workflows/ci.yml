@@ -63,6 +63,14 @@ jobs:
       - name: 运行单元测试
         run: python -m pytest -q
 
+      # 中文注释：类型检查范围见 pyproject.toml 的 [tool.mypy] files；与平台无关，
+      # 同样只跑一次。mypy 只装在 CI，不进项目依赖。
+      - name: 类型检查
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          python -m pip install "mypy==1.13.0"
+          python -m mypy
+
       # 中文注释：用量「今天」按本地日历日切分，用例数据按 UTC+8 设计，由
       # tests/conftest.py 通过 a_token_monitor.local_time 注入固定时区。runner
       # 默认是 UTC，看不出时区漂移，这里把系统时区换到美西再跑一遍全量用例，

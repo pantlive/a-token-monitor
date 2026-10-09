@@ -68,8 +68,9 @@ def _conversation_metrics(
             cost += float(value)
             if delta.model not in model_costs:
                 model_costs[delta.model] = 0.0
-            if model_costs[delta.model] is not None:
-                model_costs[delta.model] += float(value)
+            current = model_costs[delta.model]
+            if current is not None:
+                model_costs[delta.model] = current + float(value)
         pricing = _lookup_pricing(delta.model)
         if pricing is not None and pricing.input_usd is not None:
             write_premium += (
@@ -152,15 +153,15 @@ def _build_insights(
                 model_costs[model] = None
             elif model not in model_costs:
                 model_costs[model] = model_cost
-            elif model_costs[model] is not None:
-                model_costs[model] += model_cost
+            elif (current := model_costs[model]) is not None:
+                model_costs[model] = current + model_cost
     model_rows = [
         {
             "model": model,
             "total_tokens": model_usage[model].total_tokens,
             "estimated_cost_usd": (
-                _round_number(model_costs[model])
-                if model_costs.get(model) is not None
+                _round_number(cost)
+                if (cost := model_costs.get(model)) is not None
                 else None
             ),
         }

@@ -43,9 +43,10 @@ from .search import (
 from .store import (
     _UsageIndexStore,
 )
+from .state import _AggregatorState
 
 
-class _UsageQueryMixin:
+class _UsageQueryMixin(_AggregatorState):
     """``UsageAggregator`` 的混入类；依赖其 ``__init__`` 建立的实例属性。"""
 
     @staticmethod

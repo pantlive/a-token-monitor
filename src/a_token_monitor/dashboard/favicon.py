@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import hashlib
 import math
 import struct
@@ -60,7 +62,7 @@ _FAVICON_ICO_CACHE: bytes | None = None
 #   ("arc", cx, cy, r, start, end, width)     圆弧（角度制，顺时针，0° 指右）
 #   ("polyline", points, width)               折线（圆角连接）
 #   ("polygon", points)                       填充多边形
-_FAVICON_GLYPHS: dict[str, tuple[tuple, ...]] = {
+_FAVICON_GLYPHS: dict[str, tuple[Any, ...]] = {
     # A. 用量柱 + 高水位刻度孔（Stitch 方案 A）。
     "bars": (
         ("rect", 14.0, 34.0, 8.0, 18.0, 4.0),
@@ -151,15 +153,15 @@ _FAVICON_GLYPHS: dict[str, tuple[tuple, ...]] = {
 _FAVICON_STYLE = "guard"
 
 
-def _favicon_shapes() -> tuple[tuple, ...]:
+def _favicon_shapes() -> tuple[dict[str, Any], ...]:
     """返回当前方案的徽章 + 图形原语列表。"""
 
-    badge = {"mode": "fill", "shape": ("rect", 0.0, 0.0, _FAVICON_SIZE, _FAVICON_SIZE, _FAVICON_RADIUS)}
+    badge: dict[str, Any] = {"mode": "fill", "shape": ("rect", 0.0, 0.0, _FAVICON_SIZE, _FAVICON_SIZE, _FAVICON_RADIUS)}
     try:
         glyph = _FAVICON_GLYPHS[_FAVICON_STYLE]
     except KeyError as error:  # pragma: no cover - 常量写错时立刻暴露
         raise ValueError(f"未知的图标方案: {_FAVICON_STYLE}") from error
-    shapes: list[tuple] = [badge]
+    shapes: list[dict[str, Any]] = [badge]
     for item in glyph:
         if isinstance(item, dict):
             shapes.append({"mode": item.get("mode", "cut"), "shape": item["shape"]})

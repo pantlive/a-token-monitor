@@ -34,7 +34,7 @@ from ..local_agents import (
     list_opencode_dbs,
     list_qwen_chats,
 )
-from ..providers import home_providers
+from ..providers import ProviderAccount, home_providers
 from ..registry import MultiSessionRegistry
 from .parsing import (
     _canonical_source_rank,
@@ -46,9 +46,10 @@ from .records import (
     _codex_session_id,
     _text_value,
 )
+from .state import _AggregatorState
 
 
-class _SourceDiscoveryMixin:
+class _SourceDiscoveryMixin(_AggregatorState):
     """``UsageAggregator`` 的混入类；依赖其 ``__init__`` 建立的实例属性。"""
 
     def _scope_key(
@@ -108,8 +109,8 @@ class _SourceDiscoveryMixin:
             # 注册表中的路径优先于当前 auth.json 的账号 ID。这样 profile
             # 换号后，旧会话的历史用量仍归到它原来记录的账号。
             for session in registry.list_sessions(active_only=False):
-                path = _normalized_path(session.jsonl_path)
-                if path is None:
+                session_path = _normalized_path(session.jsonl_path)
+                if session_path is None:
                     continue
                 session_source = _UsageSource(
                     profile_name=default_source.profile_name,
@@ -118,7 +119,7 @@ class _SourceDiscoveryMixin:
                     project=_text_value(session.cwd),
                     product="codex",
                 )
-                current_source = sources.get(path)
+                current_source = sources.get(session_path)
                 if (
                     current_source is None
                     or session.account_id is not None
@@ -127,7 +128,7 @@ class _SourceDiscoveryMixin:
                         and session_source.project is not None
                     )
                 ):
-                    sources[path] = session_source
+                    sources[session_path] = session_source
         # 中文注释：同一 Codex session 可能在多个 CODEX_HOME 中留下前缀副本。
         # Grok 的 unified.jsonl 没有 Codex session UUID，必须在加入 Grok 前去重。
         sources = self._deduplicate_codex_sources(sources)
@@ -135,7 +136,7 @@ class _SourceDiscoveryMixin:
             log_path = grok_unified_log(grok_home)
             if not log_path.is_file():
                 continue
-            account = read_grok_account(grok_home)
+            account: ProviderAccount = read_grok_account(grok_home)
             sources[log_path] = _UsageSource(
                 profile_name=account.profile_name,
                 account_id=account.account_id,

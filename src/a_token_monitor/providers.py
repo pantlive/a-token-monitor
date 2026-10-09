@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .accounts import default_codex_home
 from .claude import (
@@ -79,6 +79,22 @@ ProviderHomes = Mapping[str, tuple[Path, ...]]
 ProviderHomesInput = Mapping[str, Sequence[Path] | None]
 
 
+class ProviderAccount(Protocol):
+    """各 provider 账号对象（GrokAccount、KimiAccount 等）共有的身份字段。"""
+
+    @property
+    def account_key(self) -> str: ...
+
+    @property
+    def display_name(self) -> str: ...
+
+    @property
+    def account_id(self) -> str | None: ...
+
+    @property
+    def profile_name(self) -> str: ...
+
+
 @dataclass(frozen=True)
 class ProviderSpec:
     """一个 code agent 的登记信息。
@@ -102,7 +118,7 @@ class ProviderSpec:
     active_sessions: Callable[[Path], Iterable[Any]] | None = None
     # 中文注释：读取登录账号与官方额度。登记了 read_account 的 provider 会在
     # Dashboard 上显示为独立账号卡片；read_quota 返回 None 表示暂无额度数据。
-    read_account: Callable[[Path], Any] | None = None
+    read_account: Callable[[Path], ProviderAccount] | None = None
     read_quota: Callable[[Path], Any] | None = None
     # 中文注释：quota 命令输出里表示登录状态的账号属性名（如 logged_in）；
     # 拿不到额度时，有 missing_quota_error 的记为错误，否则输出空额度条目。

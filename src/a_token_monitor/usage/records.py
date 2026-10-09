@@ -7,7 +7,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
 
@@ -443,7 +443,7 @@ def _delta_from_row(row: tuple[object, ...]) -> UsageDelta | None:
     model = row[2]
     if not isinstance(timestamp, (int, float)) or not isinstance(model, str):
         return None
-    usage = _usage_from_object(json.loads(row[3]))
+    usage = _usage_from_object(json.loads(cast(str, row[3])))
     billing_value = row[4]
     billing_usage = (
         _usage_from_object(json.loads(billing_value))
