@@ -60,8 +60,19 @@ jobs:
 
       # 中文注释：三个平台跑同一套用例；平台不具备的能力由 tests/_platform_support.py
       # 的装饰器显式跳过（Windows 无 /proc、无 POSIX 权限位等），不算失败。
+      # ubuntu / 3.13 这一个 job 改为带覆盖率运行，其余 job 照常运行。
       - name: 运行单元测试
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13') }}
         run: python -m pytest -q
+
+      # 中文注释：覆盖率只在 ubuntu / 3.13 统计一次——Windows 会跳过一批平台相关
+      # 用例，各平台数字不可比。门槛在 pyproject.toml 的 [tool.coverage.report]。
+      - name: 运行单元测试（统计覆盖率）
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: |
+          python -m pip install "coverage==7.6.10"
+          python -m coverage run -m pytest -q
+          python -m coverage report
 
       # 中文注释：类型检查范围见 pyproject.toml 的 [tool.mypy] files；与平台无关，
       # 同样只跑一次。mypy 只装在 CI，不进项目依赖。

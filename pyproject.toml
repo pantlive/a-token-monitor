@@ -40,6 +40,17 @@ where = ["src"]
 # 中文注释：Dashboard 页面的 HTML / CSS / JS 资源随包分发。
 "a_token_monitor.dashboard" = ["static/*"]
 
+[tool.coverage.run]
+# 中文注释：CI 只在 ubuntu / Python 3.13 上统计覆盖率（Windows 会跳过一批平台相关用例）。
+branch = true
+source = ["a_token_monitor"]
+
+[tool.coverage.report]
+# 中文注释：当前行+分支覆盖率约 79%，门槛略低于现状，只防止明显倒退；补测试后再上调。
+fail_under = 78
+skip_covered = true
+show_missing = true
+
 [tool.mypy]
 # 中文注释：先覆盖结构最复杂、mixin 最多的几块；其余模块只用于推断类型，
 # 不报告它们自身的错误（follow_imports = silent），之后逐步扩大 files。
