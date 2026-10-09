@@ -62,3 +62,13 @@ jobs:
       # 的装饰器显式跳过（Windows 无 /proc、无 POSIX 权限位等），不算失败。
       - name: 运行单元测试
         run: python -m pytest -q
+
+      # 中文注释：用量「今天」按本地日历日切分，用例数据按 UTC+8 设计，由
+      # tests/conftest.py 固定时区。runner 默认是 UTC，看不出时区漂移，这里换到
+      # 美西再跑一遍时间敏感的用例，防止 conftest 被删或新用例绕开它。
+      # Windows 不支持 time.tzset，只在 Linux / macOS 上跑。
+      - name: 非 UTC 时区回归
+        if: runner.os != 'Windows'
+        env:
+          TZ: America/Los_Angeles
+        run: python -m pytest -q tests/test_usage.py tests/test_grok.py

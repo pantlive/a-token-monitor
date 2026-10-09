@@ -36,19 +36,19 @@ class UsageAggregatorTests(unittest.TestCase):
             session_path.parent.mkdir(parents=True)
             lines = [
                 {
-                    "timestamp": "2026-08-26T16:59:00Z",
+                    "timestamp": "2026-08-27T00:10:00Z",
                     "type": "session_meta",
                     "payload": {"cwd": "/workspace/project-a"},
                 },
                 {
-                    "timestamp": "2026-08-26T17:00:00Z",
+                    "timestamp": "2026-08-27T00:11:00Z",
                     "type": "event_msg",
                     "payload": {
                         "thread_settings": {"model": "gpt-5.6-luna"},
                     },
                 },
                 {
-                    "timestamp": "2026-08-26T17:01:00Z",
+                    "timestamp": "2026-08-27T00:12:00Z",
                     "type": "event_msg",
                     "payload": {
                         "info": {
