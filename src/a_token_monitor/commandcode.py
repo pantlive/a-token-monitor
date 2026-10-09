@@ -653,7 +653,8 @@ def _commandcode_process_started_at(
         return None
     try:
         ticks = float(os.sysconf("SC_CLK_TCK"))
-    except (ValueError, OSError):
+    except (ValueError, OSError, AttributeError):
+        # 中文注释：os.sysconf 只在 POSIX 上存在；Windows 上按「判不出启动时间」处理。
         return None
     if ticks <= 0:
         return None

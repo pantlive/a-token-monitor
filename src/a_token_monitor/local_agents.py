@@ -1373,7 +1373,8 @@ def _process_started_at(start_token: str, proc_root: Path | None) -> float | Non
     try:
         text = (root / "stat").read_text(encoding="utf-8", errors="replace")
         ticks = float(os.sysconf("SC_CLK_TCK"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
+        # 中文注释：os.sysconf 只在 POSIX 上存在；Windows 上按「判不出启动时间」处理。
         return None
     match = re.search(r"\bbtime\s+(\d+)", text)
     if match is None or ticks <= 0:
