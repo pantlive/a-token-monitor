@@ -23,6 +23,7 @@ from ..providers import (
     resolve_provider_homes,
     update_provider_homes,
 )
+from .timed_cache import TimedCache
 from .aggregates import (
     _ConversationMetrics,
     _FileRollup,
@@ -110,16 +111,14 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         # 中文注释：聚合器里未给出的 provider 一律不扫描，避免单测把本机数据读进来；
         # 监控进程要自动探测时先 resolve，再把结果映射传进来。
         self._homes = resolve_provider_homes(homes, auto_detect=False)
-        self._grok_sessions: dict[Path, dict[str, GrokSessionInfo]] = {}
-        self._grok_sessions_at: dict[Path, float] = {}
-        self._kimi_sessions: dict[Path, dict[str, KimiSessionInfo]] = {}
-        self._kimi_sessions_at: dict[Path, float] = {}
+        self._grok_sessions: TimedCache[Path, dict[str, GrokSessionInfo]] = TimedCache()
+        self._kimi_sessions: TimedCache[Path, dict[str, KimiSessionInfo]] = TimedCache()
         self._claude_sidechain_cache: dict[Path, tuple[float, bool]] = {}
         self._chat_partial: dict[Path, tuple[Any, ...]] = {}
         self._cache: dict[Path, _CachedFile] = {}
         self._rollups: dict[Path, _FileRollup] = {}
-        self._discovered: dict[Path, tuple[Path, ...]] = {}
-        self._discovered_at: dict[Path, float] = {}
+        # 中文注释：目录列举结果按 discovery_interval 缓存，键是扫描根或缓存身份。
+        self._discovered: TimedCache[Path, tuple[Path, ...]] = TimedCache()
         self._snapshot_cache: dict[str, Any] | None = None
         self._snapshot_cached_at = 0.0
         self._snapshot_scope: tuple[tuple[str, str, str, str], ...] = ()
@@ -215,27 +214,9 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         with self._lock:
             self._homes = update_provider_homes(self._homes, homes)
             grok_homes = self._homes["grok"]
-            self._grok_sessions = {
-                home: index
-                for home, index in self._grok_sessions.items()
-                if home in grok_homes
-            }
-            self._grok_sessions_at = {
-                home: cached_at
-                for home, cached_at in self._grok_sessions_at.items()
-                if home in grok_homes
-            }
+            self._grok_sessions.retain(lambda home: home in grok_homes)
             kimi_homes = self._homes["kimi"]
-            self._kimi_sessions = {
-                home: index
-                for home, index in self._kimi_sessions.items()
-                if home in kimi_homes
-            }
-            self._kimi_sessions_at = {
-                home: cached_at
-                for home, cached_at in self._kimi_sessions_at.items()
-                if home in kimi_homes
-            }
+            self._kimi_sessions.retain(lambda home: home in kimi_homes)
             self._claude_sidechain_cache = {
                 home: cached
                 for home, cached in self._claude_sidechain_cache.items()

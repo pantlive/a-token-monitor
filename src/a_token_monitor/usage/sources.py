@@ -291,50 +291,26 @@ class _SourceDiscoveryMixin:
     def _discover_jsonl(self, root: Path) -> tuple[Path, ...]:
         """发现一个 session 根目录下的 JSONL，并按时间缓存目录遍历。"""
 
-        normalized_root = _normalized_path(str(root)) or root
-        current_time = time.time()
-        previous_time = self._discovered_at.get(normalized_root, 0)
-        if current_time - previous_time < self.discovery_interval:
-            return self._discovered.get(normalized_root, ())
-        try:
-            paths = tuple(
-                sorted(
-                    (
-                        _normalized_path(str(path))
-                        for path in normalized_root.rglob("*.jsonl")
-                    ),
-                    key=lambda item: str(item),
-                )
-            )
-        except OSError:
-            paths = ()
-        normalized_paths = tuple(path for path in paths if path is not None)
-        self._discovered[normalized_root] = normalized_paths
-        self._discovered_at[normalized_root] = current_time
-        return normalized_paths
+        return self._discover_files(root, "*.jsonl")
 
     def _discover_kimi_wires(self, kimi_home: Path) -> tuple[Path, ...]:
         """发现一个 KIMI_CODE_HOME 下的 wire.jsonl，并按时间缓存遍历。"""
 
-        root = kimi_home / "sessions"
+        return self._discover_files(kimi_home / "sessions", "wire.jsonl")
+
+    def _discover_files(self, root: Path, pattern: str) -> tuple[Path, ...]:
+        """递归列举 ``root`` 下匹配 ``pattern`` 的文件；遍历失败按空结果缓存。"""
+
         normalized_root = _normalized_path(str(root)) or root
-        current_time = time.time()
-        previous_time = self._discovered_at.get(normalized_root, 0)
-        if current_time - previous_time < self.discovery_interval:
-            return self._discovered.get(normalized_root, ())
-        try:
-            paths = tuple(
-                sorted(
-                    (
-                        _normalized_path(str(path))
-                        for path in normalized_root.rglob("wire.jsonl")
-                    ),
+
+        def load() -> tuple[Path, ...]:
+            try:
+                paths = sorted(
+                    (_normalized_path(str(path)) for path in normalized_root.rglob(pattern)),
                     key=lambda item: str(item),
                 )
-            )
-        except OSError:
-            paths = ()
-        normalized_paths = tuple(path for path in paths if path is not None)
-        self._discovered[normalized_root] = normalized_paths
-        self._discovered_at[normalized_root] = current_time
-        return normalized_paths
+            except OSError:
+                return ()
+            return tuple(path for path in paths if path is not None)
+
+        return self._discovered.get(normalized_root, load, self.discovery_interval)

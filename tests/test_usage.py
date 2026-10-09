@@ -2238,13 +2238,12 @@ class UpdateHomesTests(unittest.TestCase):
             root = Path(temporary_directory).resolve()
             grok_home = root / "grok"
             aggregator = UsageAggregator(homes={"grok": (grok_home,)})
-            aggregator._grok_sessions[grok_home] = {}
-            aggregator._grok_sessions_at[grok_home] = 1.0
+            aggregator._grok_sessions.put(grok_home, {}, loaded_at=1.0)
 
             aggregator.update_homes(homes={"grok": ()})
 
-        self.assertEqual(aggregator._grok_sessions, {})
-        self.assertEqual(aggregator._grok_sessions_at, {})
+        self.assertNotIn(grok_home, aggregator._grok_sessions)
+        self.assertEqual(len(aggregator._grok_sessions), 0)
 
 
 class IndexHealthTests(unittest.TestCase):

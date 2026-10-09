@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -175,17 +174,13 @@ class _FileReaderMixin:
     ) -> tuple[Path, ...]:
         """按发现间隔缓存一次目录列举。key 只做缓存身份，不是扫描根。"""
 
-        current_time = time.time()
-        previous_time = self._discovered_at.get(key, 0)
-        if current_time - previous_time < self.discovery_interval:
-            return self._discovered.get(key, ())
-        try:
-            paths = tuple(loader())
-        except OSError:
-            paths = ()
-        self._discovered[key] = paths
-        self._discovered_at[key] = current_time
-        return paths
+        def load() -> tuple[Path, ...]:
+            try:
+                return tuple(loader())
+            except OSError:
+                return ()
+
+        return self._discovered.get(key, load, self.discovery_interval)
 
     def _aider_home_for(self, path: Path) -> Path | None:
         for home in self._homes["aider"]:
@@ -515,15 +510,11 @@ class _FileReaderMixin:
     ) -> dict[str, GrokSessionInfo]:
         """按发现间隔缓存 Grok session 的模型和项目。"""
 
-        current_time = time.time()
-        previous_time = self._grok_sessions_at.get(grok_home, 0)
-        cached = self._grok_sessions.get(grok_home)
-        if cached is not None and current_time - previous_time < self.discovery_interval:
-            return cached
-        index = load_session_index(grok_home)
-        self._grok_sessions[grok_home] = index
-        self._grok_sessions_at[grok_home] = current_time
-        return index
+        return self._grok_sessions.get(
+            grok_home,
+            lambda: load_session_index(grok_home),
+            self.discovery_interval,
+        )
 
     def _read_grok_log(
         self,
@@ -659,15 +650,11 @@ class _FileReaderMixin:
     ) -> dict[str, KimiSessionInfo]:
         """按发现间隔缓存 Kimi session 的工作目录。"""
 
-        current_time = time.time()
-        previous_time = self._kimi_sessions_at.get(kimi_home, 0)
-        cached = self._kimi_sessions.get(kimi_home)
-        if cached is not None and current_time - previous_time < self.discovery_interval:
-            return cached
-        index = load_kimi_session_index(kimi_home)
-        self._kimi_sessions[kimi_home] = index
-        self._kimi_sessions_at[kimi_home] = current_time
-        return index
+        return self._kimi_sessions.get(
+            kimi_home,
+            lambda: load_kimi_session_index(kimi_home),
+            self.discovery_interval,
+        )
 
     def _read_kimi_wire(
         self,
