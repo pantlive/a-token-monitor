@@ -753,6 +753,50 @@ def _timestamp(value: str) -> float:
     )
 
 
+class ClaudeLongLineTests(unittest.TestCase):
+    """长于单轮读取预算、但未超过单行上限的记录不能让增量读取停在原地。"""
+
+    def test_line_longer_than_budget_does_not_stall_the_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            transcript = Path(temporary_directory) / "session.jsonl"
+            image_line = json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-08-27T01:00:00Z",
+                    "message": {"role": "user", "content": "x" * 1_500_000},
+                }
+            )
+            transcript.write_text(
+                image_line
+                + "\n"
+                + _assistant_line(timestamp="2026-08-27T01:00:05Z", message_id="msg_after")
+                + "\n",
+                encoding="utf-8",
+            )
+            offset = 0
+            discarding = False
+            events = []
+            for _ in range(5):
+                result = parse_claude_chunk(
+                    transcript,
+                    offset,
+                    discarding_oversized_line=discarding,
+                    maximum_bytes=1024 * 1024,
+                )
+                events.extend(result.events)
+                self.assertGreater(result.next_offset, offset, "偏移量必须前进")
+                offset, discarding = result.next_offset, result.discarding_oversized_line
+                if offset >= transcript.stat().st_size:
+                    break
+            size = transcript.stat().st_size
+
+        self.assertEqual(offset, size)
+        self.assertEqual([event.message_id for event in events], ["msg_after"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 if __name__ == "__main__":
     unittest.main()
 

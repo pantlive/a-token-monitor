@@ -411,12 +411,20 @@ def parse_claude_chunk(
     bytes_read = 0
     reached_eof = True
     line_buffer = b""
+    completed_line = False
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
             while True:
-                if maximum_bytes is not None and bytes_read >= maximum_bytes:
-                    # 预算用尽：文件还没读完，下一轮从 next_offset 继续。
+                if (
+                    maximum_bytes is not None
+                    and bytes_read >= maximum_bytes
+                    and (completed_line or not line_buffer)
+                ):
+                    # 预算用尽：文件还没读完，下一轮从 next_offset 继续（末尾半行退回）。
+                    # 本轮一整行都还没读完时不能停：长于预算的行（例如带截图的工具
+                    # 结果）会让偏移每轮退回原处，索引永远停在未完成。此时继续读完
+                    # 这一行，超过 _MAX_LINE_BYTES 的行仍按丢弃处理。
                     reached_eof = False
                     break
                 chunk = handle.read(64 * 1024)
@@ -433,6 +441,7 @@ def parse_claude_chunk(
                         break
                     raw_line = line_buffer[:newline]
                     line_buffer = line_buffer[newline + 1 :]
+                    completed_line = True
                     if discarding_oversized_line:
                         discarding_oversized_line = False
                         continue
