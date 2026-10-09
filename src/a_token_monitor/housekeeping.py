@@ -917,7 +917,7 @@ class HousekeepingMonitor:
         source = Path(archive_path).expanduser()
         if not source.is_file():
             raise HousekeepingError(f"归档不存在: {source}")
-        root = Path(destination).expanduser() if destination is not None else Path("/")
+        root = Path(destination).expanduser() if destination is not None else None
         manifest = _read_manifest(
             source.with_name(source.name + _MANIFEST_SUFFIX)
         )
@@ -930,7 +930,20 @@ class HousekeepingMonitor:
                 members = [item for item in handle.getmembers() if item.isfile()]
                 for item in members:
                     _guard_member(item.name)
-                _extract_all(handle, root, members)
+                if root is not None:
+                    _extract_all(handle, root, members)
+                    roots = [root]
+                else:
+                    # 中文注释：成员名不带盘符；不指定目标时按 manifest 里的原路径
+                    # 把每个文件写回它原来的盘，而不是当前工作目录所在的盘。
+                    anchors = _member_anchors(manifest)
+                    groups: dict[Path, list[tarfile.TarInfo]] = {}
+                    for item in members:
+                        anchor = Path(anchors.get(item.name, os.sep))
+                        groups.setdefault(anchor, []).append(item)
+                    for anchor, group in groups.items():
+                        _extract_all(handle, anchor, group)
+                    roots = list(groups) or [Path(os.sep)]
                 restored = len(members)
         except (OSError, tarfile.TarError) as error:
             raise HousekeepingError(f"恢复归档失败: {error}") from error
@@ -941,7 +954,7 @@ class HousekeepingMonitor:
         return {
             "action": "restore",
             "archive": str(source),
-            "destination": str(root),
+            "destination": ", ".join(str(item) for item in roots),
             "restored": restored,
             "manifest": manifest if manifest is not None else None,
         }
@@ -1573,6 +1586,21 @@ def _archive_member_name(path: PurePath) -> str:
 
     _, name = os.path.splitdrive(str(path))
     return name.replace(os.sep, "/").lstrip("/")
+
+
+def _member_anchors(manifest: Mapping[str, Any] | None) -> dict[str, str]:
+    """从 manifest 的原始路径推出每个归档成员该写回的根（Windows 上是所在盘）。"""
+
+    anchors: dict[str, str] = {}
+    files = manifest.get("files") if manifest is not None else None
+    if not isinstance(files, list):
+        return anchors
+    for entry in files:
+        original = entry.get("path") if isinstance(entry, Mapping) else None
+        if isinstance(original, str) and original:
+            path = Path(original)
+            anchors[_archive_member_name(path)] = path.anchor or os.sep
+    return anchors
 
 
 def _missing_members(archive: Path, files: Sequence[SessionFile]) -> set[str]:

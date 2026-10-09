@@ -21,6 +21,7 @@ from a_token_monitor.housekeeping import (
     HousekeepingError,
     HousekeepingMonitor,
     _archive_member_name,
+    _member_anchors,
     default_sessions_root,
     empty_housekeeping_report,
     scan_session_files,
@@ -725,6 +726,20 @@ class ArchiveMemberNameTests(unittest.TestCase):
                 PureWindowsPath(r"C:\Users\dev\.codex\sessions\a.jsonl")
             )
         self.assertEqual(name, "Users/dev/.codex/sessions/a.jsonl")
+
+
+class MemberAnchorTests(unittest.TestCase):
+    """不指定 --to 恢复时，按 manifest 原路径决定每个成员写回哪个根。"""
+
+    def test_maps_members_to_original_root(self) -> None:
+        original = Path("/home/dev/.codex/sessions/a.jsonl").resolve()
+        anchors = _member_anchors({"files": [{"path": str(original)}]})
+        self.assertEqual(anchors, {_archive_member_name(original): original.anchor})
+
+    def test_missing_or_malformed_manifest_yields_no_anchors(self) -> None:
+        self.assertEqual(_member_anchors(None), {})
+        self.assertEqual(_member_anchors({"files": "x"}), {})
+        self.assertEqual(_member_anchors({"files": [1, {"path": ""}]}), {})
 
 
 class SingleSessionArchiveTests(unittest.TestCase):

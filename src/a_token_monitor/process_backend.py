@@ -648,14 +648,32 @@ def _read_start_token(path: Path) -> str:
     return _read_stat(path)[1]
 
 
+def read_link_text(path: Path) -> str | None:
+    """读取 /proc 符号链接的目标文本，读不到返回 ``None``。
+
+    在 Windows 上按 /proc 语义读取（测试与容器）时，readlink 会返回带 ``\\\\?\\``
+    前缀的扩展路径（UNC 路径是 ``\\\\?\\UNC\\``），``resolve()`` 也不会去掉它；
+    这里统一还原成普通写法，才能和会话目录比较。
+    """
+
+    try:
+        text = str(path.readlink())
+    except OSError:
+        return None
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    return text
+
+
 def _read_cwd(path: Path) -> Path | None:
     """读取进程工作目录。"""
 
-    try:
-        target = path.readlink()
-    except OSError:
+    text = read_link_text(path)
+    if text is None:
         return None
-    target_path = Path(str(target))
+    target_path = Path(text)
     try:
         return target_path.resolve()
     except OSError:
@@ -676,15 +694,9 @@ def _read_open_paths(directory: Path) -> tuple[Path, ...]:
     except OSError:
         return ()
     for descriptor in descriptors:
-        try:
-            target = descriptor.readlink()
-        except OSError:
+        text = read_link_text(descriptor)
+        if text is None:
             continue
-        text = str(target)
-        # 中文注释：在 Windows 上按 /proc 语义读取（测试与容器）时，readlink 可能返回
-        # 带 \\?\ 前缀的扩展路径，去掉前缀才能和会话目录比较。
-        if text.startswith("\\\\?\\"):
-            text = text[4:]
         if text.startswith(("socket:", "pipe:", "anon_inode:")):
             continue
         if text.endswith(" (deleted)"):

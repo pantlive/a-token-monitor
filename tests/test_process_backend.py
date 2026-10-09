@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from _platform_support import requires_symlinks
+from _platform_support import posix_only, requires_symlinks
 from a_token_monitor import process_backend
 from a_token_monitor.agents import scan_running_agents
 
@@ -32,6 +32,28 @@ def _lsof_output(files: dict[int, list[str]], cwds: dict[int, str]) -> str:
         for index, path in enumerate(files.get(pid, ()), start=3):
             lines.extend([f"f{index}", f"n{path}"])
     return "\n".join(lines) + "\n"
+
+
+class ReadLinkTextTests(unittest.TestCase):
+    """readlink 结果去掉 Windows 扩展路径前缀，才能和会话目录比较。"""
+
+    def _read(self, target: str) -> str | None:
+        with mock.patch.object(Path, "readlink", return_value=Path(target)):
+            return process_backend.read_link_text(Path("fd") / "3")
+
+    def test_strips_extended_prefix(self) -> None:
+        self.assertEqual(self._read("\\\\?\\C:\\work\\a.jsonl"), str(Path("C:\\work\\a.jsonl")))
+
+    def test_strips_extended_unc_prefix(self) -> None:
+        self.assertEqual(
+            self._read("\\\\?\\UNC\\server\\share\\a.jsonl"),
+            str(Path("\\\\server\\share\\a.jsonl")),
+        )
+
+    def test_keeps_plain_targets_and_reports_missing_links(self) -> None:
+        self.assertEqual(self._read("socket:[123]"), "socket:[123]")
+        with mock.patch.object(Path, "readlink", side_effect=OSError):
+            self.assertIsNone(process_backend.read_link_text(Path("fd") / "3"))
 
 
 class BackendSelectionTests(unittest.TestCase):
@@ -109,6 +131,8 @@ class MacosProcessTests(unittest.TestCase):
         self.assertTrue(processes[501].start_token.startswith("macos:"))
         self.assertTrue(any(call[0] == "ps" for call in calls))
 
+    # 中文注释：模拟 macOS 的 lsof 输出，路径必须是 POSIX 写法，Windows 临时目录不适用。
+    @posix_only
     def test_scan_agents_uses_lsof_for_cwd_and_open_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -174,6 +198,8 @@ class MacosProcessTests(unittest.TestCase):
         self.assertEqual(first, second)  # 命中缓存，不再 fork
         self.assertGreater(third, second)  # 清缓存后重新查询
 
+    # 中文注释：模拟 macOS 的 lsof 输出，路径必须是 POSIX 写法，Windows 临时目录不适用。
+    @posix_only
     def test_parse_lsof_skips_devices_and_sockets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -240,6 +266,8 @@ class ProcBackendTests(unittest.TestCase):
         (directory / "cwd").symlink_to(session.parent)
         (directory / "fd" / "3").symlink_to(session)
 
+    # 中文注释：模拟 macOS 的 lsof 输出，路径必须是 POSIX 写法，Windows 临时目录不适用。
+    @posix_only
     def test_agents_scan_dispatches_to_macos_backend(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

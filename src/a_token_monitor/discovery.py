@@ -215,11 +215,11 @@ class ProcessScanner:
     def _read_link(path: Path, strip_deleted: bool = False) -> Path | None:
         """读取 proc 符号链接，不跟随不存在的目标。"""
 
-        try:
-            target = path.readlink()
-        except OSError:
+        from .process_backend import read_link_text
+
+        target_text = read_link_text(path)
+        if target_text is None:
             return None
-        target_text = str(target)
         if strip_deleted and target_text.endswith(" (deleted)"):
             target_text = target_text[: -len(" (deleted)")]
         target_path = Path(target_text)

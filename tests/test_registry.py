@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from a_token_monitor.multi_models import (
@@ -372,7 +373,7 @@ class RetentionCleanupTests(unittest.TestCase):
             expired = registry.count_finished_sessions_before(100)
             deleted = registry.delete_finished_sessions_before(100)
             remaining = registry.count_sessions()
-            with sqlite3.connect(registry.db_path) as connection:
+            with closing(sqlite3.connect(registry.db_path)) as connection:
                 orphan_attempts = connection.execute(
                     "SELECT COUNT(*) FROM resume_attempts WHERE thread_id = ?",
                     ("thread-old",),

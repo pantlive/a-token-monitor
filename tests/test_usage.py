@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -2270,9 +2271,10 @@ class UsageSearchAggregationTests(unittest.TestCase):
             connection.close()
             reopened = _UsageIndexStore(index)
             pending = reopened.has_pending_long_context()
-            flags = sqlite3.connect(index).execute(
-                "SELECT long_context FROM usage_delta ORDER BY rowid"
-            ).fetchall()
+            with closing(sqlite3.connect(index)) as connection:
+                flags = connection.execute(
+                    "SELECT long_context FROM usage_delta ORDER BY rowid"
+                ).fetchall()
 
         self.assertFalse(pending)
         # 第一条 100k（短）、第二条增量 600k（长）、第三条未定价模型（按短路处理）
@@ -2415,9 +2417,10 @@ class IndexRetentionTests(unittest.TestCase):
             expired = store.count_deltas_before(50.0)
             deleted = store.delete_deltas_before(50.0)
             total_after = store.count_deltas()
-            state_rows = sqlite3.connect(store.path).execute(
-                "SELECT COUNT(*) FROM usage_file_state"
-            ).fetchone()[0]
+            with closing(sqlite3.connect(store.path)) as connection:
+                state_rows = connection.execute(
+                    "SELECT COUNT(*) FROM usage_file_state"
+                ).fetchone()[0]
             store.close()
 
         self.assertEqual(total_before, 3)
@@ -2456,7 +2459,7 @@ class LongContextRulesTests(unittest.TestCase):
                 "reasoning_output_tokens": 0,
                 "total_tokens": 151_000,
             }
-            with sqlite3.connect(index_path) as connection:
+            with closing(sqlite3.connect(index_path)) as connection, connection:
                 # 中文注释：模拟旧版本按 272K 统一阈值写下的标记，以及旧的规则版本。
                 connection.execute(
                     "INSERT INTO usage_delta(path, kind, timestamp, model, usage_json, "
@@ -2467,7 +2470,7 @@ class LongContextRulesTests(unittest.TestCase):
                     "UPDATE usage_meta SET value = '1' WHERE key = 'long_context_rules'"
                 )
             _UsageIndexStore(index_path)
-            with sqlite3.connect(index_path) as connection:
+            with closing(sqlite3.connect(index_path)) as connection:
                 flag = connection.execute(
                     "SELECT long_context FROM usage_delta WHERE path = 'a.jsonl'"
                 ).fetchone()[0]

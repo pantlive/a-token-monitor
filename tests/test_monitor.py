@@ -106,10 +106,12 @@ class _FakeResumeProcess:
 def _write_session(path: Path, session_id: str, event: str = "task_started") -> None:
     """写入最小可解析的 Codex session JSONL。"""
 
+    # 中文注释：cwd 用真实存在的目录；写死 /tmp 在 Windows 上不存在，resume 会失败。
+    cwd = json.dumps(str(path.parent))
     path.write_text(
         '{"type":"session_meta","payload":{'
         f'"session_id":"{session_id}","id":"{session_id}",'
-        '"cwd":"/tmp","source":"cli"}}\n'
+        f'"cwd":{cwd},"source":"cli"}}}}\n'
         f'{{"type":"{event}"}}\n',
         encoding="utf-8",
     )

@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from _platform_support import posix_only
 from a_token_monitor import process_backend
 from a_token_monitor.agents import RunningAgent, scan_running_agents
 from a_token_monitor.process_backend import ObservedConnection, ObservedProcess
@@ -350,6 +351,7 @@ class WindowsConnectionParsingTests(unittest.TestCase):
 class ProcessAliveTests(unittest.TestCase):
     """验证存活探测不会在 Windows 上误杀进程。"""
 
+    @posix_only
     def test_posix_path_uses_zero_signal(self) -> None:
         self.assertTrue(process_backend.process_alive(1))
         self.assertFalse(process_backend.process_alive(0))
@@ -399,7 +401,12 @@ class ProcessAliveTests(unittest.TestCase):
         with (
             mock.patch.object(sys, "platform", "win32"),
             mock.patch.object(process_backend, "_kernel32", return_value=kernel32),
-            mock.patch.object(process_backend, "_ERROR_ACCESS_DENIED", 0),
+            # 中文注释：真实 Windows 上 get_last_error 存在并返回系统值，这里固定成拒绝访问。
+            mock.patch(
+                "ctypes.get_last_error",
+                return_value=process_backend._ERROR_ACCESS_DENIED,
+                create=True,
+            ),
         ):
             alive = process_backend.process_alive(4)
 

@@ -55,14 +55,16 @@ class DiscoveryTests(unittest.TestCase):
     def test_does_not_consume_partial_last_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             jsonl_file = Path(temporary_directory) / "session.jsonl"
+            # 中文注释：断言按字节偏移，newline="" 防止 Windows 把 \n 写成 \r\n。
             jsonl_file.write_text(
                 '{"type":"thread.started","thread_id":"session-2"}\n'
                 '{"type":"turn.started"}',
                 encoding="utf-8",
+                newline="",
             )
             reader = JsonlSessionReader()
             first = reader.read(jsonl_file)
-            with jsonl_file.open("a", encoding="utf-8") as handle:
+            with jsonl_file.open("a", encoding="utf-8", newline="") as handle:
                 handle.write("\n")
             second = reader.read(jsonl_file, offset=first.next_offset)
 

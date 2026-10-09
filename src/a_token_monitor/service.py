@@ -1103,7 +1103,10 @@ class TaskSchedulerServiceManager:
                     handle.seek(position)
                     chunk = handle.read()
                     position = handle.tell()
-                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                # 中文注释：Windows 日志是 \r\n 换行；与上面按文本模式打印的尾部保持一致，
+                # 否则控制台的文本模式 stdout 会再补一个 \r。
+                text = chunk.decode("utf-8", errors="replace").replace("\r\n", "\n")
+                sys.stdout.write(text)
                 sys.stdout.flush()
         except KeyboardInterrupt:
             # 中文注释：用户只是在退出日志跟踪，计划任务本身不受影响。

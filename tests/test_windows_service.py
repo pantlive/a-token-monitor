@@ -505,7 +505,8 @@ class TaskSchedulerServiceTests(unittest.TestCase):
     def test_current_uid_tolerates_missing_getuid(self) -> None:
         """没有 os.getuid 的 Windows 上调用也不能抛 AttributeError。"""
 
-        with patch("a_token_monitor.service.os.getuid", None):
+        # 中文注释：Windows 的 os 本来就没有 getuid，create=True 让两种平台都能打补丁。
+        with patch("a_token_monitor.service.os.getuid", None, create=True):
             self.assertEqual(_current_uid(), 0)
 
     def test_create_service_manager_selects_platform(self) -> None:

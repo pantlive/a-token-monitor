@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from a_token_monitor.alerts import TrafficAlertStore
@@ -68,7 +69,7 @@ def _alert(observed_at: float, message: str) -> TrafficAlert:
 def _insert_usage_rows(db_path: Path, timestamps: list[float]) -> None:
     """直接写入 usage_delta 行,并保证 usage_file_state 有一行检查点。"""
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         for index, timestamp in enumerate(timestamps):
             connection.execute(
                 "INSERT INTO usage_delta(path, kind, timestamp, model, usage_json,"
@@ -349,7 +350,7 @@ class HistoryDataManagerTests(unittest.TestCase):
 
     @staticmethod
     def _file_state_rows(usage_path: Path) -> int:
-        with sqlite3.connect(usage_path) as connection:
+        with closing(sqlite3.connect(usage_path)) as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM usage_file_state"
             ).fetchone()
