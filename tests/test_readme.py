@@ -1,6 +1,6 @@
 """中英双份 README 的一致性守护。
 
-中文 ``README.md`` 与英文 ``README.en.md`` 必须同时存在、互相链接，并且结构一一对应：
+英文 ``README.md`` 与中文 ``README.zh-CN.md`` 必须同时存在、互相链接，并且结构一一对应：
 章节数量、代码块数量一致，命令行示例完全相同，英文版除语言切换链接外不出现中文。
 任何一边新增章节、改动命令却忘记同步另一边时，这里会直接失败。
 """
@@ -12,8 +12,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CHINESE_README = ROOT / "README.md"
-ENGLISH_README = ROOT / "README.en.md"
+CHINESE_README = ROOT / "README.zh-CN.md"
+ENGLISH_README = ROOT / "README.md"
 
 # 英文版里唯一允许出现的中文：语言切换链接的标签。
 ENGLISH_ALLOWED_CJK = ("中文",)
@@ -87,12 +87,12 @@ class ReadmeBilingualTest(unittest.TestCase):
         self.english = ENGLISH_README.read_text(encoding="utf-8")
 
     def test_both_readmes_exist(self):
-        self.assertTrue(CHINESE_README.is_file(), "缺少中文 README.md")
-        self.assertTrue(ENGLISH_README.is_file(), "缺少英文 README.en.md")
+        self.assertTrue(CHINESE_README.is_file(), "缺少中文 README.zh-CN.md")
+        self.assertTrue(ENGLISH_README.is_file(), "缺少英文 README.md")
 
     def test_readmes_link_to_each_other(self):
-        self.assertIn("[English](README.en.md)", self.chinese)
-        self.assertIn("[中文](README.md)", self.english)
+        self.assertIn("[English](README.md)", self.chinese)
+        self.assertIn("[中文](README.zh-CN.md)", self.english)
 
     def test_section_structure_matches(self):
         for level in (2, 3):
@@ -106,7 +106,7 @@ class ReadmeBilingualTest(unittest.TestCase):
             )
 
     def test_code_fences_are_balanced_and_equal(self):
-        for name, text in (("README.md", self.chinese), ("README.en.md", self.english)):
+        for name, text in (("README.zh-CN.md", self.chinese), ("README.md", self.english)):
             self.assertEqual(text.count("```") % 2, 0, f"{name} 里有未闭合的代码块")
         self.assertEqual(
             self.chinese.count("```"),
