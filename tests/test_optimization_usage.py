@@ -93,7 +93,13 @@ class CommandCodeUsageTests(unittest.TestCase):
 
             resumed = UsageAggregator(commandcode_homes=(home,), cache_path=cache)
             try:
-                with patch("a_token_monitor.usage._parse_usage_chunk") as parse:
+                # 中文注释：readers 与 parsing 各自引用 _parse_usage_chunk，
+                # 两处共用同一个 mock 才能断言整个索引流程都没有重新解析。
+                with patch(
+                    "a_token_monitor.usage.readers._parse_usage_chunk"
+                ) as parse, patch(
+                    "a_token_monitor.usage.parsing._parse_usage_chunk", new=parse
+                ):
                     resumed.refresh_index({}, now=now)
                     parse.assert_not_called()
                 partial = json.dumps(_message("request-3", now - 6))
@@ -177,8 +183,11 @@ class IncrementalRollupTests(unittest.TestCase):
         )
         aggregator = UsageAggregator()
         try:
+            # 中文注释：_build_period / _build_daily 经 aggregates 子模块的
+            # _UsageAggregate 调用 _estimate_usage，所以在那里统计调用次数。
             with patch(
-                "a_token_monitor.usage._estimate_usage", wraps=_estimate_usage
+                "a_token_monitor.usage.aggregates._estimate_usage",
+                wraps=_estimate_usage,
             ) as estimate:
                 first = aggregator._build_period(
                     "test", "test", "seven_days", now, sources, {path: deltas}, {}
