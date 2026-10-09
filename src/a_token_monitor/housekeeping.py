@@ -1560,8 +1560,8 @@ def _report_progress(
                 "total_bytes": total_bytes,
             }
         )
-    except Exception:  # noqa: BLE001 - 进度回调只是展示用途
-        return
+    except Exception:  # noqa: BLE001 - 进度回调只是展示用途，失败不影响归档本身
+        logging.getLogger(__name__).debug("归档进度回调失败，已忽略", exc_info=True)
 
 
 def _missing_members(archive: Path, files: Sequence[SessionFile]) -> set[str]:

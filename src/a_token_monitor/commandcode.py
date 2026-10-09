@@ -15,6 +15,7 @@ API Key 只用于鉴权请求，不会出现在返回值、日志或异常消息
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -29,9 +30,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .agents import scan_running_agents
+from .health import sanitize_error
 from .process_backend import process_root
 from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
 from .quota import QuotaSnapshot, QuotaWindow
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # 官方 CLI：dist/cli.mjs 中 Vt.prod / Gy 头常量 / rr 套餐表 / WindowLimitMeter 标签。
@@ -228,8 +232,16 @@ def read_commandcode_quota(
             moment,
             http_get_json=http_get_json or _http_get_json,
         )
-    except Exception:
-        # 防御：配额读取是可选增强，任何意外都不能让监控崩溃。
+    except Exception as error:  # noqa: BLE001 - 额度是可选增强，任何意外都不能让监控崩溃
+        # 中文注释：预期内的网络、锁、凭据问题在 _fetch 内部已返回 None；走到这里
+        # 说明是解析或代码缺陷，必须留痕，否则额度会无声消失。正文只记异常类型和
+        # 脱敏后的信息，完整堆栈放在 debug 级别，避免把凭据相关内容写进常规日志。
+        _LOGGER.warning(
+            "Command Code 额度读取出现意外错误，本轮按无额度处理: %s: %s",
+            type(error).__name__,
+            sanitize_error(error),
+        )
+        _LOGGER.debug("Command Code 额度读取异常堆栈", exc_info=True)
         snapshot = None
     if use_cache:
         with _quota_cache_lock:

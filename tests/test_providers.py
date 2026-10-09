@@ -10,8 +10,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from a_token_monitor import agents, alert_context, housekeeping
+from a_token_monitor import agents, alert_context, claude, commandcode, housekeeping, kimi
 from a_token_monitor.cli import build_parser
 from a_token_monitor.providers import (
     PROVIDER_SPECS,
@@ -130,6 +131,27 @@ class ProviderHomesTests(unittest.TestCase):
                 self.assertIn(spec.homes_field, payload)
         self.assertEqual(payload["qwen_homes"], [str(root / ".qwen")])
         self.assertEqual(loaded.provider_homes["qwen"], (root / ".qwen",))
+
+
+class QuotaReaderErrorTests(unittest.TestCase):
+    """额度读取遇到意外错误时按无额度处理，但必须留下 warning 日志。"""
+
+    def test_unexpected_quota_errors_are_logged_not_swallowed(self) -> None:
+        cases = (
+            (claude, "_fetch_claude_quota", claude.read_claude_quota),
+            (kimi, "_fetch_kimi_quota", kimi.read_kimi_quota),
+            (commandcode, "_fetch_commandcode_quota", commandcode.read_commandcode_quota),
+        )
+        for module, fetch_name, reader in cases:
+            with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as temporary:
+                with (
+                    mock.patch.object(module, fetch_name, side_effect=KeyError("windows")),
+                    self.assertLogs(module.__name__, level="WARNING") as captured,
+                ):
+                    # 传入 http_get_json 会绕过模块级缓存，每次都真正调用 _fetch。
+                    result = reader(Path(temporary), http_get_json=mock.Mock())
+                self.assertIsNone(result)
+                self.assertIn("KeyError", captured.output[0])
 
 
 if __name__ == "__main__":
