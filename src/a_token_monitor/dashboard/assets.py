@@ -75,7 +75,7 @@ _LANGUAGE_TOGGLE_HTML = _asset("language-toggle.html")
 _THEME_TOGGLE_HTML = _asset("theme-toggle.html")
 
 
-# 中文注释：顶栏右侧的作者 GitHub 链接，两页共用。
+# 中文注释：顶栏右侧的项目 GitHub 仓库链接，两页共用。
 _GITHUB_LINK_HTML = _asset("github-link.html")
 
 

@@ -371,7 +371,7 @@ EN: dict[str, str] = {
     '分析对话数 ·': 'Conversations ·',
     '切换主题，当前': 'Switch theme; currently ',
     '切换到英文界面': 'Switch to the English interface',
-    '作者 GitHub 主页': "Author's GitHub profile",
+    '项目 GitHub 仓库': 'Project GitHub repository',
     '历史索引进行中': 'Historical indexing in progress',
     '只显示已读告警': 'Only show read alerts',
     '只显示未读告警': 'Only show unread alerts',
