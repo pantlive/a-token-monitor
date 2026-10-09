@@ -16,6 +16,7 @@ from a_token_monitor.alert_context import _extract_codex, _extract_kimi, _excerp
 from a_token_monitor.alerts import StoredAlert
 from a_token_monitor.dashboard import DashboardConfig, DashboardServer
 from a_token_monitor.housekeeping import AuditTarget, HousekeepingMonitor
+from a_token_monitor.local_time import to_local
 from a_token_monitor.multi_account import MultiAccountMonitor
 from a_token_monitor.usage import UsageAggregator
 
@@ -225,7 +226,7 @@ class DashboardReloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             now = time.time()
-            stamp = datetime.fromtimestamp(now).strftime("%Y-%m-%dT%H-%M-%S")
+            stamp = to_local(now).strftime("%Y-%m-%dT%H-%M-%S")
             session = (
                 root
                 / "sessions"

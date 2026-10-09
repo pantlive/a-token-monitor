@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 from datetime import datetime
 
 from a_token_monitor.events import parse_event_line
+from a_token_monitor.local_time import to_local
 
 
 class EventParserTests(unittest.TestCase):
@@ -73,7 +75,7 @@ class EventParserTests(unittest.TestCase):
         self.assertEqual(observation.reset_at, 8_800.0)
 
     def test_detects_usage_limit_inside_task_complete(self) -> None:
-        local = datetime.now().astimezone().tzinfo
+        local = to_local(time.time()).tzinfo
         event_time = datetime(2026, 8, 28, 17, 28, tzinfo=local)
         expected = datetime(2026, 8, 28, 19, 3, tzinfo=local)
         line = json.dumps(

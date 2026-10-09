@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
+from ..local_time import local_day_key
 from .pricing import (
     _is_long_context,
     _lookup_pricing,
@@ -39,6 +41,34 @@ from .search import (
 _USAGE_INDEX_VERSION = 6
 
 
+
+# 中文注释：现行时区的 UTC 偏移都是 15 分钟的整数倍，本地零点必然落在 900 秒
+# 的整数倍上，所以同一个 900 秒桶里的时间戳一定属于同一个本地自然日。
+_LOCAL_DAY_BUCKET_SECONDS = 900
+
+
+def _sql_local_day_function() -> Callable[[object], str | None]:
+    """SQLite 回调：把时间戳换算为本地自然日，空值原样返回。
+
+    逐行调 Python 比 SQLite 内置 'localtime' 慢，按 900 秒分桶缓存后，一次检索
+    只需换算几千个桶。缓存跟随单个短连接，不会跨越时区变化长期存活。
+    """
+
+    cache: dict[int, str] = {}
+
+    def local_day(timestamp: object) -> str | None:
+        if timestamp is None:
+            return None
+        bucket = math.floor(float(timestamp) / _LOCAL_DAY_BUCKET_SECONDS)
+        key = cache.get(bucket)
+        if key is None:
+            key = local_day_key(bucket * _LOCAL_DAY_BUCKET_SECONDS)
+            cache[bucket] = key
+        return key
+
+    return local_day
+
+
 class _UsageIndexStore:
     """把已解析的偏移和 token 增量保存到轻量 SQLite 索引。"""
 
@@ -64,6 +94,11 @@ class _UsageIndexStore:
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute("PRAGMA busy_timeout=1000")
+        # 中文注释：SQLite 的 'localtime' 只认 C 库时区，测试注入的时区和 Python
+        # 侧的按天汇总会对不上；按天分组统一走 local_time，保证两边日界线一致。
+        connection.create_function(
+            "usage_local_day", 1, _sql_local_day_function(), deterministic=True
+        )
         return connection
 
     def _initialize(self) -> None:
@@ -551,7 +586,7 @@ class _UsageIndexStore:
                 where = " WHERE " + " AND ".join(clauses)
                 connection.row_factory = sqlite3.Row
                 statement = (
-                    "SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch', 'localtime') "
+                    "SELECT usage_local_day(timestamp) "
                     "AS day, path, model, COALESCE(long_context, 0) AS long_context, "
                     "accounts.account_key AS account_key, "
                     "accounts.account_name AS account_name, "

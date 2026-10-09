@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+from ..local_time import local_day_key, local_day_start
 
 
 def _local_day(timestamp: float) -> str:
     """把时间戳格式化为本地自然日，与用量趋势的日期口径一致。"""
 
-    return (
-        datetime.fromtimestamp(float(timestamp))
-        .astimezone()
-        .strftime("%Y-%m-%d")
-    )
+    return local_day_key(timestamp)
 
 
 def calendar_day_start(now: float | None = None) -> float:
@@ -27,14 +24,7 @@ def _period_start(period_kind: str, now: float) -> float:
     """计算本地时区的今天或滚动时间窗口起点。"""
 
     if period_kind == "calendar_day":
-        local_now = datetime.fromtimestamp(now).astimezone()
-        local_start = local_now.replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        return local_start.timestamp()
+        return local_day_start(now)
     days = {
         "seven_days": 7,
         "thirty_days": 30,

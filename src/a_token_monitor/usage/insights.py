@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ..local_time import to_local
 from ..kimi import (
     kimi_wire_session_id,
 )
@@ -77,7 +78,7 @@ def _conversation_metrics(
                 * (_CACHE_WRITE_MULTIPLIER - 1.0)
                 / 1_000_000
             )
-        moment = datetime.fromtimestamp(delta.timestamp).astimezone()
+        moment = to_local(delta.timestamp)
         hour = moment.hour
         hours[hour] = hours.get(hour, 0) + delta.usage.total_tokens
         day_key = moment.strftime("%Y-%m-%d")

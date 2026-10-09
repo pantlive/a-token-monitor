@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
+from .local_time import to_local
 from .events import EventObservation, RateLimitWindow, parse_event_line
 from .models import JobState, JobStatus
 from .storage import StateError, StateStore
@@ -547,7 +548,7 @@ class CodexRunner:
 
         if epoch is None:
             return "未知"
-        return time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(epoch))
+        return to_local(epoch).strftime("%Y-%m-%d %H:%M:%S %z")
 
     @staticmethod
     def _new_job_id() -> str:

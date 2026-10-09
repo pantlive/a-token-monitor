@@ -25,6 +25,7 @@ from a_token_monitor.cli import (
     default_state_dir,
     main,
 )
+from a_token_monitor.local_time import to_local
 from a_token_monitor.retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
@@ -801,7 +802,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary_directory)
             state_dir = root / "state"
             codex = root / "codex"
-            started = datetime.fromtimestamp(moment - 60)
+            started = to_local(moment - 60)
             session = (
                 codex
                 / "sessions"

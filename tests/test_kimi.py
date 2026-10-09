@@ -24,6 +24,7 @@ from a_token_monitor.kimi import (
     read_kimi_quota,
     resolve_kimi_homes,
 )
+from a_token_monitor.local_time import local_day_key
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
@@ -225,9 +226,7 @@ class KimiUsageTests(unittest.TestCase):
 
         daily = state["daily"]
         self.assertEqual(len(daily), 30)
-        expected_today = (
-            datetime.fromtimestamp(1789708700.0).astimezone().strftime("%Y-%m-%d")
-        )
+        expected_today = local_day_key(1789708700.0)
         self.assertEqual(daily[-1]["date"], expected_today)
         self.assertEqual(daily[-1]["total_tokens"], 1100)
         self.assertFalse(daily[-1]["has_unpriced"])

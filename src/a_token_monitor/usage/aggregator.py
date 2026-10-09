@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -35,6 +35,7 @@ from ..local_agents import (
     resolve_qwen_homes,
 )
 from ..registry import MultiSessionRegistry
+from ..local_time import local_day_key, local_day_start, to_local
 from .aggregates import (
     _ConversationMetrics,
     _FileRollup,
@@ -730,13 +731,11 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
     ) -> list[dict[str, Any]]:
         """按本地自然日汇总近 30 天全部账号的 token 与 API 等价金额。"""
 
-        local_now = datetime.fromtimestamp(now).astimezone()
-        today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today = to_local(now).date()
         days: list[dict[str, Any]] = []
         index: dict[str, dict[str, Any]] = {}
         for offset in range(self._DAILY_TREND_DAYS - 1, -1, -1):
-            day_start = today_start - timedelta(days=offset)
-            key = day_start.strftime("%Y-%m-%d")
+            key = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
             entry = {
                 "date": key,
                 "total_tokens": 0,
@@ -745,14 +744,10 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
             }
             days.append(entry)
             index[key] = entry
-        first_start = (today_start - timedelta(days=self._DAILY_TREND_DAYS - 1)).timestamp()
+        first_start = local_day_start(now, days_ago=self._DAILY_TREND_DAYS - 1)
         for path, deltas in file_deltas.items():
             for delta, estimate in self._rollup_entries(path, deltas, first_start, now):
-                key = (
-                    datetime.fromtimestamp(delta.timestamp)
-                    .astimezone()
-                    .strftime("%Y-%m-%d")
-                )
+                key = local_day_key(delta.timestamp)
                 entry = index.get(key)
                 if entry is None:
                     continue

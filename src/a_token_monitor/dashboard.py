@@ -10,13 +10,14 @@ import struct
 import time
 import zlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from .local_time import local_date_end, local_date_start
 from .accounts import read_codex_plan_type
 from .alerts import (
     MAX_QUERY_LIMIT,
@@ -5561,7 +5562,7 @@ def _day_start(value: str | None) -> float | None:
     """把 YYYY-MM-DD 解析为本地当天零点时间戳。"""
 
     parsed = _parse_day(value)
-    return parsed.timestamp() if parsed is not None else None
+    return local_date_start(parsed) if parsed is not None else None
 
 
 def _day_end(value: str | None) -> float | None:
@@ -5570,16 +5571,16 @@ def _day_end(value: str | None) -> float | None:
     parsed = _parse_day(value)
     if parsed is None:
         return None
-    return parsed.timestamp() + 86400.0 - 1e-6
+    return local_date_end(parsed)
 
 
-def _parse_day(value: str | None) -> datetime | None:
+def _parse_day(value: str | None) -> date | None:
     """解析日期参数，非法值按未提供处理。"""
 
     if not value:
         return None
     try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d")
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
     except ValueError:
         return None
 

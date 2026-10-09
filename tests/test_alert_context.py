@@ -23,6 +23,7 @@ from a_token_monitor.alert_context import (
     load_alert_context,
 )
 from a_token_monitor.alerts import StoredAlert
+from a_token_monitor.local_time import to_local
 
 
 def _visible_alert_context(alert: StoredAlert, roots: AlertContextRoots) -> dict[str, object]:
@@ -72,8 +73,8 @@ def _write_codex_session(
     started: float = 1_000_000.0,
 ) -> Path:
     # 中文注释：rollout 文件名内嵌会话开始的本地时间，候选过滤会用到。
-    name_stamp = datetime.fromtimestamp(started).strftime("%Y-%m-%dT%H-%M-%S")
-    day = datetime.fromtimestamp(started)
+    name_stamp = to_local(started).strftime("%Y-%m-%dT%H-%M-%S")
+    day = to_local(started)
     path = (
         root
         / day.strftime("%Y")

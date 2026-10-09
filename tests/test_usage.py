@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from a_token_monitor.local_time import local_day_key
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.usage import (
     calendar_day_start,
@@ -1635,9 +1636,7 @@ class UsageSearchTests(unittest.TestCase):
         self.assertEqual(
             [row["date"] for row in work_rows],
             [
-                datetime.fromtimestamp(
-                    _timestamp("2026-08-27T02:00:00Z")
-                ).astimezone().strftime("%Y-%m-%d")
+                local_day_key(_timestamp("2026-08-27T02:00:00Z"))
             ]
             * 2,
         )

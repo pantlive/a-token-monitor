@@ -10,7 +10,10 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import Any, Iterator, Mapping
+
+from .local_time import local_naive_to_timestamp, to_local
 
 
 _FAILURE_EVENT_TYPES = {
@@ -415,11 +418,13 @@ def _extract_clock_reset(text: str, now: float) -> float | None:
         hour += 12
     elif ampm.startswith("a") and hour == 12:
         hour = 0
-    local = datetime.fromtimestamp(now).astimezone()
-    candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if candidate.timestamp() <= now:
-        candidate = candidate + timedelta(days=1)
-    return candidate.timestamp()
+    today = to_local(now).date()
+    candidate = local_naive_to_timestamp(datetime.combine(today, dt_time(hour, minute)))
+    if candidate <= now:
+        candidate = local_naive_to_timestamp(
+            datetime.combine(today + timedelta(days=1), dt_time(hour, minute))
+        )
+    return candidate
 
 
 def _extract_duration_reset(text: str, now: float) -> float | None:

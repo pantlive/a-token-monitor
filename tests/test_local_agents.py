@@ -7,7 +7,6 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +26,7 @@ from a_token_monitor.local_agents import (
     parse_chat_chunk,
     read_opencode_usage,
 )
+from a_token_monitor.local_time import to_local
 from a_token_monitor.multi_account import external_active_session_paths
 from a_token_monitor.scan_dirs import validate_directory
 from a_token_monitor.usage import UsageAggregator
@@ -483,7 +483,7 @@ class LocalAgentScanDirTests(unittest.TestCase):
 
 
 def _local_stamp(moment: float) -> str:
-    return datetime.fromtimestamp(moment).strftime("%Y-%m-%d %H:%M:%S")
+    return to_local(moment).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _agent_process(

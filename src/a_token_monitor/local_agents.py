@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 
+from .local_time import local_naive_to_timestamp
+
 
 _UNKNOWN_MODEL = "未知模型"
 _BLOB_LIMIT = 32 * 1024 * 1024
@@ -1126,7 +1128,7 @@ def _aider_from_line(
 
 def _aider_clock(text: str) -> float | None:
     try:
-        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timestamp()
+        return local_naive_to_timestamp(datetime.strptime(text, "%Y-%m-%d %H:%M:%S"))
     except ValueError:
         return None
 

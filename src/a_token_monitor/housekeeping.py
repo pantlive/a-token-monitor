@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .local_time import to_local
 from .claude import claude_session_id
 from .commandcode import read_commandcode_session_info
 from .dsh import read_dsh_projcache
@@ -1072,7 +1073,7 @@ class HousekeepingMonitor:
         """返回本次归档的文件名，避免同一秒内互相覆盖。"""
 
         assert self.archive_dir is not None
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+        stamp = to_local(now).strftime("%Y%m%d-%H%M%S")
         prefix = (
             f"{_ARCHIVE_PREFIX}-{name_hint}" if name_hint else _ARCHIVE_PREFIX
         )

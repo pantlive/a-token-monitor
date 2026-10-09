@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from .local_time import local_date_end, local_date_start, to_local
 from .accounts import CodexAccount, build_account_specs
 from .claude import (
     list_claude_active_sessions,
@@ -994,8 +995,7 @@ def _format_timestamp(value: float | None) -> str:
 
     if value is None:
         return "未知"
-    local_time = datetime.fromtimestamp(value).astimezone()
-    return local_time.isoformat(timespec="seconds")
+    return to_local(value).isoformat(timespec="seconds")
 
 
 def _show_status(store: StateStore, as_json: bool) -> int:
@@ -2050,7 +2050,7 @@ def _write_alert_context(
 def _format_alert_time(timestamp: float) -> str:
     """把 Unix 时间戳格式化成本地时间。"""
 
-    return datetime.fromtimestamp(float(timestamp)).strftime("%Y-%m-%d %H:%M:%S")
+    return to_local(float(timestamp)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _usage_search_bounds(args: argparse.Namespace) -> tuple[float | None, float | None]:
@@ -2072,9 +2072,10 @@ def _cli_day_start(value: str | None) -> float | None:
     if value is None:
         return None
     try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d").timestamp()
+        day = datetime.strptime(value.strip(), "%Y-%m-%d").date()
     except ValueError as error:
         raise ValueError(f"--from 需要 YYYY-MM-DD 格式: {value}") from error
+    return local_date_start(day)
 
 
 def _cli_day_end(value: str | None) -> float | None:
@@ -2082,8 +2083,9 @@ def _cli_day_end(value: str | None) -> float | None:
 
     if value is None:
         return None
-    start = _cli_day_start(value)
-    return None if start is None else start + 86400.0 - 1e-6
+    if _cli_day_start(value) is None:
+        return None
+    return local_date_end(datetime.strptime(value.strip(), "%Y-%m-%d").date())
 
 
 def _format_count(value: object) -> str:

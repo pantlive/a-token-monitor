@@ -23,6 +23,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .local_time import local_naive_to_timestamp
 from .alerts import StoredAlert
 from .alert_activity import describe_tool_activity, describe_user_text
 from .local_agents import (
@@ -366,7 +367,7 @@ def _codex_file_started(path: Path) -> float | None:
         naive = datetime(*[int(part) for part in match.groups()])
     except ValueError:
         return None
-    return naive.astimezone().timestamp()
+    return local_naive_to_timestamp(naive)
 
 
 def _codex_recent_files(
