@@ -30,6 +30,47 @@ configuration file. To keep it running after you close the terminal, install it 
 background service with `a-token-monitor service install --dashboard` (systemd, launchd
 or a Windows scheduled task).
 
+## Signature features
+
+### Multiple accounts from the same vendor, told apart
+
+Run a personal and a work subscription of the same agent side by side: pass one data
+directory per account (`--codex-home ~/.codex --codex-home ~/.codex-work`, and the same
+for `--claude-home`, `--kimi-home` and the rest, or add them in the settings page).
+Each account is identified by the ID in its own login data, gets its own card with its
+own quota windows and plan, and its sessions and token usage are counted separately.
+Two directories logged into the same account merge into one card, and after you switch
+accounts in a directory, earlier sessions stay with the account that ran them.
+
+![Two Codex subscriptions (Pro and Team) shown as separate cards next to Claude Code, Grok and Kimi](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/accounts-en.png)
+
+### Session disk analysis
+
+Agent data directories grow quietly: every session leaves a log, often megabytes each.
+The disk page shows how much space each agent and account uses, warns when a directory
+passes a threshold (5 GiB per directory, 10 GiB in total by default), and lists the
+sessions you can archive, sorted so the largest and longest-idle come first. Archive or
+clean up by project or one session at a time: archives are `tar.gz` files with a SHA-256
+manifest and can be restored, and running sessions or files touched in the last
+10 minutes are always skipped. `a-token-monitor disk` gives the same report in the
+terminal.
+
+![Disk and sessions: usage per directory, archiving by project and the archivable session list](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/disk-en.png)
+
+### Upload monitoring for agents
+
+Coding agents send your code to remote APIs, and it is worth knowing when one sends far
+more than usual. On Linux, outbound TCP bytes are counted per agent process (loopback
+excluded, contents never read), with a 15-second burst threshold and a 5-minute
+cumulative threshold. Alerts are kept in a searchable history, and each one can be
+linked to the local session that was running in that directory at the time, summarised
+as actions such as "pushed code" or "read a file". On macOS and Windows the panel lists
+agent processes and their connections without byte counts.
+
+![Traffic anomaly: one agent process over the 15-second threshold, flagged as an anomalous upload](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/traffic-en.png)
+
+![Alert history: persisted alerts with severity, process, working directory and a link to the session context](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/alerts-en.png)
+
 ## Why use it
 
 - **Stop guessing how much quota is left.** Codex, Claude Code, Grok, Kimi Code and
@@ -41,13 +82,6 @@ or a Windows scheduled task).
 - **Catch runaway sessions early.** A session counts as active only while a process has
   its file open. Sessions that run too many turns or carry too much context get a
   "start a new session" nudge.
-- **Know what an agent was uploading.** On Linux, outbound TCP bytes are counted per
-  agent process. An alert links back to the local session that was running at the time
-  and summarises it as actions such as "pushed code" or "read a file"; message text
-  stays hidden unless you opt in.
-- **Keep agent data directories tidy.** Archive old sessions per project into
-  `tar.gz` files with a SHA-256 manifest, and restore them later. Running sessions are
-  never touched.
 - **Install it and forget it.** Eleven agents, many accounts, zero runtime
   dependencies; Chinese and English UI, light and dark themes.
 
@@ -55,10 +89,6 @@ Amounts are API-equivalent estimates from each vendor's public price list; they 
 different meter from your subscription bill.
 
 ## A quick tour
-
-### Every subscription and quota window on one screen
-
-![Accounts and quotas: one card per subscription with 5-hour and weekly windows](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/accounts-en.png)
 
 ### Usage and API-equivalent cost
 

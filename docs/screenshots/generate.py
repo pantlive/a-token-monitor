@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 import tempfile
@@ -35,6 +36,7 @@ from a_token_monitor.alerts import TrafficAlertStore  # noqa: E402
 from a_token_monitor.claude import ClaudeAccount  # noqa: E402
 from a_token_monitor.dashboard import DashboardConfig, DashboardServer  # noqa: E402
 from a_token_monitor.grok import GrokAccount  # noqa: E402
+from a_token_monitor.housekeeping import AuditTarget, HousekeepingMonitor, default_sessions_root  # noqa: E402
 from a_token_monitor.kimi import KimiAccount  # noqa: E402
 from a_token_monitor.local_time import set_local_timezone  # noqa: E402
 from a_token_monitor.multi_models import (  # noqa: E402
@@ -80,11 +82,18 @@ def _working_hours(days: int) -> list[float]:
     return sorted(moments)
 
 
-def write_codex(home: Path) -> list[Path]:
+def _filler() -> dict:
+    """一条工具输出记录，让会话文件大小接近真实（几百 KB 到 1 MB 多）；用量解析会跳过它。"""
+
+    return {"type": "response_item", "payload": {"type": "function_call_output",
+                                                 "output": "." * RANDOM.randint(80_000, 1_500_000)}}
+
+
+def write_codex(home: Path, offset: int = 0) -> list[Path]:
     """合成 Codex rollout 日志（累计 token_count 事件）。"""
 
     paths = []
-    for index, start in enumerate(_working_hours(30)[::3]):
+    for index, start in enumerate(_working_hours(30)[offset::6]):
         started = datetime.fromtimestamp(start, tz=timezone.utc)
         folder = home / "sessions" / started.strftime("%Y/%m/%d")
         folder.mkdir(parents=True, exist_ok=True)
@@ -112,6 +121,7 @@ def write_codex(home: Path) -> list[Path]:
                 "type": "event_msg",
                 "payload": {"type": "token_count", "info": {"total_token_usage": dict(total)}},
             })
+        lines.append(_filler())
         path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
         paths.append(path)
     return paths
@@ -146,6 +156,8 @@ def write_claude(home: Path) -> None:
                     },
                 },
             })
+        lines.append({"type": "user", "sessionId": session_id, "cwd": project,
+                      "message": {"role": "user", "content": _filler()["payload"]["output"]}})
         (folder / f"{session_id}.jsonl").write_text(
             "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
         )
@@ -260,7 +272,7 @@ class DemoTraffic:
     def latest(self) -> TrafficSnapshot:
         processes = []
         for index, (product, command, cwd, upload) in enumerate((
-            ("codex", "codex", PROJECTS[0], 2_350_000),
+            ("codex", "codex", PROJECTS[0], 36 * 1024 * 1024),
             ("claude", "claude", PROJECTS[1], 860_000),
             ("kimi", "kimi", PROJECTS[2], 120_000),
         )):
@@ -269,7 +281,8 @@ class DemoTraffic:
                 product=product, pid=pid, start_token=str(pid), command=command, cwd=cwd,
                 pids=(pid,), external_upload_delta=upload, loopback_upload_delta=0,
                 observed_external_bytes=upload * 40, burst_bytes=upload, window_bytes=upload * 9,
-                upload_bps=upload / 15, alert_level=None,
+                upload_bps=upload / 15,
+                alert_level="danger" if upload > TrafficThresholds().burst_danger_bytes else None,
                 connections=(ConnectionTraffic("203.0.113.10:443", upload * 40, upload * 120,
                                                upload, loopback=False),),
             ))
@@ -280,10 +293,16 @@ class DemoTraffic:
 
 
 def build(root: Path) -> DashboardServer:
-    homes = {name: root / f".{name}" for name in ("codex", "claude", "grok", "kimi")}
+    homes = {name: root / f".{name}" for name in ("codex", "codex-work", "claude", "grok", "kimi")}
     for home in homes.values():
         home.mkdir(parents=True)
-    codex_paths = write_codex(homes["codex"])
+    # 中文注释：同一厂商两个订阅（个人 Pro 与工作 Team），各自一个 CODEX_HOME。
+    codex_paths = write_codex(homes["codex"], offset=0)
+    work_paths = write_codex(homes["codex-work"], offset=3)
+    # 中文注释：让一部分旧会话的修改时间落在一两个月前，磁盘页才有可归档的会话。
+    for path in (codex_paths + work_paths)[: len(codex_paths) // 2]:
+        stamp = NOW - RANDOM.randint(40, 120) * 86_400
+        os.utime(path, (stamp, stamp))
     write_claude(homes["claude"])
     write_grok(homes["grok"])
     (homes["kimi"] / "sessions").mkdir()
@@ -292,8 +311,15 @@ def build(root: Path) -> DashboardServer:
     registry = MultiSessionRegistry(state / "codex")
     registry.save_quota(_quota("pro", 23.0, 47.0, "app-server"))
     registry.upsert_session(_session("codex", PROJECTS[0], codex_paths[-1], NOW - 1_800))
-    metadata = {"codex": {"account_id": "alice@example.com", "profile_name": "codex",
-                          "codex_home": str(homes["codex"]), "plan_type": "pro"}}
+    work_registry = MultiSessionRegistry(state / "codex-work")
+    work_registry.save_quota(_quota("team", 71.0, 58.0, "app-server"))
+    registries = {"codex": registry, "codex-work": work_registry}
+    metadata = {
+        "codex": {"account_id": "alice@example.com", "profile_name": "codex",
+                  "codex_home": str(homes["codex"]), "plan_type": "pro"},
+        "codex-work": {"account_id": "alice@company.example", "profile_name": "codex-work",
+                       "codex_home": str(homes["codex-work"]), "plan_type": "team"},
+    }
 
     aggregator = UsageAggregator(
         cache_path=state / "usage-index.sqlite3",
@@ -301,13 +327,24 @@ def build(root: Path) -> DashboardServer:
         homes={"claude": (homes["claude"],), "grok": (homes["grok"],)},
     )
     for _ in range(20):
-        snapshot = aggregator.refresh_index({"codex": registry}, metadata)
+        snapshot = aggregator.refresh_index(registries, metadata)
         if (snapshot.get("indexing") or {}).get("complete"):
             break
     alerts = TrafficAlertStore(state)
     demo_alerts(alerts)
+    targets = [
+        AuditTarget(f"Codex ({name})", "codex", homes[name], sessions_root=homes[name] / "sessions")
+        for name in ("codex", "codex-work")
+    ] + [
+        AuditTarget("Claude Code", "claude", homes["claude"],
+                    sessions_root=default_sessions_root("claude", homes["claude"])),
+        AuditTarget("Grok", "grok", homes["grok"],
+                    sessions_root=default_sessions_root("grok", homes["grok"])),
+    ]
+    housekeeping = HousekeepingMonitor(targets, archive_dir=state / "archives",
+                                       active_paths=lambda: set())
     server = DashboardServer(
-        registries={"codex": registry},
+        registries=registries,
         account_metadata=metadata,
         config=DashboardConfig(port=0, budget_usd=200.0),
         usage_aggregator=aggregator,
@@ -315,6 +352,7 @@ def build(root: Path) -> DashboardServer:
         | {"claude": (homes["claude"],), "grok": (homes["grok"],), "kimi": (homes["kimi"],)},
         alert_store=alerts,
         traffic_monitor=DemoTraffic(),  # type: ignore[arg-type]
+        housekeeping=housekeeping,
     )
     return server
 
@@ -330,9 +368,18 @@ SHOTS = (
     ("accounts", "accounts"),
     ("usage", "usage"),
     ("insights", "insights"),
+    ("traffic", "traffic"),
+    ("alerts", "alert-history"),
+    ("disk", "housekeeping"),
 )
 # 中文注释：用量与习惯分析按需加载，截图前先点开。
-LOAD_BUTTONS = ("#usage-load-button", "#insights-load-button")
+LOAD_BUTTONS = (
+    "#usage-load-button",
+    "#insights-load-button",
+    # 中文注释：告警历史与磁盘区块默认折叠，展开后才加载。
+    '[data-section-toggle="alert-history"]',
+    '[data-section-toggle="housekeeping"]',
+)
 
 
 def _browser_env(scratch: Path) -> dict[str, str] | None:
@@ -393,7 +440,7 @@ def capture(base_url: str, scratch: Path) -> None:
             # 中文注释：用 JS 直接触发按需加载，不会像真实点击那样把页面滚到按钮处；
             # 首屏的「今日金额」依赖用量加载，所以加载完再截首屏。
             for selector in LOAD_BUTTONS:
-                page.evaluate(f"document.querySelector('{selector}').click()")
+                page.evaluate("(selector) => document.querySelector(selector).click()", selector)
             page.wait_for_timeout(4_000)
             page.screenshot(path=str(OUTPUT / f"overview-{lang}.png"))
             _shrink(OUTPUT / f"overview-{lang}.png")
@@ -414,9 +461,14 @@ def capture(base_url: str, scratch: Path) -> None:
 
 
 def main() -> None:
+    import shutil
+
     set_local_timezone(DEMO_TIMEZONE)
-    with tempfile.TemporaryDirectory(prefix="a-token-monitor-demo-") as temporary:
-        root = Path(temporary)
+    # 中文注释：固定目录名，截图里的数据目录路径不带随机后缀。
+    root = Path(tempfile.gettempdir()) / "a-token-monitor-demo"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir()
+    try:
         with mock.patch.dict(PROVIDER_SPECS, demo_providers({n: root / f".{n}" for n in ("claude", "grok", "kimi")})):
             server = build(root)
             server.start()
@@ -425,6 +477,8 @@ def main() -> None:
                 capture(f"http://{host}:{port}", root)
             finally:
                 server.close()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

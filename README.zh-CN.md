@@ -28,6 +28,40 @@ a-token-monitor daemon --dashboard
 `a-token-monitor service install --dashboard` 装成后台服务（systemd、launchd 或
 Windows 计划任务）。
 
+## 特色功能
+
+### 同一厂商的多个账号，分得清清楚楚
+
+同一个 agent 的个人订阅和工作订阅可以一起监控：每个账号给一个数据目录
+（`--codex-home ~/.codex --codex-home ~/.codex-work`，`--claude-home`、`--kimi-home` 等同理，
+也可以在设置页里添加）。每个账号按它自己登录数据里的账号 ID 识别，各有一张卡片，
+额度窗口和套餐分开显示，会话和 token 用量也分开统计。两个目录登录的是同一个账号时
+自动合并成一张卡片；某个目录换号之后，之前的会话仍算在原来那个账号上。
+
+![两个 Codex 订阅（Pro 和 Team）各成一张卡片，旁边是 Claude Code、Grok 和 Kimi](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/accounts-zh.png)
+
+### 会话磁盘分析
+
+agent 的数据目录会悄悄变大：每个会话都留下一份日志，动辄几 MB。磁盘页列出每个
+agent、每个账号目录占了多少空间，超过阈值时提醒（默认单个目录 5 GiB、合计 10 GiB），
+并列出可以归档的会话，体积最大、闲置最久的排在最前。可以按项目批量归档或清理，也可以
+逐个处理：归档是带 SHA-256 manifest 的 `tar.gz`，随时能恢复；正在运行的会话和
+10 分钟内改动过的文件一律跳过。终端里用 `a-token-monitor disk` 能看到同样的报告。
+
+![磁盘与会话管理：各目录占用、按项目归档和可归档会话列表](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/disk-zh.png)
+
+### agent 异常上传监控
+
+code agent 会把你的代码发给远端 API，某个 agent 突然发得比平时多得多时，值得知道。
+Linux 上按 agent 进程统计外发 TCP 字节（回环不计入，从不读取内容），设有 15 秒突发和
+5 分钟累计两档阈值。告警会存进可检索的历史，每条都能关联到当时在该目录下运行的本地
+会话，归纳成「推送代码」「读取文件」这类操作。macOS 和 Windows 上只列出 agent 进程
+及其连接，不统计字节数。
+
+![异常流量监控：一个 agent 进程 15 秒外发超过阈值，被标为异常上传](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/traffic-zh.png)
+
+![告警历史：落盘的告警，含级别、进程、工作目录和会话上下文入口](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/alerts-zh.png)
+
 ## 为什么用它
 
 - **额度还剩多少，不用再猜。** Codex、Claude Code、Grok、Kimi Code、Command Code
@@ -36,20 +70,11 @@ Windows 计划任务）。
   可按天、账号、模型、项目查看，带月度预算进度、缓存节省和可检索的历史。
 - **跑偏的会话早发现。** 只有进程正打开着会话文件才算活动会话；轮数太多、上下文太长的
   会话会提示「建议开新会话」。
-- **知道 agent 当时在上传什么。** Linux 上按 agent 进程统计外发 TCP 字节；告警会关联到
-  当时正在运行的本地会话，归纳成「推送代码」「读取文件」这类操作。消息正文默认隐藏，
-  需要时才打开。
-- **agent 数据目录不再越堆越大。** 按项目把旧会话打包成带 SHA-256 manifest 的 `tar.gz`，
-  随时可以恢复；正在运行的会话一律不碰。
 - **装好就不用管。** 11 个 agent、多账号、零运行时依赖；中英文界面，白天 / 夜间主题。
 
 金额是按各家公开价目表换算的 API 等价估算，和订阅账单是两套口径。
 
 ## 功能导览
-
-### 所有订阅和额度窗口，一屏看完
-
-![账号与额度：每个订阅一张卡片，展示 5 小时与周额度窗口](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/accounts-zh.png)
 
 ### 用量与 API 等价金额
 
