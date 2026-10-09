@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+__FAVICON__
+__THEME_BOOT__
+  <title>Token Monitor</title>
+  <style>
+__PAGE_STYLES__  </style>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="Dashboard 导航">
+    <div class="sidebar-brand">
+      <div class="brand-mark" aria-hidden="true">__BRAND_MARK__</div>
+      <div><div class="brand-name">Token <span>Monitor</span></div><small>本地 code agent 控制台</small></div>
+    </div>
+    <div class="sidebar-label">工作台</div>
+    <nav>
+      <a class="sidebar-link active" data-nav-target="overview" href="#overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg><span>总览</span></a>
+      <a class="sidebar-link" data-nav-target="traffic" href="#traffic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16"/><path d="M13 5l7 7-7 7"/></svg><span>异常流量监控</span></a>
+      <a class="sidebar-link" data-nav-target="accounts" href="#accounts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.8-3.4 3.1-5 7-5s6.2 1.6 7 5"/></svg><span>账号与额度</span></a>
+      <a class="sidebar-link" data-nav-target="usage" href="#usage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19V9M12 19V5M19 19v-7"/><path d="M3 19h18"/></svg><span>用量与费用</span></a>
+      <a class="sidebar-link" data-nav-target="insights" href="#insights"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6M10 21.5h4"/><path d="M12 3a6 6 0 0 0-3.3 11.1c.8.5 1.3 1.3 1.3 2.2v.7h4v-.7c0-.9.5-1.7 1.3-2.2A6 6 0 0 0 12 3z"/></svg><span>习惯分析</span></a>
+    </nav>
+    <div class="sidebar-label">按需查看</div>
+    <nav>
+      <a class="sidebar-link" data-nav-target="alert-history" href="#alert-history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/></svg><span>告警历史</span></a>
+      <a class="sidebar-link" data-nav-target="usage-search" href="#usage-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 20 20"/></svg><span>用量检索</span></a>
+      <a class="sidebar-link" data-nav-target="housekeeping" href="#housekeeping"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span>磁盘与会话管理</span></a>
+      <a class="sidebar-link" href="/settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg><span>设置</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="service-state"><span id="service-dot" class="status-dot"></span><span id="service-state">监控服务在线</span></div>
+      <div class="sidebar-foot">状态每 5 秒同步 · 只记录元数据</div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div class="breadcrumb"><span>Token Monitor</span><span class="breadcrumb-separator">/</span><strong>Dashboard</strong></div>
+      <div class="topbar-actions">
+        <div class="live-indicator"><span class="status-dot"></span><span id="service-sync">等待首次同步</span></div>
+        <button id="health-indicator" class="health-badge" type="button" style="display:none" aria-expanded="false"></button>
+__THEME_TOGGLE__
+        <button id="refresh-button" class="refresh-button" type="button" aria-label="立即刷新状态"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
+      </div>
+    </header>
+
+    <div id="health-detail" class="health-detail" style="display:none"></div>
+
+    <section id="overview" class="page-hero">
+      <div>
+        <div class="eyebrow">实时监控 · Codex / Grok / Kimi / DSH / Command Code</div>
+        <h1>运行概览</h1>
+        <p class="hero-description">实时查看账号额度、活动会话、本地用量与 token 历史，掌握异常流量告警，并管理磁盘占用和历史会话的归档与清理。</p>
+      </div>
+      <div class="hero-context"><span class="scope-badge"><span class="scope-dot"></span><span id="quota-source">正在识别账号</span></span></div>
+    </section>
+
+    <div id="error" class="error" role="alert"></div>
+    <div id="alert-list"></div>
+    <div id="session-notice"></div>
+
+    <section class="kpi-grid" aria-label="监控摘要">
+      <article class="kpi-card accent-cyan"><div class="kpi-top"><span class="kpi-label">近 15 秒外发</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h16M13 5l7 7-7 7"/></svg></span></div><div id="upload-burst-count" class="kpi-value">—</div><div class="kpi-foot"><strong id="upload-alert-count">—</strong> 条未读告警 · <a href="#alert-history">历史</a></div></article>
+      <article class="kpi-card accent-violet"><div class="kpi-top"><span class="kpi-label">活动会话</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.8-3.4 3.1-5 7-5s6.2 1.6 7 5"/></svg></span></div><div id="active-count" class="kpi-value">—</div><div class="kpi-foot"><strong id="process-count">—</strong> 个有进程证据</div></article>
+      <article class="kpi-card accent-yellow"><div class="kpi-top"><span class="kpi-label">额度窗口</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg></span></div><div id="quota-window-count" class="kpi-value">—</div><div class="kpi-foot">当前账号可见的额度窗口</div></article>
+      <article class="kpi-card accent-cyan"><div class="kpi-top"><span class="kpi-label">监控账号</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg></span></div><div id="accounts-online" class="kpi-value">—</div><div class="kpi-foot">按真实账号 ID 归组</div></article>
+      <article class="kpi-card accent-green"><div class="kpi-top"><span class="kpi-label">今日 API 等价金额</span><span class="kpi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M14.8 9.5c-.6-.7-1.5-1-2.7-1-1.4 0-2.3.7-2.3 1.7 0 2.5 5 1.2 5 3.8 0 1-.9 1.7-2.5 1.7-1.2 0-2.2-.4-2.9-1.2M12 6.7v1.8M12 15.7v1.8"/></svg></span></div><div id="spend-count" class="kpi-value">—</div><div class="kpi-foot">非 Plus 实际账单；索引完成后显示</div></article>
+    </section>
+
+    <section id="traffic" class="panel section-block">
+      <div class="panel-heading">
+        <div><div class="section-kicker">Traffic anomaly</div><h2>异常流量监控</h2><p class="section-description">按进程统计 code agent 的 TCP 外发增量，发现异常大数据上传；回环不计入，不读取连接内容。</p></div>
+        <div class="section-meta"><span class="section-count" id="traffic-section-count">等待扫描</span></div>
+      </div>
+      <div id="traffic-content"><div class="empty-state">正在扫描本机 code agent 异常流量…</div></div>
+    </section>
+
+    <section id="accounts" class="panel section-block">
+      <div class="panel-heading">
+        <div><div class="section-kicker">Account health</div><h2>账号与额度</h2><p class="section-description">卡片以「产品 · 套餐」为标题、按真实账号 ID 归并，固定展示 5 小时 / 周 / 月三行额度（缺的标「不适用」）；没有额度窗口的订阅不显示，活动会话默认折叠。</p></div>
+        <div class="section-meta"><span class="section-count" id="account-section-count">— 个账号</span></div>
+      </div>
+      <div id="account-list" class="account-list"><div class="empty-state">正在读取账号状态…</div></div>
+    </section>
+
+    <section id="usage" class="panel section-block">
+      <div class="panel-heading">
+        <div><div class="section-kicker">Usage analytics</div><h2>用量与成本估算</h2></div>
+        <div class="section-meta"><span class="section-count">按需统计 · 缓存 5 分钟</span><button id="usage-load-button" class="refresh-button" type="button">加载用量</button></div>
+      </div>
+      <div id="usage-content"><div class="empty-state">为避免周期读取大量历史 JSONL，用量统计改为按需加载。</div></div>
+    </section>
+    <section id="insights" class="panel section-block">      <div class="panel-heading">
+        <div><div class="section-kicker">Insights</div><h2>习惯分析与省 token 建议</h2><p class="section-description">基于已索引对话的 token 元数据提炼使用习惯，可按时间段切换；不读取对话内容。</p></div>
+        <div class="section-meta"><span class="section-count">按需分析 · 基于用量索引</span><button id="insights-load-button" class="refresh-button" type="button">生成分析</button></div>
+      </div>
+      <div class="usage-tabs" id="insights-period-tabs">
+        <button class="usage-tab selected" type="button" data-insights-days="">全部</button>
+        <button class="usage-tab" type="button" data-insights-days="today">今天</button>
+        <button class="usage-tab" type="button" data-insights-days="7">近 7 天</button>
+        <button class="usage-tab" type="button" data-insights-days="30">近 30 天</button>
+      </div>
+      <div id="insights-content"><div class="empty-state">点击「生成分析」，对已索引的对话做使用习惯画像并给出省 token 建议。</div></div>
+    </section>
+    <section id="alert-history" class="panel section-block is-collapsed">
+      <div class="panel-heading">
+        <button class="section-toggle" type="button" data-section-toggle="alert-history" aria-expanded="false" aria-controls="alert-history-body">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          <span class="section-toggle-text">
+            <span class="section-kicker">Alert history</span>
+            <span class="section-toggle-title">告警历史</span>
+            <span class="section-description">异常流量告警落盘在状态目录，可按时间、级别、规则和已读状态筛选；只保存进程、对端与字节数等元数据。</span>
+            <span class="section-summary" id="alert-history-summary">展开查看详情</span>
+          </span>
+        </button>
+        <div class="section-meta"><span class="section-count" id="alert-history-count">等待加载</span><button id="alert-history-load-button" class="btn primary" type="button">加载告警</button></div>
+      </div>
+      <div class="section-body" id="alert-history-body">
+      <div class="stat-row" id="alert-history-stats"></div>
+      <div class="toolbar">
+        <label class="field">时间范围<select id="alert-range-filter">
+          <option value="1">近 24 小时</option>
+          <option value="7" selected>近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="">全部</option>
+        </select></label>
+        <label class="field">级别<select id="alert-level-filter">
+          <option value="">全部级别</option>
+          <option value="danger">红色 · 异常大上传</option>
+          <option value="warn">黄色 · 偏高</option>
+        </select></label>
+        <label class="field">规则<select id="alert-kind-filter">
+          <option value="">全部规则</option>
+          <option value="burst">突发窗口</option>
+          <option value="window">累计窗口</option>
+        </select></label>
+        <label class="field">状态<select id="alert-ack-filter">
+          <option value="unread" selected>未读</option>
+          <option value="read">已读</option>
+          <option value="">全部</option>
+        </select></label>
+        <label class="field wide">关键词<input id="alert-keyword-filter" type="search" placeholder="Agent / 目录 / 对端"></label>
+        <div class="toolbar-actions">
+          <button id="alert-ack-all-button" class="btn" type="button">全部标为已读</button>
+          <button id="alert-clear-button" class="btn danger" type="button">清理…</button>
+        </div>
+      </div>
+      <div id="alert-history-content"><div class="empty-state"><span class="empty-title">还没有加载告警</span><span class="empty-hint">点击「加载告警」，读取已落盘的历史告警。</span></div></div>
+      </div>
+    </section>
+    <section id="usage-search" class="panel section-block is-collapsed">
+      <div class="panel-heading">
+        <button class="section-toggle" type="button" data-section-toggle="usage-search" aria-expanded="false" aria-controls="usage-search-body">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          <span class="section-toggle-text">
+            <span class="section-kicker">Usage search</span>
+            <span class="section-toggle-title">用量检索</span>
+            <span class="section-description">检索已索引的 token 历史，可切换会话明细 / 按日期 / 按模型 / 按账号四种视图；只读 token 元数据，不读对话内容。</span>
+            <span class="section-summary" id="usage-search-summary">展开查看详情</span>
+          </span>
+        </button>
+        <div class="section-meta"><span class="section-count" id="usage-search-count">等待检索</span><button id="usage-search-load-button" class="btn primary" type="button">检索</button></div>
+      </div>
+      <div class="section-body" id="usage-search-body">
+      <div class="stat-row" id="usage-search-stats"></div>
+      <div class="toolbar">
+        <label class="field">时间范围<select id="usage-search-range">
+          <option value="7">近 7 天</option>
+          <option value="30" selected>近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="0">全部历史</option>
+        </select></label>
+        <label class="field">起始日期<input id="usage-search-from" type="date"></label>
+        <label class="field">结束日期<input id="usage-search-to" type="date"></label>
+        <label class="field">模型<select id="usage-search-model"><option value="">全部模型</option></select></label>
+        <label class="field">账号<select id="usage-search-account"><option value="">全部账号</option></select></label>
+        <label class="field wide">关键词<input id="usage-search-keyword" type="search" placeholder="会话 ID / 项目路径 / 模型"></label>
+        <label class="field">排序<select id="usage-search-sort">
+          <option value="recent" selected>最近活动</option>
+          <option value="tokens">token 用量</option>
+          <option value="cost">估算金额</option>
+        </select></label>
+        <div class="toolbar-actions">
+          <button id="usage-search-refresh-button" class="btn" type="button">刷新</button>
+        </div>
+      </div>
+      <div class="usage-tabs" id="usage-search-group-tabs">
+        <button class="usage-tab selected" type="button" data-usage-search-group="session">会话明细</button>
+        <button class="usage-tab" type="button" data-usage-search-group="date">按日期汇总</button>
+        <button class="usage-tab" type="button" data-usage-search-group="model">按模型汇总</button>
+        <button class="usage-tab" type="button" data-usage-search-group="account">按账号汇总</button>
+      </div>
+      <div id="usage-search-content"><div class="empty-state"><span class="empty-title">还没有检索</span><span class="empty-hint">点击「检索」，按日期、模型或会话查找历史 token 用量。</span></div></div>
+      </div>
+    </section>
+    <section id="housekeeping" class="panel section-block is-collapsed">
+      <div class="panel-heading">
+        <button class="section-toggle" type="button" data-section-toggle="housekeeping" aria-expanded="false" aria-controls="housekeeping-body">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          <span class="section-toggle-text">
+            <span class="section-kicker">Housekeeping</span>
+            <span class="section-toggle-title">磁盘与会话管理</span>
+            <span class="section-description">统计各 agent 数据目录占用，超阈值提醒；可按最后修改时间归档（tar.gz + manifest，可恢复）或清理会话，支持按项目压缩归档，都会跳过运行中的会话。</span>
+            <span class="section-summary" id="housekeeping-summary">展开查看详情</span>
+          </span>
+        </button>
+        <div class="section-meta"><span class="section-count" id="housekeeping-count">等待扫描</span><button id="housekeeping-scan-button" class="btn primary" type="button">重新扫描</button></div>
+      </div>
+      <div class="section-body" id="housekeeping-body">
+      <div class="stat-row" id="housekeeping-stats"></div>
+      <div id="housekeeping-content"><div class="empty-state"><span class="empty-title">正在统计目录占用…</span></div></div>
+      <div id="housekeeping-projects"></div>
+      <div class="criteria-row">
+        <label class="field">保留天数<input id="housekeeping-days" type="number" min="1" max="3650" value="30"></label>
+        <label class="field">最小体积 MiB<input id="housekeeping-min-size" type="number" min="0" value="0"></label>
+        <label class="field">项目<select id="housekeeping-project"><option value="">全部项目</option></select></label>
+        <div class="toolbar-actions">
+          <button id="housekeeping-preview-button" class="btn" type="button">预览可归档会话</button>
+          <button id="housekeeping-archive-button" class="btn warn" type="button">压缩归档</button>
+          <button id="housekeeping-clean-button" class="btn danger" type="button">直接清理</button>
+        </div>
+      </div>
+      <div id="housekeeping-actions"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+__PAGE_SCRIPT__</script>
+</body>
+</html>

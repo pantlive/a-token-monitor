@@ -172,7 +172,7 @@ class DashboardReloadTests(unittest.TestCase):
                     {"grok": (new,), "kimi": (new,), "claude": (new,)}
                 )
                 with patch(
-                    "a_token_monitor.dashboard.build_multi_dashboard_state",
+                    "a_token_monitor.dashboard.handler.build_multi_dashboard_state",
                     return_value={"sessions": []},
                 ) as build:
                     host, port = server.address

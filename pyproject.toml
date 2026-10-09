@@ -36,7 +36,6 @@ a-token-monitor = "a_token_monitor.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.ruff.lint.per-file-ignores]
-# Dashboard 内嵌的 HTML/CSS/JavaScript 使用长行保持浏览器模板可读；Python 代码仍按
-# 默认 Ruff 规则检查。
-"src/a_token_monitor/dashboard.py" = ["E501"]
+[tool.setuptools.package-data]
+# 中文注释：Dashboard 页面的 HTML / CSS / JS 资源随包分发。
+"a_token_monitor.dashboard" = ["static/*"]

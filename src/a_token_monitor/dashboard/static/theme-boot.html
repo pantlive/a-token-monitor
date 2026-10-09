@@ -1,0 +1,19 @@
+  <script>
+    // 主题预置：在样式解析前写入 data-theme / data-theme-mode，避免切换主题时闪白或闪黑。
+    (() => {
+      try {
+        const stored = window.localStorage.getItem('a-token-monitor-theme');
+        const mode = ['light', 'dark', 'system'].includes(stored) ? stored : 'system';
+        const prefersLight = window.matchMedia
+          ? window.matchMedia('(prefers-color-scheme: light)').matches
+          : false;
+        const light = mode === 'light' || (mode === 'system' && prefersLight);
+        const root = document.documentElement;
+        root.dataset.theme = light ? 'light' : 'dark';
+        root.dataset.themeMode = mode;
+      } catch (error) {
+        document.documentElement.dataset.theme = 'dark';
+        document.documentElement.dataset.themeMode = 'dark';
+      }
+    })();
+  </script>

@@ -1,0 +1,19 @@
+  <script>
+    // 语言预置：localStorage 里记住的选择优先于浏览器语言。服务端按 cookie 决定语言，
+    // 所以这里发现不一致就补写 cookie 并重载一次；用 sessionStorage 打标记，避免在
+    // 禁用 cookie 的浏览器里来回重载。
+    (() => {
+      try {
+        const stored = window.localStorage.getItem('a-token-monitor-language');
+        if (stored !== 'zh' && stored !== 'en') return;
+        const current = document.documentElement.lang === 'en' ? 'en' : 'zh';
+        if (stored === current) return;
+        if (window.sessionStorage.getItem('a-token-monitor-language-applied') === stored) return;
+        window.sessionStorage.setItem('a-token-monitor-language-applied', stored);
+        document.cookie = `a-token-monitor-language=${stored}; path=/; max-age=31536000; SameSite=Lax`;
+        window.location.reload();
+      } catch (error) {
+        // 拿不到存储就按服务端语言渲染，不折腾。
+      }
+    })();
+  </script>

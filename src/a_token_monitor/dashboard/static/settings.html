@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+__FAVICON__
+__THEME_BOOT__
+  <title>设置 - Token Monitor</title>
+  <style>
+__PAGE_STYLES__  </style>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="设置导航">
+    <div class="sidebar-brand">
+      <div class="brand-mark" aria-hidden="true">__BRAND_MARK__</div>
+      <div><div class="brand-name">Token <span>Monitor</span></div><small>本地 code agent 控制台</small></div>
+    </div>
+    <div class="sidebar-label">工作台</div>
+    <nav>
+      <a class="sidebar-link" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12H4"/><path d="M11 5l-7 7 7 7"/></svg><span>返回 Dashboard</span></a>
+    </nav>
+    <div class="sidebar-label">设置项</div>
+    <nav>
+      <a class="sidebar-link active" href="#scan-dirs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg><span>扫描目录</span></a>
+      <a class="sidebar-link" href="#history-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/></svg><span>历史数据</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-foot">修改立即生效 · 只记录元数据</div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div class="breadcrumb"><span>Token Monitor</span><span class="breadcrumb-separator">/</span><strong>设置</strong></div>
+      <div class="topbar-actions">
+__THEME_TOGGLE__
+        <button id="scan-dirs-refresh-button" class="refresh-button" type="button" aria-label="刷新扫描目录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
+      </div>
+    </header>
+
+    <section class="page-hero">
+      <div>
+        <div class="eyebrow">Settings</div>
+        <h1>设置</h1>
+        <p class="hero-description">Dashboard 的在线设置项。当前包含扫描目录管理和历史数据管理；之后的设置项会以平级子块追加到本页。</p>
+      </div>
+    </section>
+
+    <div id="error" class="error" role="alert"></div>
+
+    <div id="settings-body">
+      <section id="scan-dirs" class="panel settings-block">
+        <div class="panel-heading">
+          <div><div class="section-kicker">Scan directories</div><h2>扫描目录</h2><p class="section-description">管理各 code agent 的扫描目录，优先级：Web 配置 &gt; 命令行参数 &gt; 自动探测。目录需已存在、可读且在主目录内；保存后立即生效并热重载账号。</p></div>
+          <div class="section-meta"><span class="section-count" id="scan-dirs-count">等待加载</span></div>
+        </div>
+        <div id="scan-dirs-content"><div class="empty-state"><span class="empty-title">正在读取扫描目录…</span></div></div>
+      </section>
+      <section id="history-settings" class="panel settings-block">
+        <div class="panel-heading">
+          <div><div class="section-kicker">History data</div><h2>历史数据</h2><p class="section-description">管理用量索引、会话历史与告警历史的保留期和手动清理，优先级：Web 配置 &gt; 命令行参数 &gt; 默认值。清理只删过期历史行，活动会话与额度记录始终保留。</p></div>
+          <div class="section-meta"><span class="section-count" id="history-count">等待加载</span></div>
+        </div>
+        <div id="history-content"><div class="empty-state"><span class="empty-title">正在读取历史数据状态…</span></div></div>
+        <div id="history-preview-content"></div>
+        <div id="history-result"></div>
+      </section>
+    </div>
+  </main>
+</div>
+<script>
+__PAGE_SCRIPT__</script>
+</body>
+</html>

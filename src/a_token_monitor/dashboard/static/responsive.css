@@ -1,0 +1,56 @@
+
+    @media (max-width: 1100px) {
+      main { padding-right: 28px; padding-left: 28px; }
+      .sidebar { width: 208px; }
+      .app-shell { grid-template-columns: 208px minmax(0, 1fr); }
+      .kpi-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+    }
+    @media (max-width: 900px) {
+      .usage-rankings { grid-template-columns: minmax(0, 1fr); }
+      .app-shell { display: block; }
+      .sidebar { position: static; width: auto; height: auto; padding: 14px 16px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+      .sidebar-brand { padding: 0 4px 14px; }
+      .sidebar-label { display: none; }
+      .sidebar nav { display: flex; overflow-x: auto; }
+      .sidebar-link { flex: 0 0 auto; min-height: 38px; white-space: nowrap; }
+      .sidebar-bottom { display: none; }
+      main { max-width: none; padding-top: 0; }
+      .topbar { margin-bottom: 28px; }
+    }
+    @media (max-width: 760px) {
+      /* 中文注释：窄屏两列；张数为奇数时让最后一张占满整行，
+         避免出现一张孤零零的卡片挂在第二行。 */
+      .usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .usage-summary-item:last-child:nth-child(odd) { grid-column: 1 / -1; }
+    }
+    @media (max-width: 700px) {
+      .usage-filters { grid-template-columns: minmax(0, 1fr); }
+    }
+    @media (max-width: 640px) {
+      main { padding: 0 16px 40px; }
+      .topbar { min-height: 60px; }
+      .topbar .live-indicator { display: none; }
+      .page-hero { align-items: flex-start; flex-direction: column; gap: 14px; }
+      h1 { font-size: 28px; }
+      .hero-context { padding-bottom: 0; }
+      .kpi-grid { gap: 9px; }
+      .kpi-card { min-height: 128px; padding: 14px; }
+      .kpi-value { font-size: 24px; }
+      .section-block { padding: 16px; }
+      .panel-heading { align-items: flex-start; flex-direction: column; gap: 9px; }
+      .account-heading { flex-direction: column; }
+      .account-side { justify-items: start; text-align: left; }
+      .usage-summary,
+      .usage-filters { grid-template-columns: minmax(0, 1fr); }
+      .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { align-items: stretch; }
+      .field, .field select, .field input, .field.wide select, .field.wide input { width: 100%; min-width: 0; }
+      .toolbar-actions { margin-left: 0; }
+      .mini-card-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .usage-filter, .usage-filter select { width: 100%; min-width: 0; }
+    }
+    @media (max-width: 430px) {
+      .kpi-grid { grid-template-columns: 1fr; }
+      .breadcrumb { font-size: 11px; }
+      .refresh-button span { display: none; }
+    }

@@ -25,7 +25,7 @@ from a_token_monitor.housekeeping import (
     DiskThresholds,
     HousekeepingMonitor,
 )
-from a_token_monitor import dashboard as dashboard_module
+from a_token_monitor.dashboard import favicon as favicon_module
 from a_token_monitor.accounts import CodexAccount, read_codex_plan_type
 from a_token_monitor.usage import calendar_day_start
 
@@ -493,7 +493,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "a_token_monitor.dashboard.read_kimi_quota",
+                    "a_token_monitor.dashboard.state.read_kimi_quota",
                     return_value=None,
                 ):
                     with urlopen(
@@ -564,7 +564,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "a_token_monitor.dashboard.read_commandcode_quota",
+                    "a_token_monitor.dashboard.state.read_commandcode_quota",
                     return_value=quota,
                 ):
                     with urlopen(
@@ -759,7 +759,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "a_token_monitor.dashboard.read_kimi_quota",
+                    "a_token_monitor.dashboard.state.read_kimi_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -842,7 +842,7 @@ class DashboardTests(unittest.TestCase):
             host, port = server.address
             try:
                 with mock.patch(
-                    "a_token_monitor.dashboard.read_kimi_quota",
+                    "a_token_monitor.dashboard.state.read_kimi_quota",
                     return_value=snapshot,
                 ):
                     with urlopen(
@@ -960,11 +960,11 @@ class DashboardTests(unittest.TestCase):
             )
             with (
                 mock.patch(
-                    "a_token_monitor.dashboard.list_kimi_active_sessions",
+                    "a_token_monitor.dashboard.state.list_kimi_active_sessions",
                     return_value=(kimi_session,),
                 ),
                 mock.patch(
-                    "a_token_monitor.dashboard.list_dsh_active_sessions",
+                    "a_token_monitor.dashboard.state.list_dsh_active_sessions",
                     return_value=(dsh_session,),
                 ),
             ):
@@ -1559,11 +1559,11 @@ class GrokSessionDashboardTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             with (
                 mock.patch(
-                    "a_token_monitor.dashboard.list_grok_active_sessions",
+                    "a_token_monitor.dashboard.state.list_grok_active_sessions",
                     return_value=(session,),
                 ),
                 mock.patch(
-                    "a_token_monitor.dashboard.read_grok_quota",
+                    "a_token_monitor.dashboard.state.read_grok_quota",
                     return_value=None,
                 ),
             ):
@@ -1674,7 +1674,7 @@ class NoCodexDashboardTests(unittest.TestCase):
             )
             with (
                 mock.patch(
-                    "a_token_monitor.dashboard.read_grok_account",
+                    "a_token_monitor.dashboard.state.read_grok_account",
                     side_effect=RuntimeError("模拟 Grok 目录损坏"),
                 ),
                 self.assertLogs("a_token_monitor.dashboard", level="ERROR") as captured,
@@ -1725,11 +1725,11 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
             registry = MultiSessionRegistry(root / "state")
             with (
                 mock.patch(
-                    "a_token_monitor.dashboard.list_claude_active_sessions",
+                    "a_token_monitor.dashboard.state.list_claude_active_sessions",
                     return_value=(session,),
                 ),
                 mock.patch(
-                    "a_token_monitor.dashboard.read_grok_quota",
+                    "a_token_monitor.dashboard.state.read_grok_quota",
                     return_value=None,
                 ),
             ):
@@ -2510,7 +2510,7 @@ class FaviconTests(unittest.TestCase):
         self.assertNotIn("<image", svg)
         self.assertNotIn("data-theme", svg)
         self.assertNotIn("prefers-color-scheme", svg)
-        style = dashboard_module._FAVICON_STYLE
+        style = favicon_module._FAVICON_STYLE
         glyph = _FAVICON_GLYPHS[style]
         rects = [
             item
@@ -2540,7 +2540,7 @@ class FaviconTests(unittest.TestCase):
         """Stitch 方案的每个候选都要能出 SVG 和位图，方便换方案。"""
 
         for style in _FAVICON_GLYPHS:
-            with mock.patch.object(dashboard_module, "_FAVICON_STYLE", style):
+            with mock.patch.object(favicon_module, "_FAVICON_STYLE", style):
                 svg = _favicon_svg()
                 root = ElementTree.fromstring(svg)
                 self.assertEqual(root.get("viewBox"), "0 0 64 64")
@@ -2549,7 +2549,7 @@ class FaviconTests(unittest.TestCase):
                     len([item for item in root.iter() if item.tag.endswith("}rect")]),
                     1,
                 )
-                _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
+                _, _, rows = _decode_favicon_png(favicon_module._favicon_png(32))
                 painted = [
                     pixel
                     for row in rows
@@ -2566,14 +2566,14 @@ class FaviconTests(unittest.TestCase):
 
         tokens = {}
         for style in _FAVICON_GLYPHS:
-            with mock.patch.object(dashboard_module, "_FAVICON_STYLE", style):
-                tokens[style] = dashboard_module._favicon_token()
+            with mock.patch.object(favicon_module, "_FAVICON_STYLE", style):
+                tokens[style] = favicon_module._favicon_token()
         self.assertEqual(len(set(tokens.values())), len(tokens))
 
     def test_geometry_primitives_cover_their_shapes(self) -> None:
         """原语的点包含判定：直接决定光栅化结果，逐条钉住。"""
 
-        inside = dashboard_module._inside_shape
+        inside = favicon_module._inside_shape
         self.assertTrue(inside(20.0, 20.0, ("circle", 20.0, 20.0, 4.0)))
         self.assertFalse(inside(26.0, 20.0, ("circle", 20.0, 20.0, 4.0)))
         # 圆环：只有描边宽度内的点算命中。
@@ -2601,8 +2601,8 @@ class FaviconTests(unittest.TestCase):
     def test_cut_shapes_punch_holes_through_the_glyph(self) -> None:
         """挖洞处必须露出渐变底色，而不是白色。"""
 
-        with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "bars"):
-            _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
+        with mock.patch.object(favicon_module, "_FAVICON_STYLE", "bars"):
+            _, _, rows = _decode_favicon_png(favicon_module._favicon_png(32))
         # 高水位刻度孔中心：画布 (46, 18.5) → 32px 图上的 (23, 9)。
         hole = rows[9][23]
         self.assertEqual(hole[3], 255)
@@ -2610,8 +2610,8 @@ class FaviconTests(unittest.TestCase):
         self.assertLess(min(hole[:3]), 240)
 
         # 盾牌里的脉搏线是描边洞：画布 (26, 33) 在脉搏线上 → 渐变而非白色。
-        with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "guard"):
-            _, _, shield = _decode_favicon_png(dashboard_module._favicon_png(32))
+        with mock.patch.object(favicon_module, "_FAVICON_STYLE", "guard"):
+            _, _, shield = _decode_favicon_png(favicon_module._favicon_png(32))
         pulse = shield[16][13]
         self.assertEqual(pulse[3], 255)
         self.assertLess(min(pulse[:3]), 240)
@@ -2661,9 +2661,9 @@ class FaviconTests(unittest.TestCase):
 
         self.assertEqual(set(self.PIXEL_ANCHORS), set(_FAVICON_GLYPHS))
         for style, anchors in self.PIXEL_ANCHORS.items():
-            with mock.patch.object(dashboard_module, "_FAVICON_STYLE", style):
+            with mock.patch.object(favicon_module, "_FAVICON_STYLE", style):
                 width, height, rows = _decode_favicon_png(
-                    dashboard_module._favicon_png(32)
+                    favicon_module._favicon_png(32)
                 )
             self.assertEqual((width, height), (32, 32), style)
             # 圆角外的像素完全透明，否则标签页上是方块。
@@ -2680,8 +2680,8 @@ class FaviconTests(unittest.TestCase):
     def test_gradient_runs_from_violet_to_cyan(self) -> None:
         """底色必须是对角渐变：左上偏 violet（红>绿），右下偏 cyan（绿>红）。"""
 
-        with mock.patch.object(dashboard_module, "_FAVICON_STYLE", "guard"):
-            _, _, rows = _decode_favicon_png(dashboard_module._favicon_png(32))
+        with mock.patch.object(favicon_module, "_FAVICON_STYLE", "guard"):
+            _, _, rows = _decode_favicon_png(favicon_module._favicon_png(32))
         top_left = rows[4][4]
         bottom_right = rows[27][27]
         self.assertEqual((top_left[3], bottom_right[3]), (255, 255))
@@ -4442,7 +4442,7 @@ class HealthEndpointTests(unittest.TestCase):
             try:
                 with (
                     mock.patch(
-                        "a_token_monitor.dashboard.read_grok_account",
+                        "a_token_monitor.dashboard.state.read_grok_account",
                         side_effect=RuntimeError("模拟 Grok 目录损坏"),
                     ),
                     self.assertLogs("a_token_monitor.dashboard", level="ERROR"),
