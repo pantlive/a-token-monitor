@@ -8,6 +8,7 @@ from http.server import ThreadingHTTPServer
 from threading import Thread
 from typing import Mapping
 
+from .assets import warm_localized_pages
 from ..alerts import (
     TrafficAlertStore,
 )
@@ -165,6 +166,13 @@ class DashboardServer:
             handler,
         )
         self._server = server
+        # 中文注释：英文页面整页翻译约 1 秒，后台预热后首个英文请求直接命中缓存；
+        # 缓存是进程级的，重复启动不会重复计算。
+        Thread(
+            target=warm_localized_pages,
+            name="a-token-monitor-dashboard-warmup",
+            daemon=True,
+        ).start()
         self._thread = Thread(
             target=server.serve_forever,
             name="a-token-monitor-dashboard",

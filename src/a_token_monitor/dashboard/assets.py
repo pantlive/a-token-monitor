@@ -104,3 +104,10 @@ _DASHBOARD_HTML = _page("dashboard.html", _BASE_CSS + _DASHBOARD_CSS + _RESPONSI
 # 中文注释：独立设置页与主页共用 _BASE_CSS / _RESPONSIVE_CSS，只追加设置页独有样式；
 # 设置子块（如扫描目录）平级放在 #settings-body 内，之后可直接追加新的设置项。
 _SETTINGS_HTML = _page("settings.html", _BASE_CSS + _SETTINGS_CSS + _RESPONSIVE_CSS, "settings.js")
+
+
+def warm_localized_pages() -> None:
+    """预先生成英文页面，避免第一个英文访问者等待约 1 秒的整页翻译。"""
+
+    for page in (_DASHBOARD_HTML, _SETTINGS_HTML):
+        _localize_page(page, "en")
