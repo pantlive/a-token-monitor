@@ -54,7 +54,8 @@ jobs:
       # 中文注释：ruff 与 pytest 只装在 CI，不写进项目依赖（保持零依赖）。ruff 锁定
       # 版本，避免新版默认规则变化让 CI 无故变红（0.16 曾因此让每个 job 卡在风格检查）。
       - name: 安装测试工具 ruff / pytest
-        run: python -m pip install "ruff==0.15.21" pytest
+        # 中文注释：annotate-failures 把失败用例写成 GitHub 注解，未登录也能在运行页面看到原因。
+        run: python -m pip install "ruff==0.15.21" pytest "pytest-github-actions-annotate-failures==0.3.0"
 
       - name: 代码风格检查
         run: ruff check src tests
@@ -88,8 +89,12 @@ jobs:
       # 默认是 UTC，看不出时区漂移，这里把系统时区换到美西再跑一遍全量用例，
       # 防止新代码绕开 local_time 直接读系统时区。Windows 的 TZ 环境变量语义
       # 不同，只在 Linux / macOS 上跑。
+      # 中文注释：同一步顺带验证界面语言——英文 locale 下用例仍按默认中文断言，
+      # 由 tests/conftest.py 清除语言环境变量保证。
       - name: 非 UTC 时区回归
         if: runner.os != 'Windows'
         env:
           TZ: America/Los_Angeles
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
         run: python -m pytest -q
