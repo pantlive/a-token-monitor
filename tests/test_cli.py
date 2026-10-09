@@ -7,6 +7,7 @@ import io
 import json
 import os
 import socket
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -1494,6 +1495,54 @@ class CliTests(unittest.TestCase):
         # 没有 Codex 账号时不解析可执行文件，保留原始命令名
         self.assertEqual(config.codex_path, "codex")
         self.assertEqual(loaded.codex_homes, ())
+
+    def test_sessions_command_keeps_shared_usage_index_of_other_providers(self) -> None:
+        """一次性 sessions 命令不能按自己的扫描范围清理 daemon 共享的用量索引。
+
+        这里的 Grok 目录不在默认位置、也没传给命令，命令的扫描范围里没有它；
+        之前 sessions 刷新索引时会把 daemon 建好的这部分索引整行删掉。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            grok = root / "elsewhere" / ".grok"
+            (grok / "logs").mkdir(parents=True)
+            (grok / "sessions").mkdir()
+            (grok / "logs" / "unified.jsonl").write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-10-08T01:00:01Z",
+                        "msg": "shell.turn.inference_done",
+                        "sid": "session-1",
+                        "ctx": {
+                            "loop_index": 0,
+                            "prompt_tokens": 1000,
+                            "cached_prompt_tokens": 0,
+                            "completion_tokens": 50,
+                            "reasoning_tokens": 0,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state = root / "state"
+            state.mkdir()
+            index_path = state / "usage-index.sqlite3"
+            daemon_index = UsageAggregator(cache_path=index_path, homes={"grok": (grok,)})
+            daemon_index.refresh_index({})
+            daemon_index.close()
+
+            with (
+                mock.patch.dict(os.environ, _missing_provider_env(root)),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                main(["--state-dir", str(state), "sessions"])
+            with contextlib.closing(sqlite3.connect(index_path)) as connection:
+                rows = connection.execute("SELECT COUNT(*) FROM usage_delta").fetchone()[0]
+
+        self.assertEqual(rows, 1)
 
     def test_quota_without_any_provider_prints_hint(self) -> None:
         """没有任何账号时 quota 给出可读提示而不是空输出。"""

@@ -83,8 +83,15 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         background_indexing: bool = False,
         index_bytes_per_sec: int = _DEFAULT_INDEX_BYTES_PER_SEC,
         homes: ProviderHomesInput | None = None,
+        prune_stale: bool = True,
     ) -> None:
-        """创建有刷新间隔、持久化检查点和单轮磁盘预算的用量缓存。"""
+        """创建有刷新间隔、持久化检查点和单轮磁盘预算的用量缓存。
+
+        ``prune_stale`` 控制是否从持久索引删除不在本实例扫描范围内的文件。
+        索引文件由 daemon 与一次性命令共享，只有长期运行、范围完整的 daemon
+        才应清理；一次性命令（例如 ``sessions``）的范围可能和 daemon 不同，
+        清理会误删 daemon 建好的其他 provider 的索引。
+        """
 
         if discovery_interval <= 0:
             raise ValueError("discovery_interval 必须大于 0")
@@ -99,6 +106,7 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         self.read_budget_bytes = read_budget_bytes
         self.background_indexing = background_indexing
         self.index_bytes_per_sec = index_bytes_per_sec
+        self.prune_stale = prune_stale
         # 中文注释：聚合器里未给出的 provider 一律不扫描，避免单测把本机数据读进来；
         # 监控进程要自动探测时先 resolve，再把结果映射传进来。
         self._homes = resolve_provider_homes(homes, auto_detect=False)
@@ -534,7 +542,7 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         for path in tuple(self._chat_partial):
             if path not in sources:
                 del self._chat_partial[path]
-        if self._persistent is not None:
+        if self._persistent is not None and self.prune_stale:
             self._persistent.prune(sources)
 
     def _index_progress(

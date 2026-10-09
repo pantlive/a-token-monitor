@@ -817,18 +817,6 @@ def _add_upload_threshold_options(parser: argparse.ArgumentParser) -> None:
 
 
 
-# 中文注释：会话视图与用量检索命令扫描的 provider（不含 Grok / Kimi / DSH）。
-_SESSION_USAGE_PROVIDERS = (
-    "claude",
-    "commandcode",
-    "opencode",
-    "cursor",
-    "gemini",
-    "qwen",
-    "aider",
-)
-
-
 def _accounts(args: argparse.Namespace) -> tuple[CodexAccount, ...]:
     """把 CLI 参数解析为独立的 Codex 账号配置。"""
 
@@ -1516,8 +1504,9 @@ def _enrich_session_summaries(
     effective = _effective_scan_dirs(args)
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        # 中文注释：会话视图和用量检索沿用原来的范围，不索引 Grok / Kimi / DSH。
-        homes=effective.provider_homes(_SESSION_USAGE_PROVIDERS),
+        homes=effective.provider_homes(),
+        # 中文注释：一次性命令与 daemon 共享索引文件，不能按自己的范围清理。
+        prune_stale=False,
     )
     try:
         aggregator.refresh_index(
@@ -1917,8 +1906,9 @@ def _show_usage_search(args: argparse.Namespace) -> int:
     effective = _effective_scan_dirs(args)
     aggregator = UsageAggregator(
         cache_path=args.state_dir.expanduser() / "usage-index.sqlite3",
-        # 中文注释：会话视图和用量检索沿用原来的范围，不索引 Grok / Kimi / DSH。
-        homes=effective.provider_homes(_SESSION_USAGE_PROVIDERS),
+        homes=effective.provider_homes(),
+        # 中文注释：一次性命令与 daemon 共享索引文件，不能按自己的范围清理。
+        prune_stale=False,
     )
     since, until = _usage_search_bounds(args)
     search = aggregator.search(
