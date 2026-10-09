@@ -10,18 +10,16 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from a_token_monitor.alert_context import (
+from a_token_monitor.alert_context import AlertContextRoots, load_alert_context
+from a_token_monitor.alert_context.claude import _extract_claude
+from a_token_monitor.alert_context.codex import _codex_tool_label, _extract_codex
+from a_token_monitor.alert_context.common import (
     _MAX_EVENTS,
-    AlertContextRoots,
-    _codex_tool_label,
     _cwd_matches,
-    _extract_claude,
-    _extract_codex,
-    _extract_kimi,
     _iso_record_ts,
     _suffix_offset,
-    load_alert_context,
 )
+from a_token_monitor.alert_context.kimi import _extract_kimi
 from a_token_monitor.alerts import StoredAlert
 from a_token_monitor.local_time import to_local
 
@@ -1341,7 +1339,7 @@ class AlertContextCacheTests(unittest.TestCase):
     def test_repeat_loads_share_one_extraction(self) -> None:
         from unittest.mock import patch
 
-        from a_token_monitor import alert_context as alert_context_module
+        from a_token_monitor.alert_context import lookup as alert_context_module
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

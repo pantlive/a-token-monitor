@@ -24,7 +24,6 @@ from a_token_monitor.service import ServiceConfig
 
 # 功能 -> 不需要接入该功能的产品 ID 及原因。
 EXEMPT = {
-    "alert_extractor": {"opencode": "会话在 SQLite 里，由 _extract_opencode 单独读取"},
     "archive_rules": {"opencode": "会话存在单个 SQLite 库里，没有可单独归档的文件"},
 }
 
@@ -50,12 +49,10 @@ class RegistryCompletenessTests(unittest.TestCase):
                 self.assertIn(spec.product_id, detected)
 
     def test_every_product_is_wired_into_alert_context(self) -> None:
-        exempt = EXEMPT["alert_extractor"]
         for spec in PROVIDER_SPECS.values():
             with self.subTest(product=spec.product_id):
+                self.assertIn(spec.product_id, alert_context._SOURCES)
                 self.assertIn(spec.product_id, alert_context.SUPPORTED_PRODUCTS)
-                if spec.product_id not in exempt:
-                    self.assertIn(spec.product_id, alert_context._EXTRACTORS)
 
     def test_every_product_has_archive_rules(self) -> None:
         exempt = EXEMPT["archive_rules"]
