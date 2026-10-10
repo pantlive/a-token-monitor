@@ -212,28 +212,35 @@ class UpgradeHintTests(unittest.TestCase):
         self.assertEqual(hint["command"], "pipx upgrade a-token-monitor")
 
     def test_editable_install_uses_git_pull(self) -> None:
-        with mock.patch.object(
-            updates, "_local_install", return_value=(Path("/tmp/checkout"), True)
-        ):
+        root = Path("/tmp/checkout")
+        with mock.patch.object(updates, "_local_install", return_value=(root, True)):
             hint = updates.detect_upgrade()
         self.assertEqual(hint["kind"], "source")
-        self.assertIn("git -C /tmp/checkout pull --ff-only", hint["command"])
+        # 中文注释：期望值用同一套路径渲染拼出来，否则 Windows 上的 `\tmp\checkout`
+        # 会让写死 `/tmp/checkout` 的断言失败。
+        self.assertEqual(
+            hint["command"], f"git -C {updates._quote(str(root))} pull --ff-only"
+        )
 
     def test_local_non_editable_install_reinstalls_from_the_directory(self) -> None:
-        with mock.patch.object(
-            updates, "_local_install", return_value=(Path("/tmp/wheelhouse"), False)
-        ):
+        root = Path("/tmp/wheelhouse")
+        with mock.patch.object(updates, "_local_install", return_value=(root, False)):
             hint = updates.detect_upgrade()
         self.assertEqual(hint["kind"], "local")
-        self.assertIn("install --upgrade /tmp/wheelhouse", hint["command"])
+        self.assertIn(
+            f"install --upgrade {updates._quote(str(root))}", hint["command"]
+        )
 
     def test_repo_checkout_without_install_metadata(self) -> None:
+        root = Path("/tmp/source")
         with mock.patch.object(updates, "_local_install", return_value=None), mock.patch.object(
-            updates, "_repo_checkout", return_value=Path("/tmp/source")
+            updates, "_repo_checkout", return_value=root
         ):
             hint = updates.detect_upgrade()
         self.assertEqual(hint["kind"], "source")
-        self.assertIn("git -C /tmp/source pull --ff-only", hint["command"])
+        self.assertEqual(
+            hint["command"], f"git -C {updates._quote(str(root))} pull --ff-only"
+        )
 
     def test_local_install_reads_pep610_metadata(self) -> None:
         """direct_url.json 解析：可编辑标记、file:// 判定与 URL 解码。"""
@@ -370,9 +377,9 @@ class CheckerTests(unittest.TestCase):
         self.assertTrue(started.wait(5))
         self.assertFalse(checker.refresh_async(force=True))
         release.set()
-        deadline = time.time() + 5
-        while time.time() < deadline and not checker.snapshot()["checked_at"]:
-            time.sleep(0.01)
+        # 中文注释：必须等后台线程真的结束——它还在写缓存临时文件时，用例结束的
+        # 目录清理会撞上「Directory not empty」（macOS / Windows 上都复现过）。
+        self.assertTrue(checker.wait_for_refresh(timeout=5))
         self.assertTrue(checker.snapshot()["update_available"])
         # 刚抓取成功，非强制调用不会再排队。
         self.assertFalse(checker.refresh_async())

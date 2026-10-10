@@ -627,7 +627,8 @@ class UpdateChecker:
     def _record_success(self, candidate: ReleaseCandidate, moment: float) -> None:
         latest = normalize_version(candidate.version)
         with self._state_lock:
-            self._state.update(
+            state = dict(self._state)
+            state.update(
                 {
                     "checked_at": moment,
                     "last_attempt_at": moment,
@@ -641,20 +642,31 @@ class UpdateChecker:
             )
             if not is_newer(latest, self.current_version):
                 # 中文注释：已经追上（或本地更新），下次有新版本要重新提醒一次。
-                self._state["notified_version"] = None
-            payload = dict(self._state)
-        _write_cache(self.cache_path, payload)
+                state["notified_version"] = None
+        self._commit(state)
 
     def _record_failure(self, error: BaseException, moment: float) -> None:
         with self._state_lock:
-            self._state.update(
+            state = dict(self._state)
+            state.update(
                 {
                     "last_attempt_at": moment,
                     "last_error": _short_error(error),
                 }
             )
-            payload = dict(self._state)
-        _write_cache(self.cache_path, payload)
+        self._commit(state)
+
+    def _commit(self, state: dict[str, Any]) -> None:
+        """先落盘再更新内存。
+
+        中文注释：顺序反过来会出现「内存里已经能看到新结果、缓存文件还是旧的」的
+        窗口——命令行进程正好在此刻退出，或另一个进程此刻读文件，就会拿到旧数据。
+        先写盘则保证：任何进程看到新状态时，文件已经是新的。
+        """
+
+        _write_cache(self.cache_path, state)
+        with self._state_lock:
+            self._state.update(state)
 
     def refresh_async(self, force: bool = False, now: float | None = None) -> bool:
         """在后台线程里抓取一次；已有抓取在跑或未到时间时返回 ``False``。"""
@@ -677,6 +689,15 @@ class UpdateChecker:
         thread.start()
         return True
 
+    def wait_for_refresh(self, timeout: float | None = None) -> bool:
+        """等待后台抓取线程结束；返回是否已经结束（没有线程时视为已结束）。"""
+
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
+
     # ---------------------------------------------------------------- 提醒
 
     def mark_notified(self, version: object) -> None:
@@ -686,9 +707,9 @@ class UpdateChecker:
         with self._state_lock:
             if self._state.get("notified_version") == normalized:
                 return
-            self._state["notified_version"] = normalized
-            payload = dict(self._state)
-        _write_cache(self.cache_path, payload)
+            state = dict(self._state)
+            state["notified_version"] = normalized
+        self._commit(state)
 
     def pending_notice(self) -> dict[str, Any] | None:
         """有新版本且还没提醒过时返回快照，否则返回 ``None``。"""
