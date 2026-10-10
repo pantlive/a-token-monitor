@@ -2233,10 +2233,11 @@
       }
     }
   };
-  // 中文注释：版本更新提醒。顶栏只放一个小徽标（发现新版本时才出现），点开才显示
-  // 升级详情与可复制的升级命令；「忽略此版本」按版本记在 localStorage。
+  // 中文注释：版本更新提醒。顶栏按钮常驻：没检查过显示「检查更新」，检查过没有新版本
+  // 显示「已是最新」，发现新版本时变青色高亮（每个版本只高亮一次，「忽略此版本」
+  // 只取消高亮、不隐藏信息）。点开面板会显示缓存结果，缓存过期时顺手再查一次。
   const UPDATE_DISMISS_KEY = 'a-token-monitor-update-dismissed-version';
-  let latestUpdateVersion = '';
+  let latestUpdateState = null;
   let updateChecking = false;
   const updateElement = (id) => document.getElementById(id);
   const closeUpdatePanel = () => {
@@ -2245,37 +2246,73 @@
     if (badge) badge.setAttribute('aria-expanded', 'false');
     if (panel) panel.style.display = 'none';
   };
+  const setUpdateBadge = (label, version, highlighted) => {
+    const badge = updateElement('update-indicator');
+    if (!badge) return;
+    const labelElement = updateElement('update-indicator-label');
+    if (labelElement) labelElement.textContent = label;
+    const versionElement = updateElement('update-indicator-version');
+    if (versionElement) versionElement.textContent = version;
+    badge.classList.toggle('is-new', Boolean(highlighted));
+    badge.classList.toggle('is-busy', updateChecking);
+  };
+  const renderUpdatePanel = (update) => {
+    const panel = updateElement('update-detail');
+    if (!panel) return;
+    const data = update && typeof update === 'object' ? update : {};
+    const latest = String(data.latest_version || '');
+    const current = String(data.current_version || '');
+    const available = Boolean(data.update_available) && Boolean(latest);
+    const known = Boolean(data.checked_at);
+    const headline = updateElement('update-headline');
+    if (headline) headline.textContent = available ? '发现新版本' : (known ? '已是最新' : '尚未检查更新');
+    const latestElement = updateElement('update-latest');
+    if (latestElement) latestElement.textContent = (available || known) ? `v${available ? latest : current}` : '';
+    const currentElement = updateElement('update-current');
+    if (currentElement) currentElement.textContent = `v${current}`;
+    const upgrade = data.upgrade || {};
+    const kindElement = updateElement('update-kind');
+    if (kindElement) kindElement.textContent = upgrade.label ? ` · ${upgrade.label}` : '';
+    const commandRow = updateElement('update-command-row');
+    if (commandRow) commandRow.style.display = available ? '' : 'none';
+    const commandElement = updateElement('update-command');
+    if (commandElement) commandElement.textContent = String(upgrade.command || '');
+    const link = updateElement('update-link');
+    if (link) link.href = data.release_url || link.href;
+    const dismiss = updateElement('update-dismiss');
+    if (dismiss) dismiss.style.display = available ? '' : 'none';
+    const statusLabel = updateElement('update-status-label');
+    const statusValue = updateElement('update-status-value');
+    if (statusLabel && statusValue) {
+      if (data.last_error) {
+        statusLabel.textContent = '检查失败';
+        statusValue.textContent = String(data.last_error);
+      } else if (known) {
+        statusLabel.textContent = '上次检查';
+        statusValue.textContent = formatTime(data.checked_at);
+      } else {
+        statusLabel.textContent = '从未检查';
+        statusValue.textContent = '';
+      }
+    }
+  };
   const renderUpdate = (state) => {
     const badge = updateElement('update-indicator');
-    const panel = updateElement('update-detail');
     if (!badge) return;
-    const update = (state && state.update) || {};
+    const update = (state && state.update && typeof state.update === 'object') ? state.update : {};
+    latestUpdateState = update;
     const latest = String(update.latest_version || '');
-    if (!update.update_available || !latest || window.localStorage.getItem(UPDATE_DISMISS_KEY) === latest) {
-      badge.style.display = 'none';
-      latestUpdateVersion = '';
-      closeUpdatePanel();
-      return;
+    const available = Boolean(update.update_available) && Boolean(latest);
+    if (available) {
+      const dismissed = window.localStorage.getItem(UPDATE_DISMISS_KEY) === latest;
+      setUpdateBadge('新版本', `v${latest}`, !dismissed && !updateChecking);
+    } else if (update.checked_at) {
+      setUpdateBadge('已是最新', '', false);
+    } else {
+      setUpdateBadge('检查更新', '', false);
     }
-    latestUpdateVersion = latest;
-    const versionLabel = updateElement('update-indicator-version');
-    if (versionLabel) versionLabel.textContent = `v${latest}`;
-    badge.style.display = '';
-    if (panel) {
-      const upgrade = update.upgrade || {};
-      const latestLabel = updateElement('update-latest');
-      if (latestLabel) latestLabel.textContent = `v${latest}`;
-      const currentLabel = updateElement('update-current');
-      if (currentLabel) currentLabel.textContent = `v${String(update.current_version || '')}`;
-      const kindLabel = updateElement('update-kind');
-      if (kindLabel) kindLabel.textContent = upgrade.label ? ` · ${upgrade.label}` : '';
-      const commandLabel = updateElement('update-command');
-      if (commandLabel) commandLabel.textContent = String(upgrade.command || '');
-      const link = updateElement('update-link');
-      if (link) link.href = update.release_url || link.href;
-      // 中文注释：面板已经打开时保持同步；关闭状态不主动弹出，避免打断用户。
-      if (panel.style.display !== 'none') panel.style.display = 'block';
-    }
+    const panel = updateElement('update-detail');
+    if (panel && panel.style.display !== 'none') renderUpdatePanel(update);
   };
   const copyUpdateCommand = async () => {
     const target = updateElement('update-command');
@@ -2314,6 +2351,8 @@
       button.disabled = true;
       button.textContent = '正在检查…';
     }
+    setUpdateBadge('正在检查…', '', false);
+    renderUpdatePanel(latestUpdateState || {});
     try {
       await fetch('/api/update', {
         method: 'POST',
@@ -2321,7 +2360,7 @@
         body: JSON.stringify({ action: 'check' }),
       });
     } catch (error) {
-      // 中文注释：检查失败不改状态，下一次轮询或手动刷新会重新读缓存。
+      // 中文注释：检查失败不改状态，下面的刷新会读回服务端记录的错误。
     }
     window.setTimeout(() => {
       updateChecking = false;
@@ -2333,11 +2372,11 @@
     }, 1500);
   };
   const dismissUpdate = () => {
-    if (latestUpdateVersion) window.localStorage.setItem(UPDATE_DISMISS_KEY, latestUpdateVersion);
-    const badge = updateElement('update-indicator');
-    if (badge) badge.style.display = 'none';
-    latestUpdateVersion = '';
-    closeUpdatePanel();
+    const latest = latestUpdateState ? String(latestUpdateState.latest_version || '') : '';
+    if (latest) window.localStorage.setItem(UPDATE_DISMISS_KEY, latest);
+    // 中文注释：只取消高亮，面板里仍然能看到版本和升级命令。
+    setUpdateBadge('新版本', `v${latest}`, false);
+    renderUpdatePanel(latestUpdateState || {});
   };
   const toggleUpdatePanel = () => {
     const badge = updateElement('update-indicator');
@@ -2352,8 +2391,11 @@
     const healthBadge = updateElement('health-indicator');
     if (healthPanel) healthPanel.style.display = 'none';
     if (healthBadge) healthBadge.setAttribute('aria-expanded', 'false');
+    renderUpdatePanel(latestUpdateState || {});
     panel.style.display = 'block';
     badge.setAttribute('aria-expanded', 'true');
+    // 中文注释：人工点开就是「我要知道现在有没有新版本」：缓存过期就顺手查一次。
+    if (!latestUpdateState || latestUpdateState.stale) checkForUpdate();
   };
 
   let refreshInFlight = false;

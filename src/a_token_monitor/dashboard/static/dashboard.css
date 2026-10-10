@@ -185,9 +185,12 @@
     .action-result { margin: 0 0 12px; }
 
     /* 中文注释：版本更新提醒：顶栏小徽标 + 点开后的升级详情面板。 */
-    .update-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--cyan-border); border-radius: 99px; background: var(--cyan-soft); color: var(--text); font-size: 11px; cursor: pointer; }
-    .update-badge .update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); }
-    .update-badge:hover { border-color: var(--cyan-border-strong); }
+    .update-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 99px; background: none; color: var(--muted-strong); font-size: 11px; cursor: pointer; }
+    .update-badge .update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .6; }
+    .update-badge:hover { border-color: var(--border-strong); color: var(--text); }
+    .update-badge.is-new { border-color: var(--cyan-border); background: var(--cyan-soft); color: var(--text); }
+    .update-badge.is-new .update-dot { background: var(--cyan); opacity: 1; }
+    .update-badge.is-busy { opacity: .7; cursor: progress; }
     .update-detail { margin: -14px 0 20px; padding: 12px 14px; border: 1px solid var(--cyan-border); border-radius: 10px; background: var(--cyan-soft); color: var(--muted-strong); font-size: 12px; }
     .update-detail .update-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
     .update-detail .update-sub { color: var(--muted); font-size: 11px; }

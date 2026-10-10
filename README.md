@@ -200,11 +200,13 @@ trusted first.
 
 ### Update notifications
 
-A newer release is reported on both sides: the Dashboard shows a small badge in the top
-bar that expands into the upgrade details, and every CLI command prints a one-line reminder
-on `stderr` once per version. The check reads GitHub Releases first, then GitHub tags, then
-PyPI, and stores the result in the state directory, so day-to-day commands read a cache
-instead of waiting on the network.
+A newer release is reported on both sides: the Dashboard keeps a small update button in
+the top bar, and every CLI command prints a one-line reminder on `stderr` once per version.
+The button is always there — it reads `Check for updates` before the first check, `Up to
+date` afterwards, and turns cyan with the version number once a newer release exists — and
+clicking it checks again whenever the cached result is stale. The check reads GitHub
+Releases first, then GitHub tags, then PyPI, and stores the result in the state directory,
+so day-to-day commands read a cache instead of waiting on the network.
 
 ```bash
 # Check now and print the release notes of the new version
@@ -220,9 +222,11 @@ a-token-monitor update --cached
 a-token-monitor update --upgrade
 ```
 
-Clicking the badge reveals the release notes link and the exact upgrade command for how
-this copy was installed (`pip`, `pipx` or a source checkout), ready to copy; the version
-you are running is printed at the bottom of the sidebar. Pass `--no-update-check` (or set
+The panel behind the button shows when the last check ran, links to the release notes and
+prints the exact upgrade command for how this copy was installed (`pip`, `pipx` or a source
+checkout), ready to copy; `Ignore this version` only drops the highlight, so the version and
+the command stay available. The version you are running is printed at the bottom of the
+sidebar. Pass `--no-update-check` (or set
 `A_TOKEN_MONITOR_NO_UPDATE_CHECK=1`) to turn the automatic reminder off, and set
 `GITHUB_TOKEN` if you hit GitHub API rate limits.
 

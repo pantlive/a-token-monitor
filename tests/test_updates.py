@@ -785,6 +785,20 @@ class DashboardUpdateTests(unittest.TestCase):
         self.assertIsNone(server.updates.cache_path)
         self.assertFalse(server.updates.enabled)
 
+    def test_dashboard_page_keeps_the_update_button_visible(self) -> None:
+        """按钮常驻：没发布新版本时也要在页面上（只是中性色），不能是 display:none。"""
+
+        from a_token_monitor.dashboard import _DASHBOARD_HTML
+
+        start = _DASHBOARD_HTML.index('id="update-indicator"')
+        tag = _DASHBOARD_HTML[start - 20 : _DASHBOARD_HTML.index(">", start)]
+        self.assertNotIn("display:none", tag)
+        self.assertIn('id="update-indicator-label"', _DASHBOARD_HTML)
+        self.assertIn('id="update-detail"', _DASHBOARD_HTML)
+        # 详情面板与「复制命令」默认隐藏，由 /api/state 的 update 字段点亮。
+        panel = _DASHBOARD_HTML[_DASHBOARD_HTML.index('id="update-detail"') :]
+        self.assertIn('style="display:none"', panel[: panel.index(">")])
+
     def test_config_rejects_bad_intervals(self) -> None:
         with self.assertRaises(ValueError):
             DashboardConfig(update_interval=0)

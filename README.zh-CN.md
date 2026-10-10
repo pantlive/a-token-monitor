@@ -177,9 +177,11 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
 
 ### 版本更新提醒
 
-发布新版本后两端都会提醒：Dashboard 在顶栏显示一个小徽标（点开才是升级详情），
-CLI 每个命令在 `stderr` 打印一次提醒（每个版本只提醒一次）。检查顺序是 GitHub
-Release → GitHub 标签 → PyPI，结果缓存在状态目录，所以日常命令只读缓存、不等网络。
+两端都会提醒：Dashboard 顶栏常驻一个更新按钮，CLI 每个命令在 `stderr` 打印一次
+提醒（每个版本只提醒一次）。按钮一直在——第一次检查前显示「检查更新」，检查过没有
+新版本显示「已是最新」，一旦出现更新的版本就变青色并带上版本号；缓存过期时点一下
+就会重新检测。检查顺序是 GitHub Release → GitHub 标签 → PyPI，结果缓存在状态目录，
+所以日常命令只读缓存、不等网络。
 
 ```bash
 # 立即检查并打印新版本的发布说明
@@ -195,8 +197,9 @@ a-token-monitor update --cached
 a-token-monitor update --upgrade
 ```
 
-点开徽标可以看到 Release 说明链接，以及按当前安装方式（`pip`、`pipx` 或源码
-checkout）推导出的升级命令，可一键复制；当前运行的版本号显示在侧边栏底部。加
+点开按钮能看到上次检查时间、Release 说明链接，以及按当前安装方式（`pip`、`pipx`
+或源码 checkout）推导出的升级命令，可一键复制；「忽略此版本」只取消高亮，版本号和
+升级命令仍然看得到。当前运行的版本号显示在侧边栏底部。加
 `--no-update-check`（或设置 `A_TOKEN_MONITOR_NO_UPDATE_CHECK=1`）可关闭自动提醒，
 GitHub API 限流时设置 `GITHUB_TOKEN` 即可提高限额。
 
