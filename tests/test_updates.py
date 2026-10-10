@@ -27,6 +27,26 @@ class _TtyStream(io.StringIO):
         return True
 
 
+def _next_version(version: str = __version__) -> str:
+    """比给定版本更高的一位版本号（次版本 +1）。
+
+    中文注释：凡是比对「当前版本」的用例都不能写死 ``0.10.0`` 这类字面量——
+    发一版就全部过期，1.0.0 发布时当场踩到过一次。
+    """
+
+    parsed = updates.parse_version(version)
+    numbers = list(parsed[0]) if parsed is not None else [1, 0, 0]
+    while len(numbers) < 3:
+        numbers.append(0)
+    numbers[1] += 1
+    return ".".join(str(part) for part in numbers)
+
+
+# 比当前版本更高的一版 / 再高一版，供「发现新版本」类用例使用。
+NEXT_VERSION = _next_version()
+FAR_VERSION = _next_version(NEXT_VERSION)
+
+
 def _http_error(url: str, code: int) -> HTTPError:
     return HTTPError(url, code, "boom", {}, None)  # type: ignore[arg-type]
 
@@ -495,7 +515,9 @@ class CliUpdateTests(unittest.TestCase):
             code = cli_main(["--state-dir", str(self.state_dir), *arguments])
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def _seed_cache(self, version: str = "0.10.0", notified: str | None = None) -> None:
+    def _seed_cache(
+        self, version: str = NEXT_VERSION, notified: str | None = None
+    ) -> None:
         moment = time.time()
         (self.state_dir / updates.CACHE_FILENAME).write_text(
             json.dumps(
@@ -517,35 +539,41 @@ class CliUpdateTests(unittest.TestCase):
         )
 
     def test_update_without_cache_flag_checks_the_network(self) -> None:
-        self._seed_cache(version=__version__, notified="0.9.0")
-        fetcher = FakeFetcher(**{"releases/latest": _release_payload("v0.11.0")})
+        self._seed_cache(version=__version__, notified=__version__)
+        fetcher = FakeFetcher(
+            **{"releases/latest": _release_payload(f"v{NEXT_VERSION}")}
+        )
         with mock.patch.object(updates, "_fetch_json", side_effect=fetcher):
             code, stdout, _ = self._run("update")
         self.assertEqual(code, 0)
         self.assertTrue(fetcher.calls)
-        self.assertIn("最新版本: 0.11.0", stdout)
+        self.assertIn(f"最新版本: {NEXT_VERSION}", stdout)
         self.assertIn("状态: 发现新版本", stdout)
 
     def test_update_json_reports_a_new_version(self) -> None:
         with mock.patch.object(
             updates,
             "_fetch_json",
-            side_effect=FakeFetcher(**{"releases/latest": _release_payload()}),
+            side_effect=FakeFetcher(
+                **{"releases/latest": _release_payload(f"v{NEXT_VERSION}")}
+            ),
         ):
             code, stdout, _ = self._run("update", "--json")
         self.assertEqual(code, 0)
         payload = json.loads(stdout)
         self.assertTrue(payload["update_available"])
-        self.assertEqual(payload["latest_version"], "0.10.0")
+        self.assertEqual(payload["latest_version"], NEXT_VERSION)
         self.assertIn("command", payload["upgrade"])
 
     def test_update_cached_prints_upgrade_command_without_network(self) -> None:
         self._seed_cache()
-        fetcher = FakeFetcher(**{"releases/latest": _release_payload()})
+        fetcher = FakeFetcher(
+            **{"releases/latest": _release_payload(f"v{NEXT_VERSION}")}
+        )
         with mock.patch.object(updates, "_fetch_json", side_effect=fetcher):
             code, stdout, _ = self._run("update", "--cached")
         self.assertEqual(code, 0)
-        self.assertIn("最新版本: 0.10.0", stdout)
+        self.assertIn(f"最新版本: {NEXT_VERSION}", stdout)
         self.assertIn("状态: 发现新版本", stdout)
         self.assertIn("升级命令: ", stdout)
         self.assertEqual(fetcher.calls, [])
@@ -566,7 +594,7 @@ class CliUpdateTests(unittest.TestCase):
         with mock.patch.object(updates.UpdateChecker, "should_refresh", return_value=False):
             first = self._run("status")
             second = self._run("status")
-        self.assertIn("发现新版本 v0.10.0", first[2])
+        self.assertIn(f"发现新版本 v{NEXT_VERSION}", first[2])
         self.assertNotIn("发现新版本", second[2])
 
     def test_notice_respects_flag_and_environment(self) -> None:
@@ -589,15 +617,17 @@ class CliUpdateTests(unittest.TestCase):
     def test_notice_calls_check_when_interactive(self) -> None:
         """stderr 是终端且缓存过期时，命令结束后补一次抓取并提醒。"""
 
-        fetcher = FakeFetcher(**{"releases/latest": _release_payload()})
+        fetcher = FakeFetcher(
+            **{"releases/latest": _release_payload(f"v{NEXT_VERSION}")}
+        )
         with mock.patch.object(updates, "_fetch_json", side_effect=fetcher):
             _, _, stderr = self._run("status", tty=True)
-        self.assertIn("发现新版本 v0.10.0", stderr)
+        self.assertIn(f"发现新版本 v{NEXT_VERSION}", stderr)
         self.assertTrue(fetcher.calls)
         snapshot = updates.UpdateChecker(
             self.state_dir, current_version=__version__
         ).snapshot()
-        self.assertEqual(snapshot["notified_version"], "0.10.0")
+        self.assertEqual(snapshot["notified_version"], NEXT_VERSION)
 
     def test_upgrade_requires_confirmation_without_a_terminal(self) -> None:
         self._seed_cache()
@@ -722,7 +752,7 @@ class DashboardUpdateTests(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.loads(error.read().decode("utf-8"))
 
-    def _wait_for_release(self, base_url: str, version: str = "0.10.0") -> dict:
+    def _wait_for_release(self, base_url: str, version: str = NEXT_VERSION) -> dict:
         deadline = time.time() + 10
         payload: dict = {}
         while time.time() < deadline:
@@ -734,7 +764,9 @@ class DashboardUpdateTests(unittest.TestCase):
         self.fail(f"后台检查没有在超时前写入结果: {payload}")
 
     def test_background_check_populates_state_and_endpoint(self) -> None:
-        fetcher = FakeFetcher(**{"releases/latest": _release_payload()})
+        fetcher = FakeFetcher(
+            **{"releases/latest": _release_payload(f"v{NEXT_VERSION}")}
+        )
         with mock.patch.object(updates, "_fetch_json", side_effect=fetcher):
             server = self._server()
             host, port = server.address
@@ -743,14 +775,16 @@ class DashboardUpdateTests(unittest.TestCase):
             _, state = self._get(base_url, "/api/state")
         self.assertTrue(payload["available"])
         self.assertTrue(payload["update"]["update_available"])
-        self.assertEqual(state["update"]["latest_version"], "0.10.0")
+        self.assertEqual(state["update"]["latest_version"], NEXT_VERSION)
         self.assertIn("command", state["update"]["upgrade"])
         # 缓存与 CLI 共用，跑完 daemon 后一次性命令也能立刻看到。
         cached = json.loads((self.state_dir / updates.CACHE_FILENAME).read_text("utf-8"))
-        self.assertEqual(cached["latest_version"], "0.10.0")
+        self.assertEqual(cached["latest_version"], NEXT_VERSION)
 
     def test_post_triggers_another_check(self) -> None:
-        fetcher = FakeFetcher(**{"releases/latest": _release_payload("v0.11.0")})
+        fetcher = FakeFetcher(
+            **{"releases/latest": _release_payload(f"v{FAR_VERSION}")}
+        )
         with mock.patch.object(updates, "_fetch_json", side_effect=fetcher):
             server = self._server()
             host, port = server.address
@@ -758,7 +792,7 @@ class DashboardUpdateTests(unittest.TestCase):
             status, payload = self._post(base_url, "/api/update", {"action": "check"})
             self.assertEqual(status, 200)
             self.assertTrue(payload["ok"])
-            self._wait_for_release(base_url, "0.11.0")
+            self._wait_for_release(base_url, FAR_VERSION)
 
     def test_post_rejects_unknown_action(self) -> None:
         server = self._server()

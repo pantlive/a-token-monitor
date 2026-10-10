@@ -12,6 +12,7 @@ from threading import Lock
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
+from .. import __version__
 from ..alerts import (
     AlertStoreError,
     TrafficAlertStore,
@@ -171,7 +172,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     ``context`` 的子类。
     """
 
-    server_version = "ATokenMonitorDashboard/0.9"
+    # 中文注释：Server 头跟随发行版本号，不再手写，避免发版时漏改。
+    server_version = f"ATokenMonitorDashboard/{__version__}"
     context: ClassVar[_DashboardContext]
     # 中文注释：do_POST 每次请求都会重新赋值；GET/HEAD 与直接调用处理器方法时为空。
     # 不能用 ClassVar：mypy 不允许通过实例给类变量赋值。

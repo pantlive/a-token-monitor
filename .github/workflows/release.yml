@@ -2,7 +2,7 @@
 #
 # 使用 PyPI Trusted Publisher（OIDC），不在仓库里保存 API token：
 # 需要先在 PyPI 项目设置里把本仓库的 release.yml 登记为 trusted publisher。
-# 标签版本必须与 pyproject.toml 的 version 一致（v0.9.0 ↔ 0.9.0），不一致即失败。
+# 标签版本必须与 pyproject.toml 的 version 一致（v1.0.0 ↔ 1.0.0），不一致即失败。
 name: Release
 
 on:
