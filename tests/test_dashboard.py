@@ -4951,6 +4951,46 @@ class HistoryDashboardTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"], "history_unavailable")
 
+    def test_early_error_still_drains_the_request_body(self) -> None:
+        """提前返回（无 manager 的 503）也要先读完 body。
+
+        中文注释：服务端没读完就关闭连接时，Windows 客户端拿到的是 WinError 10053
+        （连接中止）而不是响应，所以这里用带 body 的请求验证响应可读。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=None)
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                status, payload = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "cleanup", "confirm": True, "padding": "x" * 32768},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "history_unavailable")
+
+        # 超过正文上限的请求（有 manager 时会走校验分支）同样先被读完再回 400。
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server, _, _ = self._server(root, manager=self._FakeHistoryManager())
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                oversized = self._post(
+                    base_url,
+                    "/api/history",
+                    {"action": "cleanup", "confirm": True, "padding": "x" * 131072},
+                )
+            finally:
+                server.close()
+
+        self.assertEqual(oversized[0], 400)
+        self.assertEqual(oversized[1]["error"], "invalid_history_action")
+
     def test_unknown_action_returns_400(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

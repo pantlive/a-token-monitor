@@ -70,6 +70,11 @@ from .state import (
 )
 
 
+# 中文注释：请求体最多读这么多字节（正常请求上限是 64 KiB，这里留足余量）。
+# 超过硬上限的部分不再读取，避免异常的超大 body 把内存或线程占满。
+_BODY_DRAIN_LIMIT = 8 * 1024 * 1024
+
+
 @dataclass
 class _DashboardContext:
     """请求处理器共享的依赖与状态缓存；一个 Dashboard 服务对应一个实例。
@@ -168,6 +173,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
     server_version = "ATokenMonitorDashboard/0.9"
     context: ClassVar[_DashboardContext]
+    # 中文注释：do_POST 每次请求都会重新赋值；GET/HEAD 与直接调用处理器方法时为空。
+    # 不能用 ClassVar：mypy 不允许通过实例给类变量赋值。
+    _request_body: bytes = b""
 
     _GET_ROUTES: ClassVar[dict[str, str]] = {
         "/": "_get_dashboard_page",
@@ -227,11 +235,41 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """处理告警历史、磁盘管理、扫描目录和历史数据的写请求，其余路径仍为只读。"""
 
+        # 中文注释：先把请求体读干净再分发。带 body 的 POST 如果服务端没读完就回响应
+        # 并关闭连接，Windows 会直接 RST，客户端拿到 WinError 10053（连接中止）而不是
+        # 我们的状态码；提前返回的错误分支（405 / 503 / 400）尤其容易踩到。
+        self._request_body = self._take_request_body()
         route = self._POST_ROUTES.get(urlsplit(self.path).path)
         if route is None:
             self._send_json(status=405, payload={"error": "read_only"})
             return
         getattr(self, route)()
+
+    def _take_request_body(self) -> bytes:
+        """按 Content-Length 读完请求体；只保留正文上限以内的字节。
+
+        超过硬上限的部分不再读取（连接也标记为不可复用），避免异常的超大 body
+        把内存或线程占满。
+        """
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return b""
+        if length <= 0:
+            return b""
+        kept = bytearray()
+        remaining = min(length, _BODY_DRAIN_LIMIT)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            if len(kept) < _MAX_REQUEST_BYTES:
+                kept.extend(chunk[: _MAX_REQUEST_BYTES - len(kept)])
+            remaining -= len(chunk)
+        if length > _BODY_DRAIN_LIMIT:
+            self.close_connection = True
+        return bytes(kept)
 
     def _dispatch(self, routes: dict[str, str], include_body: bool) -> bool:
         """按路由表分发；未命中路由时再尝试 favicon，都不匹配返回 False。"""
@@ -1242,7 +1280,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             raise AlertStoreError("Content-Length 非法") from error
         if length <= 0 or length > _MAX_REQUEST_BYTES:
             raise AlertStoreError("请求体大小非法")
-        raw = self.rfile.read(length)
+        # 中文注释：body 已由 do_POST 在分发前读完（见 _take_request_body），
+        # 这里只做校验与解析。
+        raw = self._request_body[:length]
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
