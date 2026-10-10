@@ -183,3 +183,15 @@
     .ratio .ratio-sessions { background: var(--violet); }
     .ratio .ratio-other { background: var(--track-strong); }
     .action-result { margin: 0 0 12px; }
+
+    /* 中文注释：版本更新提醒：顶栏小徽标 + 点开后的升级详情面板。 */
+    .update-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--cyan-border); border-radius: 99px; background: var(--cyan-soft); color: var(--text); font-size: 11px; cursor: pointer; }
+    .update-badge .update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); }
+    .update-badge:hover { border-color: var(--cyan-border-strong); }
+    .update-detail { margin: -14px 0 20px; padding: 12px 14px; border: 1px solid var(--cyan-border); border-radius: 10px; background: var(--cyan-soft); color: var(--muted-strong); font-size: 12px; }
+    .update-detail .update-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+    .update-detail .update-sub { color: var(--muted); font-size: 11px; }
+    .update-detail .update-command { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 9px; }
+    .update-detail code { padding: 4px 8px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel); color: var(--muted-strong); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
+    .update-detail .update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 9px; }
+    .update-detail .update-link { color: var(--cyan); font-size: 12px; }

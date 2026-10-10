@@ -695,6 +695,8 @@ class MultiAccountMonitor:
                         health=self.health,
                         history=self._history_manager,
                         retention=self.retention_controller,
+                        # 中文注释：版本更新检查与 CLI 共用状态目录缓存。
+                        state_dir=self.state_dir,
                     )
                     self._dashboard.start()
                     host, port = self._dashboard.address

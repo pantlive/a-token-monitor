@@ -2233,6 +2233,129 @@
       }
     }
   };
+  // 中文注释：版本更新提醒。顶栏只放一个小徽标（发现新版本时才出现），点开才显示
+  // 升级详情与可复制的升级命令；「忽略此版本」按版本记在 localStorage。
+  const UPDATE_DISMISS_KEY = 'a-token-monitor-update-dismissed-version';
+  let latestUpdateVersion = '';
+  let updateChecking = false;
+  const updateElement = (id) => document.getElementById(id);
+  const closeUpdatePanel = () => {
+    const badge = updateElement('update-indicator');
+    const panel = updateElement('update-detail');
+    if (badge) badge.setAttribute('aria-expanded', 'false');
+    if (panel) panel.style.display = 'none';
+  };
+  const renderUpdate = (state) => {
+    const badge = updateElement('update-indicator');
+    const panel = updateElement('update-detail');
+    if (!badge) return;
+    const update = (state && state.update) || {};
+    const latest = String(update.latest_version || '');
+    if (!update.update_available || !latest || window.localStorage.getItem(UPDATE_DISMISS_KEY) === latest) {
+      badge.style.display = 'none';
+      latestUpdateVersion = '';
+      closeUpdatePanel();
+      return;
+    }
+    latestUpdateVersion = latest;
+    const versionLabel = updateElement('update-indicator-version');
+    if (versionLabel) versionLabel.textContent = `v${latest}`;
+    badge.style.display = '';
+    if (panel) {
+      const upgrade = update.upgrade || {};
+      const latestLabel = updateElement('update-latest');
+      if (latestLabel) latestLabel.textContent = `v${latest}`;
+      const currentLabel = updateElement('update-current');
+      if (currentLabel) currentLabel.textContent = `v${String(update.current_version || '')}`;
+      const kindLabel = updateElement('update-kind');
+      if (kindLabel) kindLabel.textContent = upgrade.label ? ` · ${upgrade.label}` : '';
+      const commandLabel = updateElement('update-command');
+      if (commandLabel) commandLabel.textContent = String(upgrade.command || '');
+      const link = updateElement('update-link');
+      if (link) link.href = update.release_url || link.href;
+      // 中文注释：面板已经打开时保持同步；关闭状态不主动弹出，避免打断用户。
+      if (panel.style.display !== 'none') panel.style.display = 'block';
+    }
+  };
+  const copyUpdateCommand = async () => {
+    const target = updateElement('update-command');
+    const button = updateElement('update-copy');
+    const command = target ? String(target.textContent || '') : '';
+    if (!command) return;
+    let copied = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext !== false) {
+        await navigator.clipboard.writeText(command);
+        copied = true;
+      }
+    } catch (error) {
+      copied = false;
+    }
+    if (!copied && target) {
+      // 中文注释：http 页面可能拿不到剪贴板权限，退回到选中文本让用户自己复制。
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
+    if (button) {
+      button.textContent = copied ? '已复制' : '复制失败，请手动复制';
+      window.setTimeout(() => { button.textContent = '复制命令'; }, 2000);
+    }
+  };
+  const checkForUpdate = async () => {
+    const button = updateElement('update-check');
+    if (updateChecking) return;
+    updateChecking = true;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在检查…';
+    }
+    try {
+      await fetch('/api/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'check' }),
+      });
+    } catch (error) {
+      // 中文注释：检查失败不改状态，下一次轮询或手动刷新会重新读缓存。
+    }
+    window.setTimeout(() => {
+      updateChecking = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = '立即检查';
+      }
+      refresh();
+    }, 1500);
+  };
+  const dismissUpdate = () => {
+    if (latestUpdateVersion) window.localStorage.setItem(UPDATE_DISMISS_KEY, latestUpdateVersion);
+    const badge = updateElement('update-indicator');
+    if (badge) badge.style.display = 'none';
+    latestUpdateVersion = '';
+    closeUpdatePanel();
+  };
+  const toggleUpdatePanel = () => {
+    const badge = updateElement('update-indicator');
+    const panel = updateElement('update-detail');
+    if (!badge || !panel) return;
+    if (panel.style.display !== 'none') {
+      closeUpdatePanel();
+      return;
+    }
+    // 中文注释：两块明细面板不同时展开，避免顶栏下面叠两层。
+    const healthPanel = updateElement('health-detail');
+    const healthBadge = updateElement('health-indicator');
+    if (healthPanel) healthPanel.style.display = 'none';
+    if (healthBadge) healthBadge.setAttribute('aria-expanded', 'false');
+    panel.style.display = 'block';
+    badge.setAttribute('aria-expanded', 'true');
+  };
+
   let refreshInFlight = false;
   const refresh = async () => {
     // 中文注释：慢请求期间不叠加轮询，避免旧响应覆盖新状态。
@@ -2272,6 +2395,7 @@
       renderAccounts(state);
       renderTraffic(state);
       renderHousekeeping(state);
+      renderUpdate(state);
       renderSectionSummaries(state);
       renderAlerts();
       if (alertHistoryState) refreshAlertHistory();
@@ -2293,6 +2417,10 @@
     }
   };
   document.getElementById('refresh-button')?.addEventListener('click', refresh);
+  updateElement('update-indicator')?.addEventListener('click', toggleUpdatePanel);
+  updateElement('update-copy')?.addEventListener('click', copyUpdateCommand);
+  updateElement('update-check')?.addEventListener('click', checkForUpdate);
+  updateElement('update-dismiss')?.addEventListener('click', dismissUpdate);
   document.getElementById('health-indicator')?.addEventListener('click', () => {
     const badge = document.getElementById('health-indicator');
     const panel = document.getElementById('health-detail');
@@ -2307,6 +2435,7 @@
     const visible = Boolean(panel.innerHTML);
     panel.style.display = visible ? 'block' : 'none';
     badge.setAttribute('aria-expanded', String(visible));
+    if (visible) closeUpdatePanel();
   });
   document.getElementById('usage-load-button')?.addEventListener('click', refreshUsage);
   document.getElementById('insights-load-button')?.addEventListener('click', refreshInsights);

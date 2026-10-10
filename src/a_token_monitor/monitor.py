@@ -363,6 +363,8 @@ class MultiSessionMonitor:
                             retention_days=self.config.alert_retention_days,
                         ),
                         health=tracker,
+                        # 中文注释：版本更新检查与 CLI 共用状态目录缓存。
+                        state_dir=self.registry.state_dir,
                     )
                     self._dashboard.start()
                     host, port = self._dashboard.address

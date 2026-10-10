@@ -31,3 +31,7 @@ for _language_variable in ("LC_ALL", "LC_MESSAGES", "LANG"):
     os.environ.pop(_language_variable, None)
 
 tempfile.tempdir = os.path.realpath(tempfile.gettempdir())
+
+# 中文注释：版本更新提醒在交互终端里会补一次网络检查；测试进程从不联网，
+# 需要联网行为的用例（tests/test_updates.py）自己用 FakeFetcher 打桩。
+os.environ["A_TOKEN_MONITOR_NO_UPDATE_CHECK"] = "1"

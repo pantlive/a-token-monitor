@@ -198,6 +198,34 @@ embedded in the daemon, so no separate front-end service is needed.
 Windows) — the page has no authentication by default, so make sure the network is
 trusted first.
 
+### Update notifications
+
+A newer release is reported on both sides: the Dashboard shows a small badge in the top
+bar that expands into the upgrade details, and every CLI command prints a one-line reminder
+on `stderr` once per version. The check reads GitHub Releases first, then GitHub tags, then
+PyPI, and stores the result in the state directory, so day-to-day commands read a cache
+instead of waiting on the network.
+
+```bash
+# Check now and print the release notes of the new version
+a-token-monitor update --notes
+
+# Machine-readable result; the exit code stays 0 even when the check fails
+a-token-monitor update --json
+
+# Read the cached result only, without any network access
+a-token-monitor update --cached
+
+# Run the detected upgrade command (pip / pipx / git pull), then restart
+a-token-monitor update --upgrade
+```
+
+Clicking the badge reveals the release notes link and the exact upgrade command for how
+this copy was installed (`pip`, `pipx` or a source checkout), ready to copy; the version
+you are running is printed at the bottom of the sidebar. Pass `--no-update-check` (or set
+`A_TOKEN_MONITOR_NO_UPDATE_CHECK=1`) to turn the automatic reminder off, and set
+`GITHUB_TOKEN` if you hit GitHub API rate limits.
+
 ### Common tuning flags
 
 | Flag | Default | Description |
@@ -211,6 +239,7 @@ trusted first.
 | `--usage-retention-days` / `--session-retention-days` | 90 / 30 | Retention days for the usage index / finished session history (editable in the settings page) |
 | `--alert-retention-days` | 30 | Retention days for traffic alerts |
 | `--lang en` / `--lang zh` | auto | Force the CLI and Dashboard language |
+| `--no-update-check` | off | Skip the version check and the update reminder (`A_TOKEN_MONITOR_NO_UPDATE_CHECK=1` also works) |
 
 All of these work on both `daemon` and `service install`.
 

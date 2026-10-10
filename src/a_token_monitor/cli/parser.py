@@ -21,6 +21,7 @@ from ..retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
     DEFAULT_USAGE_RETENTION_DAYS,
 )
+from ..updates import DEFAULT_TIMEOUT as UPDATE_TIMEOUT
 from ..usage import (
     DEFAULT_SEARCH_DAYS,
     DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
@@ -93,8 +94,10 @@ def _port(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
 
-    language = argparse.ArgumentParser(add_help=False)
-    language.add_argument(
+    # 中文注释：全局开关放在共享父解析器里，主解析器和每个子命令都能用，
+    # 位置随意（`--no-update-check status` 与 `status --no-update-check` 等价）。
+    shared_options = argparse.ArgumentParser(add_help=False)
+    shared_options.add_argument(
         "--lang",
         choices=("auto", "zh", "en"),
         default="auto",
@@ -103,10 +106,23 @@ def build_parser() -> argparse.ArgumentParser:
             "（默认: auto）"
         ),
     )
+    shared_options.add_argument(
+        "--no-update-check",
+        dest="no_update_check",
+        action="store_true",
+        # 中文注释：用 SUPPRESS 而不是默认 False：子命令解析会把自己动作的默认值
+        # 覆盖回命名空间，写在子命令前面的开关会被默认值冲掉；SUPPRESS 让「没写」
+        # 就是没有这个属性，getattr 的兜底值才是真正的默认行为。
+        default=argparse.SUPPRESS,
+        help=(
+            "不检查新版本，也不打印更新提醒"
+            "（也可用 A_TOKEN_MONITOR_NO_UPDATE_CHECK=1）"
+        ),
+    )
     parser = argparse.ArgumentParser(
         prog="a-token-monitor",
         description="监控 Codex / Grok / Kimi / Command Code / DeepSeek Harness 等 code agent 的额度、会话、用量和异常流量。",
-        parents=[language],
+        parents=[shared_options],
     )
     parser.add_argument(
         "--state-dir",
@@ -142,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser(
         "status",
-        parents=[language],
+        parents=[shared_options],
         help="查看历史状态，不会调用 Codex",
     )
     status_parser.add_argument(
@@ -153,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     quota_parser = subparsers.add_parser(
         "quota",
-        parents=[language],
+        parents=[shared_options],
         help="主动读取当前账户额度，不启动模型任务",
     )
     quota_parser.add_argument(
@@ -169,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sessions_parser = subparsers.add_parser(
         "sessions",
-        parents=[language],
+        parents=[shared_options],
         help="发现并列出所有当前活动的 Codex JSONL 会话",
     )
     sessions_parser.add_argument(
@@ -192,14 +208,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_parser = subparsers.add_parser(
         "daemon",
-        parents=[language],
+        parents=[shared_options],
         help="持续监控活动会话、额度、本地用量和异常流量",
     )
     _add_daemon_options(daemon_parser)
 
     traffic_parser = subparsers.add_parser(
         "traffic",
-        parents=[language],
+        parents=[shared_options],
         help="扫描本机 code agent 进程的异常流量",
     )
     traffic_parser.add_argument(
@@ -217,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     alerts_parser = subparsers.add_parser(
         "alerts",
-        parents=[language],
+        parents=[shared_options],
         help="查询已落盘的历史异常流量告警，并管理已读状态；存在未读告警时退出码为 1",
     )
     alerts_parser.add_argument(
@@ -357,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     usage_parser = subparsers.add_parser(
         "usage",
-        parents=[language],
+        parents=[shared_options],
         help="按日期、模型、账号和会话检索已索引的 token 用量历史",
     )
     usage_parser.add_argument(
@@ -439,7 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     disk_parser = subparsers.add_parser(
         "disk",
-        parents=[language],
+        parents=[shared_options],
         help="统计 .codex 等 agent 数据目录的磁盘占用，并预览可归档或清理的会话",
     )
     disk_parser.add_argument(
@@ -461,9 +477,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_disk_threshold_options(disk_parser)
 
+    update_parser = subparsers.add_parser(
+        "update",
+        parents=[shared_options],
+        help="检查新版本并在需要时升级",
+    )
+    update_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出更新检查结果",
+    )
+    update_parser.add_argument(
+        "--cached",
+        action="store_true",
+        help="只读缓存结果，不联网检查",
+    )
+    update_parser.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=UPDATE_TIMEOUT,
+        help="检查更新的网络超时秒数（默认: 6）",
+    )
+    update_parser.add_argument(
+        "--notes",
+        action="store_true",
+        help="发现有新版本时同时打印发布说明",
+    )
+    update_parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="检查后执行升级命令（需要确认）",
+    )
+    update_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="升级时不再询问确认",
+    )
+
     service_parser = subparsers.add_parser(
         "service",
-        parents=[language],
+        parents=[shared_options],
         help="安装和管理无需保持终端打开的后台服务（Linux systemd / macOS launchd）",
     )
     service_actions = service_parser.add_subparsers(

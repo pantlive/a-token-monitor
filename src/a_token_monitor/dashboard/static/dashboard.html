@@ -34,7 +34,7 @@ __PAGE_STYLES__  </style>
     </nav>
     <div class="sidebar-bottom">
       <div class="service-state"><span id="service-dot" class="status-dot"></span><span id="service-state">监控服务在线</span></div>
-      <div class="sidebar-foot">状态每 5 秒同步 · 只记录元数据</div>
+      <div class="sidebar-foot">状态每 5 秒同步 · 只记录元数据<span class="sidebar-version">· v__VERSION__</span></div>
     </div>
   </aside>
 
@@ -44,12 +44,15 @@ __PAGE_STYLES__  </style>
       <div class="topbar-actions">
         <div class="live-indicator"><span class="status-dot"></span><span id="service-sync">等待首次同步</span></div>
         <button id="health-indicator" class="health-badge" type="button" style="display:none" aria-expanded="false"></button>
+        <button id="update-indicator" class="update-badge" type="button" style="display:none" aria-expanded="false" title="发现新版本，点击查看升级命令"><span class="update-dot"></span><span>新版本</span><span id="update-indicator-version" class="mono"></span></button>
 __THEME_TOGGLE__
         <button id="refresh-button" class="refresh-button" type="button" aria-label="立即刷新状态"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg><span>刷新</span></button>
       </div>
     </header>
 
     <div id="health-detail" class="health-detail" style="display:none"></div>
+
+__UPDATE_PANEL__
 
     <section id="overview" class="page-hero">
       <div>

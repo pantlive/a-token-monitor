@@ -30,6 +30,7 @@ from ..registry import RegistryError
 from ..retention import HistoryDataManager, RetentionController, RetentionError
 from ..scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
 from ..traffic import TrafficMonitor
+from ..updates import UpdateChecker
 from ..usage import (
     SessionSwitchThresholds,
     UsageAggregator,
@@ -85,6 +86,7 @@ class _DashboardContext:
     traffic_monitor: TrafficMonitor | None = None
     alert_store: TrafficAlertStore | None = None
     housekeeping: HousekeepingMonitor | None = None
+    updates: UpdateChecker | None = None
     thresholds_in_use: SessionSwitchThresholds = field(
         default_factory=SessionSwitchThresholds
     )
@@ -146,6 +148,9 @@ class _DashboardContext:
             state["housekeeping"] = _housekeeping_summary(self.housekeeping)
             state["usage_index"] = _usage_index_summary(self.usage_aggregator)
             state["health"] = self.health.snapshot() if self.health is not None else None
+            state["update"] = (
+                self.updates.snapshot() if self.updates is not None else None
+            )
             # 中文注释：TTL 从构建完成后计算，慢查询也不会使排队请求重复扫描。
             self.state_cache.update(
                 revision=revision, expires=time.monotonic() + 2, payload=state
@@ -178,6 +183,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/usage/search": "_get_usage_search",
         "/api/housekeeping": "_get_housekeeping",
         "/api/insights": "_get_insights",
+        "/api/update": "_get_update",
     }
     _HEAD_ROUTES: ClassVar[dict[str, str]] = {
         "/": "_head_dashboard_page",
@@ -192,12 +198,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/usage/search": "_head_usage_search",
         "/api/housekeeping": "_head_housekeeping",
         "/api/insights": "_head_insights",
+        "/api/update": "_head_update",
     }
     _POST_ROUTES: ClassVar[dict[str, str]] = {
         "/api/alerts": "_post_alerts",
         "/api/housekeeping": "_post_housekeeping",
         "/api/scan-dirs": "_post_scan_dirs",
         "/api/history": "_post_history",
+        "/api/update": "_post_update",
     }
 
     def do_GET(self) -> None:
@@ -764,6 +772,66 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         )
 
 
+    def _update_payload(self) -> dict[str, Any]:
+        """版本更新状态；没有接入检查器时返回不可用。"""
+
+        checker = self.context.updates
+        if checker is None:
+            return {"available": False, "update": None}
+        # 中文注释：available 表示「这个运行模式能查更新」（有状态目录且没被关闭），
+        # update 里始终带快照，页面据此区分「没有新版本」与「检查已关闭」。
+        return {"available": checker.enabled, "update": checker.snapshot()}
+
+    def _get_update(self) -> None:
+        """GET /api/update：只读缓存，不触发网络检查。"""
+
+        self._send_json(
+            status=200,
+            payload={"updated_at": time.time(), **self._update_payload()},
+        )
+
+    def _head_update(self) -> None:
+        """HEAD /api/update：只回响应头。"""
+
+        self._send_json(
+            status=200,
+            payload={"updated_at": time.time(), **self._update_payload()},
+            include_body=False,
+        )
+
+    def _post_update(self) -> None:
+        """POST /api/update：后台异步补一次检查，请求线程不等待网络。"""
+
+        checker = self.context.updates
+        if checker is None:
+            self._send_json(
+                status=503,
+                payload={"error": "update_check_unavailable"},
+            )
+            return
+        try:
+            body = self._read_json_body()
+        except AlertStoreError as error:
+            self._send_json(
+                status=400,
+                payload={"error": "invalid_update_request", "message": str(error)},
+            )
+            return
+        action = str(body.get("action") or "check").strip()
+        if action != "check":
+            self._send_json(status=400, payload={"error": "invalid_update_action"})
+            return
+        started = checker.refresh_async(force=True)
+        self._send_json(
+            status=200,
+            payload={
+                "ok": True,
+                "checking": started,
+                "available": True,
+                "update": checker.snapshot(),
+            },
+        )
+
     def _head_insights(self) -> None:
         """HEAD /api/insights：只回响应头，不做实际查询。"""
 
@@ -1302,6 +1370,7 @@ def _make_handler(
     health: HealthTracker | None = None,
     history: HistoryDataManager | None = None,
     retention: RetentionController | None = None,
+    updates: UpdateChecker | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """为一个 Dashboard 服务创建绑定了依赖的请求处理器类型。"""
 
@@ -1317,6 +1386,7 @@ def _make_handler(
         traffic_monitor=traffic_monitor,
         alert_store=alert_store,
         housekeeping=housekeeping,
+        updates=updates,
         thresholds_in_use=session_thresholds or SessionSwitchThresholds(),
         scan_dirs=scan_dirs,
         health=health,

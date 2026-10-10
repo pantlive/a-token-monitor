@@ -175,6 +175,31 @@ Dashboard 默认地址是 `http://127.0.0.1:8765/`，页面与接口由 daemon �
 不需要单独的前端服务。`--dashboard-host 0.0.0.0` 可开放给局域网（例如从
 Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信。
 
+### 版本更新提醒
+
+发布新版本后两端都会提醒：Dashboard 在顶栏显示一个小徽标（点开才是升级详情），
+CLI 每个命令在 `stderr` 打印一次提醒（每个版本只提醒一次）。检查顺序是 GitHub
+Release → GitHub 标签 → PyPI，结果缓存在状态目录，所以日常命令只读缓存、不等网络。
+
+```bash
+# 立即检查并打印新版本的发布说明
+a-token-monitor update --notes
+
+# 机器可读结果；即使检查失败退出码也是 0
+a-token-monitor update --json
+
+# 只读缓存结果，完全不联网
+a-token-monitor update --cached
+
+# 执行按当前安装方式推导出的升级命令（pip / pipx / git pull），再重启服务
+a-token-monitor update --upgrade
+```
+
+点开徽标可以看到 Release 说明链接，以及按当前安装方式（`pip`、`pipx` 或源码
+checkout）推导出的升级命令，可一键复制；当前运行的版本号显示在侧边栏底部。加
+`--no-update-check`（或设置 `A_TOKEN_MONITOR_NO_UPDATE_CHECK=1`）可关闭自动提醒，
+GitHub API 限流时设置 `GITHUB_TOKEN` 即可提高限额。
+
 ### 常用可调参数
 
 | 参数 | 默认 | 说明 |
@@ -188,6 +213,7 @@ Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信�
 | `--usage-retention-days` / `--session-retention-days` | 90 / 30 | 用量索引 / 已结束会话历史的保留天数（设置页可在线改） |
 | `--alert-retention-days` | 30 | 异常流量告警的保留天数 |
 | `--lang en` / `--lang zh` | 自动 | 显式指定 CLI 与 Dashboard 语言 |
+| `--no-update-check` | 关闭 | 不检查新版本、不打印更新提醒（也可用 `A_TOKEN_MONITOR_NO_UPDATE_CHECK=1`） |
 
 以上参数在 `daemon` 与 `service install` 上都可用。
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 from typing import Sequence
@@ -57,6 +58,10 @@ from .traffic import (
 from .usage import (
     _show_usage_search,
 )
+from .update import (
+    _notify_update,
+    _show_update,
+)
 
 
 def _requested_language(
@@ -84,6 +89,33 @@ def _requested_language(
     return resolve_language()
 
 
+def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """按子命令分派；未知命令交给 argparse 报错。"""
+
+    if args.command == "status":
+        return _show_status(StateStore(args.state_dir), args.json)
+    if args.command == "quota":
+        return _show_quota(args)
+    if args.command == "sessions":
+        return _show_sessions(args)
+    if args.command == "traffic":
+        return _show_traffic(args)
+    if args.command == "alerts":
+        return _show_alerts(args)
+    if args.command == "usage":
+        return _show_usage_search(args)
+    if args.command == "disk":
+        return _show_disk(args)
+    if args.command == "update":
+        return _show_update(args)
+    if args.command == "service":
+        return _manage_service(args)
+    if args.command == "daemon":
+        return _monitor(args).run()
+    parser.error(f"未知命令: {args.command}")
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行主函数。"""
 
@@ -98,25 +130,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     use_language(_requested_language(arguments, explicit=args.lang))
     _configure_logging(args.verbose)
 
+    # 中文注释：先用缓存提示一次（daemon 之类的长驻命令也能立刻看到），
+    # 命令跑完后再允许补一次联网检查；两步都只在新版本未提醒过时输出。
+    _notify_update(args, allow_network=False)
     try:
-        if args.command == "status":
-            return _show_status(StateStore(args.state_dir), args.json)
-        if args.command == "quota":
-            return _show_quota(args)
-        if args.command == "sessions":
-            return _show_sessions(args)
-        if args.command == "traffic":
-            return _show_traffic(args)
-        if args.command == "alerts":
-            return _show_alerts(args)
-        if args.command == "usage":
-            return _show_usage_search(args)
-        if args.command == "disk":
-            return _show_disk(args)
-        if args.command == "service":
-            return _manage_service(args)
-        if args.command == "daemon":
-            return _monitor(args).run()
+        result = _dispatch(args, parser)
     except (
         AlertStoreError,
         AppServerError,
@@ -129,6 +147,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as error:
         logging.getLogger(__name__).error("%s", error)
         return 2
-
-    parser.error(f"未知命令: {args.command}")
-    return 2
+    _notify_update(args, allow_network=True)
+    return result

@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 from importlib import resources
 
+from .. import __version__
 from ..i18n import substitute
 from .favicon import (
     _FAVICON_LINK,
@@ -79,6 +80,10 @@ _THEME_TOGGLE_HTML = _asset("theme-toggle.html")
 _GITHUB_LINK_HTML = _asset("github-link.html")
 
 
+# 中文注释：顶栏「新版本」徽标点开后的升级详情面板（数据来自 /api/state 的 update 字段）。
+_UPDATE_PANEL_HTML = _asset("update-panel.html")
+
+
 _LANGUAGE_SCRIPT = _asset("language.js")
 
 
@@ -91,6 +96,8 @@ _PAGE_THEME_REPLACEMENTS = (
     ("__THEME_SCRIPT__", _THEME_SCRIPT + _LANGUAGE_SCRIPT),
     ("__FAVICON__", _FAVICON_LINK),
     ("__BRAND_MARK__", _brand_mark_svg()),
+    ("__UPDATE_PANEL__", _UPDATE_PANEL_HTML),
+    ("__VERSION__", __version__),
 )
 
 
