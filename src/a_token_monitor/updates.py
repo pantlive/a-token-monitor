@@ -447,6 +447,11 @@ class UpdateChecker:
 
     ``state_dir`` 为 ``None`` 时只用内存状态（不落盘），适用于测试或一次性调用；
     ``enabled`` 为 ``False`` 时 ``refresh`` 直接返回缓存，不发任何网络请求。
+
+    缓存文件是 CLI 与 daemon 共享的：手动跑过 ``a-token-monitor update`` 之后，
+    页面上还应该立刻亮起徽标，所以每次读状态都比较一次文件里的检查时间，把别的
+    进程写的新结果并进来（只并「比手里更新」的，不会把新信息读旧）。文件只有
+    几百字节，且 ``/api/state`` 本身有 2 秒缓存，这点读取可以忽略。
     """
 
     def __init__(
@@ -500,11 +505,38 @@ class UpdateChecker:
 
     # ---------------------------------------------------------------- 读缓存
 
+    def _reload_cache(self) -> None:
+        """把别的进程写进缓存文件的新结果并进来。
+
+        只比较内容里的 ``last_attempt_at``：文件系统的时间戳粒度可能粗到两次
+        写入完全一样，靠 mtime 判断会漏掉更新。
+        """
+
+        payload = _read_cache(self.cache_path)
+        if not payload:
+            return
+        attempted = payload.get("last_attempt_at")
+        if attempted is None:
+            return
+        with self._state_lock:
+            known = self._state.get("last_attempt_at")
+            if known is not None and float(attempted) <= float(known):
+                # 手里的结果不比文件旧（包括刚由本进程写入的那次）。
+                return
+            if payload.get("notified_version") is None:
+                # 提醒标记是 CLI 写的，别在并入时丢掉。
+                payload["notified_version"] = self._state.get("notified_version")
+            # 只并状态字段，缓存文件里多余的键不带进内存。
+            self._state.update(
+                {key: value for key, value in payload.items() if key in self._state}
+            )
+
     def should_refresh(self, now: float | None = None) -> bool:
         """是否到了该重新抓取的时间（成功按 interval，失败按 failure_interval）。"""
 
         if not self.enabled:
             return False
+        self._reload_cache()
         moment = time.time() if now is None else float(now)
         with self._state_lock:
             attempted = self._state.get("last_attempt_at")
@@ -517,6 +549,7 @@ class UpdateChecker:
     def snapshot(self, now: float | None = None) -> dict[str, Any]:
         """返回可直接展示的当前状态；只读缓存，不联网。"""
 
+        self._reload_cache()
         moment = time.time() if now is None else float(now)
         with self._state_lock:
             state = dict(self._state)

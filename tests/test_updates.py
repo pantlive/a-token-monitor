@@ -395,6 +395,42 @@ class CheckerTests(unittest.TestCase):
         self.assertFalse(checker.refresh()["update_available"])
         self.assertIsNone(checker.pending_notice())
 
+    def test_snapshot_picks_up_a_cache_written_by_another_process(self) -> None:
+        """CLI 手动检查出更新后，daemon 的页面不用等 6 小时就能亮。"""
+
+        daemon = self._checker(
+            FakeFetcher(**{"releases/latest": _release_payload("v0.9.0")})
+        )
+        self.assertFalse(daemon.refresh()["update_available"])
+        # 另一个进程（`a-token-monitor update`）查到了更高版本并写进同一个缓存。
+        cli = self._checker(
+            FakeFetcher(**{"releases/latest": _release_payload("v0.11.0")})
+        )
+        cli.refresh(force=True)
+        cli.mark_notified("0.11.0")
+
+        snapshot = daemon.snapshot()
+        self.assertTrue(snapshot["update_available"])
+        self.assertEqual(snapshot["latest_version"], "0.11.0")
+        # 提醒标记也一起并进来，daemon 之后写缓存不会把它抹掉。
+        self.assertEqual(snapshot["notified_version"], "0.11.0")
+
+    def test_snapshot_never_goes_backwards(self) -> None:
+        """缓存文件比手里的结果旧时（例如自己刚写完）不覆盖内存状态。"""
+
+        checker = self._checker(FakeFetcher(**{"releases/latest": _release_payload()}))
+        checker.refresh(force=True)
+        checker._state["notified_version"] = "0.10.0"
+        # 手工写一份更旧的缓存，模拟被并发进程按旧结果覆盖。
+        stale = dict(checker._state)
+        stale.update({"latest_version": "0.9.0", "last_attempt_at": 1.0})
+        (self.state_dir / updates.CACHE_FILENAME).write_text(
+            json.dumps(stale), encoding="utf-8"
+        )
+        snapshot = checker.snapshot()
+        self.assertEqual(snapshot["latest_version"], "0.10.0")
+        self.assertTrue(snapshot["update_available"])
+
     def test_corrupt_cache_is_ignored(self) -> None:
         (self.state_dir / updates.CACHE_FILENAME).write_text("{not json", "utf-8")
         checker = updates.UpdateChecker(self.state_dir, current_version="0.9.0")
