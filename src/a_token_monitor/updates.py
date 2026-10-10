@@ -520,8 +520,10 @@ class UpdateChecker:
             return
         with self._state_lock:
             known = self._state.get("last_attempt_at")
-            if known is not None and float(attempted) <= float(known):
-                # 手里的结果不比文件旧（包括刚由本进程写入的那次）。
+            # 中文注释：只有「文件确实比手里旧」才跳过；时间戳相等时以文件为准。
+            # Windows 的 time.time() 粒度约 15 毫秒，两个进程同一刻度各写一次是常态，
+            # 用 <= 会把刚由 CLI 写进来的新结果当成旧的丢掉（CI 上就是这样挂的）。
+            if known is not None and float(attempted) < float(known):
                 return
             if payload.get("notified_version") is None:
                 # 提醒标记是 CLI 写的，别在并入时丢掉。

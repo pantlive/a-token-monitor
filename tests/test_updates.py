@@ -442,6 +442,30 @@ class CheckerTests(unittest.TestCase):
         # 提醒标记也一起并进来，daemon 之后写缓存不会把它抹掉。
         self.assertEqual(snapshot["notified_version"], "0.11.0")
 
+    def test_snapshot_adopts_a_cache_written_in_the_same_tick(self) -> None:
+        """两个进程落在同一时钟刻度里也要能并入。
+
+        中文注释：Windows 的 time.time() 粒度约 15 毫秒，daemon 与 CLI 各写一次缓存
+        时 last_attempt_at 常常完全相等；早期实现用 ``<=`` 判断「文件不比手里新」，
+        于是 CLI 刚查到的更新被丢掉（Windows CI 上真实挂过一次）。
+        """
+
+        moment = 1000.0
+        daemon = self._checker(
+            FakeFetcher(**{"releases/latest": _release_payload("v0.9.0")})
+        )
+        self.assertFalse(daemon.refresh(now=moment)["update_available"])
+
+        cli = self._checker(
+            FakeFetcher(**{"releases/latest": _release_payload("v0.11.0")})
+        )
+        cli.refresh(force=True, now=moment)
+
+        snapshot = daemon.snapshot()
+        self.assertTrue(snapshot["update_available"])
+        self.assertEqual(snapshot["latest_version"], "0.11.0")
+        self.assertEqual(snapshot["last_attempt_at"], moment)
+
     def test_snapshot_never_goes_backwards(self) -> None:
         """缓存文件比手里的结果旧时（例如自己刚写完）不覆盖内存状态。"""
 
