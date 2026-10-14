@@ -198,3 +198,9 @@
     .update-detail code { padding: 4px 8px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel); color: var(--muted-strong); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
     .update-detail .update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 9px; }
     .update-detail .update-link { color: var(--cyan); font-size: 12px; }
+
+    /* 中文注释：磁盘与会话管理里的「包与版本残留」子块。 */
+    .package-block { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+    /* 中文注释：.account-subtitle 会把文字转大写，摘要里的 GiB/MiB 不能跟着变。 */
+    .package-block .package-summary { text-transform: none; letter-spacing: 0; }
+    .package-block .package-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }

@@ -1916,6 +1916,109 @@
       renderHousekeepingProjects(projects);
     });
   };
+  // 包与版本残留：只统计 agent 自更新留下的多版本副本，标明哪些是旧版本。
+  // 清理需要服务端显式开启（--allow-package-cleanup），默认只报告。
+  let packagesState = null;
+  let packagesBusy = false;
+  const renderPackages = (payload) => {
+    const container = document.getElementById('packages-content');
+    const summaryLabel = document.getElementById('packages-summary');
+    if (!container) return;
+    packagesState = payload || null;
+    if (!payload || payload.available === false) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">该运行模式不支持统计版本残留</span><span class="empty-hint">请在 daemon 模式下查看。</span></div>';
+      if (summaryLabel) summaryLabel.textContent = '不可用';
+      return;
+    }
+    const report = payload.report || {};
+    const entries = Array.isArray(report.entries) ? report.entries : [];
+    const totals = report.totals || {};
+    if (summaryLabel) {
+      summaryLabel.textContent = totals.removable_bytes > 0
+        ? `可释放 ${formatDataSize(totals.removable_bytes)} · ${formatNumber(totals.removable_count)} / ${formatNumber(totals.count)} 份`
+        : `${formatNumber(totals.count)} 份副本 · 暂无可清理项`;
+    }
+    if (!entries.length) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">没有发现多版本残留</span><span class="empty-hint">agent 自更新后每个版本会留一份完整副本，这里会列出已不再使用的旧版本。</span></div>';
+      return;
+    }
+    const removable = entries.filter((item) => item.removable);
+    const rows = entries.map((item) => {
+      const size = escapeHtml(formatDataSize(item.bytes || 0));
+      const version = item.version ? escapeHtml(String(item.version)) : '<span class="muted">—</span>';
+      const status = item.removable
+        ? '<span class="pill warn">可清理</span>'
+        : `<span class="pill other">${escapeHtml(String(item.reason || '保留'))}</span>`;
+      const checkbox = item.removable && payload.cleanup_enabled
+        ? `<input type="checkbox" data-package-item="${escapeHtml(String(item.path))}" checked>`
+        : '';
+      return `<tr>
+        <td>${checkbox}</td>
+        <td><div class="cell-main">${escapeHtml(String(item.label || ''))} · ${version}</div><div class="cell-sub">${escapeHtml(String(item.target_label || ''))}</div></td>
+        <td><span class="truncate" title="${escapeHtml(String(item.path))}">${escapeHtml(String(item.path))}</span></td>
+        <td class="num">${size}</td>
+        <td>${status}</td>
+      </tr>`;
+    }).join('');
+    const actions = payload.cleanup_enabled
+      ? `<div class="package-actions"><button id="packages-clean-button" class="btn danger" type="button" ${removable.length ? '' : 'disabled'}>清理选中的旧版本</button><span class="muted">正在使用的版本不会被删除；删除后下次升级会重新下载。</span></div>`
+      : '<div class="package-actions"><span class="muted">清理默认关闭：daemon 加 --allow-package-cleanup 后可在网页执行。</span></div>';
+    container.innerHTML = `<div class="table-wrap"><table class="tight"><thead><tr><th></th><th>版本</th><th>路径</th><th class="num">占用</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div>${actions}`;
+    document.getElementById('packages-clean-button')?.addEventListener('click', cleanPackages);
+  };
+  const refreshPackages = async (refresh) => {
+    if (packagesBusy) return;
+    packagesBusy = true;
+    try {
+      const response = await fetch(`/api/packages${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      renderPackages(await response.json());
+    } catch (error) {
+      const container = document.getElementById('packages-content');
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">版本残留统计失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    } finally {
+      packagesBusy = false;
+    }
+  };
+  const cleanPackages = async () => {
+    const container = document.getElementById('packages-content');
+    const items = Array.from(document.querySelectorAll('[data-package-item]'))
+      .filter((box) => box.checked)
+      .map((box) => box.dataset.packageItem || '')
+      .filter((item) => item);
+    if (!items.length) {
+      window.alert('请先勾选要清理的旧版本。');
+      return;
+    }
+    const bytes = (packagesState && packagesState.report && Array.isArray(packagesState.report.entries))
+      ? packagesState.report.entries.filter((item) => items.includes(String(item.path))).reduce((sum, item) => sum + Number(item.bytes || 0), 0)
+      : 0;
+    if (!window.confirm(`确认删除 ${items.length} 份旧版本副本，释放约 ${formatDataSize(bytes)}？\n删除不可撤销；正在使用的版本不受影响。`)) return;
+    try {
+      const response = await fetch('/api/packages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clean', items, confirm: true }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+      if (payload.report) renderPackages({ available: true, cleanup_enabled: true, report: payload.report });
+      if (container && Array.isArray(payload.skipped) && payload.skipped.length) {
+        const note = document.createElement('div');
+        note.className = 'usage-note';
+        note.textContent = `${payload.skipped.length} 项已跳过：${payload.skipped.map((item) => item.reason).join('；')}`;
+        container.prepend(note);
+      }
+    } catch (error) {
+      if (container) {
+        const note = document.createElement('div');
+        note.className = 'usage-note';
+        note.textContent = `清理失败：${error.message}`;
+        container.prepend(note);
+      }
+    }
+  };
+
   const refreshHousekeeping = async () => {
     const criteria = housekeepingCriteria();
     const button = document.getElementById('housekeeping-scan-button');
@@ -1931,6 +2034,7 @@
       renderHousekeepingProjects(housekeepingState.projects);
       if (latestState) renderHousekeeping(latestState);
       renderHousekeepingActions();
+      refreshPackages(true);
       refresh();
     } catch (error) {
       const container = document.getElementById('housekeeping-content');

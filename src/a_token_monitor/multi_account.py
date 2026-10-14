@@ -682,6 +682,7 @@ class MultiAccountMonitor:
                             port=self.config.dashboard_port,
                             budget_usd=self.config.budget_usd,
                             alert_context_content=self.config.alert_context_content,
+                            allow_package_cleanup=self.config.allow_package_cleanup,
                             warm_english_pages=True,
                         ),
                         logger=self.logger,

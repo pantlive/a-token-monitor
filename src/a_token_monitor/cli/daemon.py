@@ -42,6 +42,7 @@ def _monitor(args: argparse.Namespace) -> MultiAccountMonitor:
         dashboard_port=args.dashboard_port,
         budget_usd=args.budget_usd,
         alert_context_content=getattr(args, "alert_context_content", False),
+        allow_package_cleanup=getattr(args, "allow_package_cleanup", False),
         upload_burst_warn_mb=args.upload_warn_mb,
         upload_burst_danger_mb=args.upload_alert_mb,
         upload_window_warn_mb=args.upload_window_warn_mb,

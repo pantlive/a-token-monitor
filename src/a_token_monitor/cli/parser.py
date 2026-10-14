@@ -612,6 +612,12 @@ def _add_daemon_options(parser: argparse.ArgumentParser) -> None:
         help="显示脱敏后的告警内容摘要（仅允许本机监听地址）",
     )
     parser.add_argument(
+        "--allow-package-cleanup",
+        dest="allow_package_cleanup",
+        action="store_true",
+        help="允许在网页上清理旧版本残留（默认只统计与提醒）",
+    )
+    parser.add_argument(
         "--budget-usd",
         type=_positive_float,
         default=None,

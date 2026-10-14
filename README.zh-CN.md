@@ -49,6 +49,10 @@ agent、每个账号目录占了多少空间，超过阈值时提醒（默认单
 逐个处理：归档是带 SHA-256 manifest 的 `tar.gz`，随时能恢复；正在运行的会话和
 10 分钟内改动过的文件一律跳过。终端里用 `a-token-monitor disk` 能看到同样的报告。
 
+同一个页面还会列出 agent 自更新留下的旧版本副本（Codex 每个版本约 430 MiB）：正在使用
+的那份（`current` 链接、`auto-update-version` 记录、同组里版本最高）永不列入，其余旧版本
+只统计不自动删除；确需清理时给 daemon 加 `--allow-package-cleanup`，再到页面上勾选确认。
+
 ![磁盘与会话管理：各目录占用、按项目归档和可归档会话列表](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/disk-zh.png)
 
 ### agent 异常上传监控
@@ -219,6 +223,7 @@ GitHub API 限流时设置 `GITHUB_TOKEN` 即可提高限额。
 | `--alert-retention-days` | 30 | 异常流量告警的保留天数 |
 | `--lang en` / `--lang zh` | 自动 | 显式指定 CLI 与 Dashboard 语言 |
 | `--no-update-check` | 关闭 | 不检查新版本、不打印更新提醒（也可用 `A_TOKEN_MONITOR_NO_UPDATE_CHECK=1`） |
+| `--allow-package-cleanup` | 关闭 | 允许在网页上清理 agent 的旧版本副本（默认只统计与提醒） |
 
 以上参数在 `daemon` 与 `service install` 上都可用。
 

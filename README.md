@@ -56,6 +56,11 @@ manifest and can be restored, and running sessions or files touched in the last
 10 minutes are always skipped. `a-token-monitor disk` gives the same report in the
 terminal.
 
+The same page also lists the old copies that agent self-updates leave behind (about 430 MiB
+per Codex version): the one in use (the `current` link, the version recorded in
+`auto-update-version`, or the newest in its group) is never listed, and the rest is only
+reported — start the daemon with `--allow-package-cleanup` to confirm a cleanup in the page.
+
 ![Disk and sessions: usage per directory, archiving by project and the archivable session list](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/disk-en.png)
 
 ### Upload monitoring for agents
@@ -246,6 +251,7 @@ sidebar. Pass `--no-update-check` (or set
 | `--alert-retention-days` | 30 | Retention days for traffic alerts |
 | `--lang en` / `--lang zh` | auto | Force the CLI and Dashboard language |
 | `--no-update-check` | off | Skip the version check and the update reminder (`A_TOKEN_MONITOR_NO_UPDATE_CHECK=1` also works) |
+| `--allow-package-cleanup` | off | Allow the Dashboard to delete old agent version copies (report-only by default) |
 
 All of these work on both `daemon` and `service install`.
 

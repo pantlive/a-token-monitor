@@ -57,6 +57,8 @@ class DashboardConfig:
     # 中文注释：版本更新检查只在给出状态目录时生效（缓存落盘、多进程共享），
     # 一次性构造的 Dashboard（测试、临时预览）不会在后台打网络。
     update_check: bool = True
+    # 中文注释：版本/安装残留默认只报告；打开后才接受 /api/packages 的清理请求。
+    allow_package_cleanup: bool = False
     update_interval: float = UPDATE_INTERVAL
     update_timeout: float = UPDATE_TIMEOUT
 
@@ -193,6 +195,7 @@ class DashboardServer:
             history=self.history,
             retention=self.retention,
             updates=self.updates,
+            allow_package_cleanup=self.config.allow_package_cleanup,
         )
         server = _DashboardHTTPServer(
             (self.config.host, self.config.port),

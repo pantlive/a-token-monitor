@@ -26,6 +26,7 @@ from ..housekeeping import (
     HousekeepingMonitor,
 )
 from ..health import HealthTracker, sanitize_error
+from ..packages import clean_release_entries, scan_release_leftovers
 from ..providers import ProviderHomes, home_keys
 from ..registry import RegistryError
 from ..retention import HistoryDataManager, RetentionController, RetentionError
@@ -93,6 +94,8 @@ class _DashboardContext:
     alert_store: TrafficAlertStore | None = None
     housekeeping: HousekeepingMonitor | None = None
     updates: UpdateChecker | None = None
+    # 中文注释：版本/安装残留默认只报告；打开后才接受清理请求（见 packages 模块）。
+    allow_package_cleanup: bool = False
     thresholds_in_use: SessionSwitchThresholds = field(
         default_factory=SessionSwitchThresholds
     )
@@ -102,6 +105,33 @@ class _DashboardContext:
     retention: RetentionController | None = None
     state_cache_lock: Lock = field(default_factory=Lock, repr=False)
     state_cache: dict[str, Any] = field(default_factory=dict, repr=False)
+    packages_lock: Lock = field(default_factory=Lock, repr=False)
+    packages_cache: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def package_report(self, *, refresh: bool = False) -> dict[str, Any]:
+        """版本/安装残留报告；扫描走 10 秒缓存，避免连点刷新反复遍历磁盘。"""
+
+        if self.housekeeping is None:
+            return {
+                "available": False,
+                "cleanup_enabled": self.allow_package_cleanup,
+                "report": None,
+            }
+        moment = time.monotonic()
+        with self.packages_lock:
+            cached = self.packages_cache.get("payload")
+            expires = self.packages_cache.get("expires", 0.0)
+        if not refresh and cached is not None and moment < expires:
+            return cached
+        report = scan_release_leftovers(self.housekeeping.targets)
+        payload = {
+            "available": True,
+            "cleanup_enabled": self.allow_package_cleanup,
+            "report": report,
+        }
+        with self.packages_lock:
+            self.packages_cache.update(expires=time.monotonic() + 10, payload=payload)
+        return payload
 
     def alert_stats(self) -> dict[str, Any]:
         """返回落盘告警的统计；数据库不可用时降级为空统计。"""
@@ -194,6 +224,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/housekeeping": "_get_housekeeping",
         "/api/insights": "_get_insights",
         "/api/update": "_get_update",
+        "/api/packages": "_get_packages",
     }
     _HEAD_ROUTES: ClassVar[dict[str, str]] = {
         "/": "_head_dashboard_page",
@@ -209,6 +240,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/housekeeping": "_head_housekeeping",
         "/api/insights": "_head_insights",
         "/api/update": "_head_update",
+        "/api/packages": "_head_packages",
     }
     _POST_ROUTES: ClassVar[dict[str, str]] = {
         "/api/alerts": "_post_alerts",
@@ -216,6 +248,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/scan-dirs": "_post_scan_dirs",
         "/api/history": "_post_history",
         "/api/update": "_post_update",
+        "/api/packages": "_post_packages",
     }
 
     def do_GET(self) -> None:
@@ -872,6 +905,84 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _get_packages(self) -> None:
+        """GET /api/packages：版本/安装残留报告（只统计，不删除）。"""
+
+        refresh = "refresh=1" in self._query
+        self._send_json(
+            status=200,
+            payload={
+                "updated_at": time.time(),
+                **self.context.package_report(refresh=refresh),
+            },
+        )
+
+    def _head_packages(self) -> None:
+        """HEAD /api/packages：只回响应头，不触发磁盘扫描。"""
+
+        ctx = self.context
+        self._send_json(
+            status=200,
+            payload={
+                "updated_at": time.time(),
+                "available": ctx.housekeeping is not None,
+                "cleanup_enabled": ctx.allow_package_cleanup,
+                "report": None,
+            },
+            include_body=False,
+        )
+
+    def _post_packages(self) -> None:
+        """POST /api/packages：清理旧的版本残留；默认关闭，且必须显式确认。"""
+
+        ctx = self.context
+        if ctx.housekeeping is None:
+            self._send_json(status=503, payload={"error": "package_scan_unavailable"})
+            return
+        if not ctx.allow_package_cleanup:
+            self._send_json(
+                status=403,
+                payload={
+                    "error": "package_cleanup_disabled",
+                    "message": "版本残留清理未启用（daemon 加 --allow-package-cleanup）",
+                },
+            )
+            return
+        try:
+            body = self._read_json_body()
+        except AlertStoreError as error:
+            self._send_json(
+                status=400,
+                payload={"error": "invalid_package_request", "message": str(error)},
+            )
+            return
+        action = str(body.get("action") or "clean").strip()
+        if action != "clean":
+            self._send_json(status=400, payload={"error": "invalid_package_action"})
+            return
+        if body.get("confirm") is not True:
+            self._send_json(status=400, payload={"error": "confirmation_required"})
+            return
+        raw_items = body.get("items")
+        items = [str(item) for item in raw_items] if isinstance(raw_items, list) else []
+        if not items:
+            self._send_json(status=400, payload={"error": "no_items_selected"})
+            return
+        result = clean_release_entries(items, ctx.housekeeping.targets)
+        with ctx.packages_lock:
+            ctx.packages_cache.clear()
+        self._send_json(
+            status=200,
+            payload={
+                "ok": True,
+                "action": action,
+                "freed_bytes": result["freed_bytes"],
+                "removed": result["removed"],
+                "skipped": result["skipped"],
+                "report": result["report"],
+            },
+        )
+
     def _head_insights(self) -> None:
         """HEAD /api/insights：只回响应头，不做实际查询。"""
 
@@ -1413,6 +1524,7 @@ def _make_handler(
     history: HistoryDataManager | None = None,
     retention: RetentionController | None = None,
     updates: UpdateChecker | None = None,
+    allow_package_cleanup: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """为一个 Dashboard 服务创建绑定了依赖的请求处理器类型。"""
 
@@ -1429,6 +1541,7 @@ def _make_handler(
         alert_store=alert_store,
         housekeeping=housekeeping,
         updates=updates,
+        allow_package_cleanup=allow_package_cleanup,
         thresholds_in_use=session_thresholds or SessionSwitchThresholds(),
         scan_dirs=scan_dirs,
         health=health,

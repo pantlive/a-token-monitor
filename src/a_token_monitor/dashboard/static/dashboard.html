@@ -229,6 +229,11 @@ __UPDATE_PANEL__
         </div>
       </div>
       <div id="housekeeping-actions"></div>
+      <div id="packages-block" class="package-block">
+        <div class="account-subtitle"><span>包与版本残留</span><span class="muted package-summary" id="packages-summary">等待扫描</span></div>
+        <div class="usage-note">agent 自更新会为每个版本留一份完整副本，这里只统计已声明的 provider 目录。正在使用的版本（current 链接、auto-update-version、同组最新）永不列入，清理默认关闭。</div>
+        <div id="packages-content"><div class="empty-state"><span class="empty-title">正在统计版本残留…</span></div></div>
+      </div>
       </div>
     </section>
   </main>
