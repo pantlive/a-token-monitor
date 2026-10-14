@@ -74,8 +74,8 @@ class MonitorConfig:
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
     alert_context_content: bool = False
-    # 中文注释：版本/安装残留默认只报告，打开后才允许在网页上清理。
-    allow_package_cleanup: bool = False
+    # 中文注释：版本/安装残留默认可在网页清理；--no-package-cleanup 可关掉。
+    allow_package_cleanup: bool = True
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
     upload_burst_danger_mb: float = 32.0

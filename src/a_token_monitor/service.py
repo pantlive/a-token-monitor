@@ -70,8 +70,8 @@ class ServiceConfig:
     # service.json 里仍按 ``<key>_homes`` 分字段保存，空元组表示「未配置」。
     provider_homes: Mapping[str, tuple[Path, ...]] = field(default_factory=dict)
     alert_context_content: bool = False
-    # 中文注释：版本/安装残留清理默认关闭（只报告），显式打开后才允许网页执行。
-    allow_package_cleanup: bool = False
+    # 中文注释：版本/安装残留默认可在网页清理；--no-package-cleanup 可关掉。
+    allow_package_cleanup: bool = True
     budget_usd: float | None = None
     upload_burst_warn_mb: float = 8.0
     upload_burst_danger_mb: float = 32.0
@@ -269,7 +269,8 @@ class ServiceConfig:
             },
             budget_usd=_optional_float(raw_payload, "budget_usd"),
             alert_context_content=raw_payload.get("alert_context_content") is True,
-            allow_package_cleanup=raw_payload.get("allow_package_cleanup") is True,
+            # 中文注释：老 service.json 没这个字段时按默认（允许）处理。
+            allow_package_cleanup=raw_payload.get("allow_package_cleanup") is not False,
             upload_burst_warn_mb=_optional_float(
                 raw_payload, "upload_burst_warn_mb"
             )

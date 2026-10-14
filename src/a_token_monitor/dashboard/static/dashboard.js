@@ -1917,7 +1917,7 @@
     });
   };
   // 包与版本残留：只统计 agent 自更新留下的多版本副本，标明哪些是旧版本。
-  // 清理需要服务端显式开启（--allow-package-cleanup），默认只报告。
+  // 清理默认可执行（每次仍需勾选 + 确认）；`--no-package-cleanup` 启动时不提供。
   let packagesState = null;
   let packagesBusy = false;
   const renderPackages = (payload) => {
@@ -1962,7 +1962,7 @@
     }).join('');
     const actions = payload.cleanup_enabled
       ? `<div class="package-actions"><button id="packages-clean-button" class="btn danger" type="button" ${removable.length ? '' : 'disabled'}>清理选中的旧版本</button><span class="muted">正在使用的版本不会被删除；删除后下次升级会重新下载。</span></div>`
-      : '<div class="package-actions"><span class="muted">清理默认关闭：daemon 加 --allow-package-cleanup 后可在网页执行。</span></div>';
+      : '<div class="package-actions"><span class="muted">清理已关闭：daemon 启动时带了 --no-package-cleanup。</span></div>';
     container.innerHTML = `<div class="table-wrap"><table class="tight"><thead><tr><th></th><th>版本</th><th>路径</th><th class="num">占用</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table></div>${actions}`;
     document.getElementById('packages-clean-button')?.addEventListener('click', cleanPackages);
   };

@@ -310,19 +310,22 @@ class PackagesApiTests(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.loads(error.read().decode("utf-8"))
 
-    def test_get_reports_entries_and_disabled_cleanup(self) -> None:
+    def test_get_reports_entries_and_enabled_cleanup(self) -> None:
         server = self._server()
         host, port = server.address
         status, payload = self._request(f"http://{host}:{port}", "/api/packages")
         self.assertEqual(status, 200)
         self.assertTrue(payload["available"])
-        self.assertFalse(payload["cleanup_enabled"])
+        # 中文注释：默认就能在网页上清理；只有显式 --no-package-cleanup 才关闭。
+        self.assertTrue(payload["cleanup_enabled"])
         totals = payload["report"]["totals"]
         self.assertEqual(totals["count"], 2)
         self.assertEqual(totals["removable_count"], 1)
 
     def test_post_is_refused_while_cleanup_is_disabled(self) -> None:
-        server = self._server()
+        server = self._server(
+            config=DashboardConfig(port=0, allow_package_cleanup=False)
+        )
         host, port = server.address
         status, payload = self._request(
             f"http://{host}:{port}",
@@ -333,8 +336,8 @@ class PackagesApiTests(unittest.TestCase):
         self.assertEqual(payload["error"], "package_cleanup_disabled")
         self.assertTrue((self.releases / "0.1.0-x86_64").exists())
 
-    def test_post_cleans_when_enabled(self) -> None:
-        server = self._server(config=DashboardConfig(port=0, allow_package_cleanup=True))
+    def test_post_cleans_with_the_default_config(self) -> None:
+        server = self._server()
         host, port = server.address
         base = f"http://{host}:{port}"
         _, payload = self._request(base, "/api/packages")
@@ -350,7 +353,7 @@ class PackagesApiTests(unittest.TestCase):
         self.assertTrue((self.releases / "0.2.0-x86_64").exists())
 
     def test_post_requires_confirmation_and_items(self) -> None:
-        server = self._server(config=DashboardConfig(port=0, allow_package_cleanup=True))
+        server = self._server()
         host, port = server.address
         base = f"http://{host}:{port}"
         status, payload = self._request(
@@ -385,7 +388,7 @@ class PackagesApiTests(unittest.TestCase):
 
         self.assertIn('id="packages-block"', _DASHBOARD_HTML)
         self.assertIn('id="packages-content"', _DASHBOARD_HTML)
-        self.assertIn("清理默认关闭", _DASHBOARD_HTML)
+        self.assertIn("清理已关闭", _DASHBOARD_HTML)
 
     def test_report_is_cached_between_requests(self) -> None:
         """连点刷新不应反复遍历磁盘：第二次请求命中 10 秒缓存。"""

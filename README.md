@@ -58,8 +58,9 @@ terminal.
 
 The same page also lists the old copies that agent self-updates leave behind (about 430 MiB
 per Codex version): the one in use (the `current` link, the version recorded in
-`auto-update-version`, or the newest in its group) is never listed, and the rest is only
-reported — start the daemon with `--allow-package-cleanup` to confirm a cleanup in the page.
+`auto-update-version`, or the newest in its group) is never listed, and the rest can be
+selected and cleaned from the page (with a confirmation and a fresh safety check). Use
+`--no-package-cleanup` to remove that entry point for unattended or network-exposed setups.
 
 ![Disk and sessions: usage per directory, archiving by project and the archivable session list](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/disk-en.png)
 
@@ -251,7 +252,7 @@ sidebar. Pass `--no-update-check` (or set
 | `--alert-retention-days` | 30 | Retention days for traffic alerts |
 | `--lang en` / `--lang zh` | auto | Force the CLI and Dashboard language |
 | `--no-update-check` | off | Skip the version check and the update reminder (`A_TOKEN_MONITOR_NO_UPDATE_CHECK=1` also works) |
-| `--allow-package-cleanup` | off | Allow the Dashboard to delete old agent version copies (report-only by default) |
+| `--no-package-cleanup` | cleanup on | Forbid deleting old agent version copies from the Dashboard (allowed by default, always confirmed in the page) |
 
 All of these work on both `daemon` and `service install`.
 

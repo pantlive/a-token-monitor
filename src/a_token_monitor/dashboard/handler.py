@@ -944,7 +944,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 status=403,
                 payload={
                     "error": "package_cleanup_disabled",
-                    "message": "版本残留清理未启用（daemon 加 --allow-package-cleanup）",
+                    "message": "版本残留清理已关闭（daemon 启动时带了 --no-package-cleanup）",
                 },
             )
             return
