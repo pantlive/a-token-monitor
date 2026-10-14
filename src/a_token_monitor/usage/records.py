@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, cast
 
+from ..formatting import format_tokens
+
 
 
 _TOKEN_FIELDS = (
@@ -307,7 +309,9 @@ class SessionUsage:
         if self.turns >= thresholds.turn_warn:
             reasons.append(f"已进行 {self.turns} 轮")
         if self.context_tokens >= thresholds.context_warn_tokens:
-            reasons.append(f"最近一次上下文 {self.context_tokens:,} token")
+            reasons.append(
+                f"最近一次上下文 {format_tokens(self.context_tokens)} token"
+            )
         if not reasons:
             return None
         label = self.session_id

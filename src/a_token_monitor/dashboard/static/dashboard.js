@@ -39,6 +39,8 @@
     if (amount >= 1e3) return `${(amount / 1e3).toFixed(1)}K`;
     return String(amount);
   };
+  // 中文注释：token 单元格显示 K/M/B，悬浮给出精确值（要精确值时不用去数位数）。
+  const tokenCell = (value) => `<td class="usage-number" title="${escapeHtml(formatNumber(value))}">${formatTokens(value)}</td>`;
   const formatBytes = (value) => `${(Number(value || 0) / 1024 / 1024).toFixed(1)} MiB`;
   const formatDataSize = (value) => {
     const amount = Math.max(0, Number(value || 0));
@@ -190,7 +192,7 @@
         : '';
       const usageCell = turns === null
         ? '<span class="muted">—</span>'
-        : `${escapeHtml(String(turns))} 轮<div class="muted">上下文 ${escapeHtml(formatDataSize(usage.context_tokens || 0))} · 累计 ${escapeHtml(formatDataSize(usage.total_tokens || 0))}</div>${advice}`;
+        : `${escapeHtml(String(turns))} 轮<div class="muted" title="上下文 ${escapeHtml(formatNumber(usage.context_tokens || 0))} · 累计 ${escapeHtml(formatNumber(usage.total_tokens || 0))}">上下文 ${escapeHtml(formatTokens(usage.context_tokens || 0))} · 累计 ${escapeHtml(formatTokens(usage.total_tokens || 0))}</div>${advice}`;
       const archive = session.archive || {};
       const archiveCell = !session.jsonl_path
         ? '<span class="muted">无 JSONL</span>'
@@ -734,7 +736,7 @@
     }
     const summary = `<div class="usage-summary">
       <div class="usage-summary-item"><div class="usage-summary-label">匹配账号</div><div class="usage-summary-value">${formatNumber(filteredAccounts.length)}</div></div>
-      <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value" title="${escapeHtml(formatNumber(totalTokens))}">${formatNumber(totalTokens)}</div></div>
+      <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value" title="${escapeHtml(formatNumber(totalTokens))}">${formatTokens(totalTokens)}</div></div>
       <div class="usage-summary-item"><div class="usage-summary-label">API 等价金额</div><div class="usage-summary-value" title="${escapeHtml(formatUsd(totalUsd))}">${escapeHtml(formatUsdSummary(totalUsd))}</div></div>
       ${savingsItem}${budgetItem}
     </div>`;
@@ -762,7 +764,7 @@
       const modelsExpanded = expandedUsageModelLists.has(group.key);
       const visibleModels = modelsExpanded ? modelItems : modelItems.slice(0, USAGE_MODEL_PREVIEW);
       const hiddenModels = modelItems.length - visibleModels.length;
-      const models = visibleModels.map((model) => `<div><span class="usage-model">${escapeHtml(model.model)}</span> · ${formatNumber(model.total_tokens)} tokens</div>`).join('');
+      const models = visibleModels.map((model) => `<div><span class="usage-model">${escapeHtml(model.model)}</span> · <span title="${escapeHtml(formatNumber(model.total_tokens))}">${formatTokens(model.total_tokens)}</span> tokens</div>`).join('');
       const modelsToggle = modelItems.length > USAGE_MODEL_PREVIEW
         ? `<button class="chip-button usage-models-toggle" type="button" data-usage-models="${escapeHtml(group.key)}" aria-expanded="${modelsExpanded ? 'true' : 'false'}">${modelsExpanded ? '收起模型' : `另有 ${hiddenModels} 个模型`}</button>`
         : '';
@@ -786,12 +788,12 @@
       return `<tr>
         ${labelCell}
         ${detailCell}
-        <td class="usage-number">${formatNumber(stats.input_tokens)}</td>
-        <td class="usage-number">${formatNumber(stats.cached_input_tokens)}</td>
-        <td class="usage-number">${formatNumber(stats.cache_write_input_tokens)}</td>
-        <td class="usage-number">${formatNumber(stats.output_tokens)}</td>
-        <td class="usage-number">${formatNumber(stats.reasoning_output_tokens)}</td>
-        <td class="usage-number">${formatNumber(stats.total_tokens)}</td>
+        ${tokenCell(stats.input_tokens)}
+        ${tokenCell(stats.cached_input_tokens)}
+        ${tokenCell(stats.cache_write_input_tokens)}
+        ${tokenCell(stats.output_tokens)}
+        ${tokenCell(stats.reasoning_output_tokens)}
+        ${tokenCell(stats.total_tokens)}
         <td class="usage-number">${formatCredits(stats.estimated_credits)}</td>
         <td class="usage-number">${formatUsd(stats.estimated_cost_usd)}</td>
         <td class="usage-number">${escapeHtml(shareText(stats))}</td>
@@ -801,12 +803,12 @@
       ? `<tfoot><tr>
         <td>合计（${formatNumber(groups.length)} 组）</td>
         <td>${formatNumber(filteredAccounts.length)} 个账号</td>
-        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.input_tokens || 0), 0))}</td>
-        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.cached_input_tokens || 0), 0))}</td>
-        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.cache_write_input_tokens || 0), 0))}</td>
-        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.output_tokens || 0), 0))}</td>
-        <td class="usage-number">${formatNumber(statsList.reduce((sum, stats) => sum + Number(stats.reasoning_output_tokens || 0), 0))}</td>
-        <td class="usage-number">${formatNumber(totalTokens)}</td>
+        ${tokenCell(statsList.reduce((sum, stats) => sum + Number(stats.input_tokens || 0), 0))}
+        ${tokenCell(statsList.reduce((sum, stats) => sum + Number(stats.cached_input_tokens || 0), 0))}
+        ${tokenCell(statsList.reduce((sum, stats) => sum + Number(stats.cache_write_input_tokens || 0), 0))}
+        ${tokenCell(statsList.reduce((sum, stats) => sum + Number(stats.output_tokens || 0), 0))}
+        ${tokenCell(statsList.reduce((sum, stats) => sum + Number(stats.reasoning_output_tokens || 0), 0))}
+        ${tokenCell(totalTokens)}
         <td class="usage-number">${formatCredits(totalCredits)}</td>
         <td class="usage-number">${formatUsd(totalUsd)}</td>
         <td class="usage-number">${totalUsd && totalUsd > 0 ? '100.0%' : '—'}</td>
@@ -962,7 +964,7 @@
       : windowDays > 0 ? `近 ${windowDays} 天` : '全部历史';
     const summary = `<div class="usage-summary">
       <div class="usage-summary-item"><div class="usage-summary-label">分析对话数 · ${escapeHtml(windowLabel)}</div><div class="usage-summary-value">${formatNumber(insights.conversation_count)}</div></div>
-      <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value">${formatNumber(insights.total_tokens)}</div></div>
+      <div class="usage-summary-item"><div class="usage-summary-label">总 token</div><div class="usage-summary-value" title="${escapeHtml(formatNumber(insights.total_tokens))}">${formatTokens(insights.total_tokens)}</div></div>
       <div class="usage-summary-item"><div class="usage-summary-label">整体缓存命中率</div><div class="usage-summary-value">${hitRate === null || hitRate === undefined ? '未知' : `${Number(hitRate).toFixed(1)}%`}</div></div>
       <div class="usage-summary-item"><div class="usage-summary-label">预计可节省</div><div class="usage-summary-value">${escapeHtml(formatUsdCompact(insights.potential_savings_usd))}</div></div>
     </div>`;
@@ -978,7 +980,7 @@
     const statRow = (label, valueText, width, hint, title) => `<div class="top-project"><div class="top-project-row"><span class="top-project-label"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}${hint ? `<span class="muted"> · ${escapeHtml(hint)}</span>` : ''}</span><span class="top-project-value">${escapeHtml(valueText)}</span></div><div class="bar"><span style="width:${width}%"></span></div></div>`;
     const models = Array.isArray(insights.models) ? insights.models : [];
     const maxModelCost = models.reduce((max, item) => Math.max(max, Number(item.estimated_cost_usd || 0)), 0);
-    const modelRows = models.map((item) => statRow(item.model, `${formatUsdCompact(item.estimated_cost_usd)} · ${formatNumber(item.total_tokens)} tokens`, maxModelCost > 0 ? Math.max(3, Math.round(Number(item.estimated_cost_usd || 0) / maxModelCost * 100)) : 3)).join('');
+    const modelRows = models.map((item) => statRow(item.model, `${formatUsdCompact(item.estimated_cost_usd)} · ${formatTokens(item.total_tokens)} tokens`, maxModelCost > 0 ? Math.max(3, Math.round(Number(item.estimated_cost_usd || 0) / maxModelCost * 100)) : 3)).join('');
     const modelsPanel = `<div class="usage-trend"><div class="usage-trend-head"><span>模型成本分布</span><span class="muted">Top ${models.length}</span></div>${modelRows || '<div class="muted">暂无模型数据</div>'}</div>`;
     const buckets = Array.isArray(insights.size_buckets) ? insights.size_buckets : [];
     const maxBucketCount = buckets.reduce((max, item) => Math.max(max, Number(item.conversations || 0)), 0);
@@ -1014,7 +1016,7 @@
     };
     const topRows = topConversations.map((item) => statRow(
       conversationTitle(item),
-      `${formatUsdCompact(item.estimated_cost_usd)} · ${formatNumber(item.total_tokens)} tokens · ${formatNumber(item.turns)} 轮`,
+      `${formatUsdCompact(item.estimated_cost_usd)} · ${formatTokens(item.total_tokens)} tokens · ${formatNumber(item.turns)} 轮`,
       maxTopCost > 0 ? Math.max(3, Math.round(Number(item.estimated_cost_usd || 0) / maxTopCost * 100)) : 3,
       `${conversationDetail(item)}${item.has_unpriced ? ' · 含未定价模型' : ''}`,
       `${conversationTitle(item)} · ${conversationDetail(item, true)}`
@@ -1503,7 +1505,7 @@
     const rows = Array.isArray(search.rows) ? search.rows : [];
     const totals = search.totals || {};
     if (countLabel) {
-      countLabel.textContent = `${formatNumber(search.matched_rows)} 行 · ${formatNumber(totals.total_tokens)} token`;
+      countLabel.textContent = `${formatNumber(search.matched_rows)} 行 · ${formatTokens(totals.total_tokens)} token`;
     }
     const totalPages = Math.max(1, Math.ceil(Number(search.matched_rows || 0) / usageSearchLimit));
     if (rows.length === 0 && usageSearchPage > 0 && Number(search.matched_rows || 0) > 0) {
@@ -1536,9 +1538,9 @@
       const cost = row.estimated_cost_usd === null || row.estimated_cost_usd === undefined
         ? '<span class="muted">未计价</span>'
         : escapeHtml(formatUsdCompact(row.estimated_cost_usd));
-      const tokens = `${escapeHtml(formatNumber(usage.input_tokens))}<div class="cell-sub">缓存 ${escapeHtml(formatNumber(usage.cached_input_tokens))}</div>`;
-      const output = `${escapeHtml(formatNumber(usage.output_tokens))}<div class="cell-sub">推理 ${escapeHtml(formatNumber(usage.reasoning_output_tokens))}</div>`;
-      const total = `${escapeHtml(formatNumber(row.total_tokens))}`;
+      const tokens = `<span title="${escapeHtml(formatNumber(usage.input_tokens))}">${escapeHtml(formatTokens(usage.input_tokens))}</span><div class="cell-sub">缓存 <span title="${escapeHtml(formatNumber(usage.cached_input_tokens))}">${escapeHtml(formatTokens(usage.cached_input_tokens))}</span></div>`;
+      const output = `<span title="${escapeHtml(formatNumber(usage.output_tokens))}">${escapeHtml(formatTokens(usage.output_tokens))}</span><div class="cell-sub">推理 <span title="${escapeHtml(formatNumber(usage.reasoning_output_tokens))}">${escapeHtml(formatTokens(usage.reasoning_output_tokens))}</span></div>`;
+      const total = `<span title="${escapeHtml(formatNumber(row.total_tokens))}">${escapeHtml(formatTokens(row.total_tokens))}</span>`;
       if (group === 'date') {
         return `<tr>
           <td><div class="cell-main">${escapeHtml(row.date)}</div><div class="cell-sub">最近 ${escapeHtml(formatTime(row.last_at))}</div></td>

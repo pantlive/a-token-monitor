@@ -97,7 +97,9 @@ different meter from your subscription bill.
 ### Usage and API-equivalent cost
 
 A 30-day cost trend, then the same numbers by account, model or project, with filters,
-Top 5 rankings and a monthly budget.
+Top 5 rankings and a monthly budget. Token counts are compact (`5.86B`, `23.76M`, `181.2K`)
+so you never have to count digits; hover a cell for the exact value, or read it from
+`--json`.
 
 ![Usage and cost: 30-day trend, filters, budget and per-account breakdown](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-en.png)
 

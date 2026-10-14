@@ -81,6 +81,8 @@ Linux 上按 agent 进程统计外发 TCP 字节（回环不计入，从不读�
 ### 用量与 API 等价金额
 
 先看近 30 天的金额趋势，再按账号、模型或项目拆开，支持筛选、Top 5 排行和月度预算。
+token 数量一律压缩显示（`5.86B`、`23.76M`、`181.2K`），不用再一位位去数；鼠标悬浮看
+精确值，脚本里用 `--json`。
 
 ![用量与费用：30 天趋势、筛选、预算和按账号明细](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-zh.png)
 

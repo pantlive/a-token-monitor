@@ -2015,7 +2015,7 @@ class SessionUsageTests(unittest.TestCase):
 
         self.assertIsNotNone(default)
         self.assertEqual(default["kind"], "session")
-        self.assertIn("300,000", default["message"])
+        self.assertIn("300.0K", default["message"])
         self.assertEqual(by_turns["reasons"], ["已进行 2 轮"])
         self.assertIsNone(quiet)
 

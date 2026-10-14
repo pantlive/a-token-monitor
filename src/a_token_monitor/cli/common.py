@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from ..formatting import format_tokens
+
 from ..local_time import to_local
 from ..accounts import CodexAccount, build_account_specs
 from ..i18n import (
@@ -125,6 +127,12 @@ def _format_count(value: object) -> str:
         return f"{int(value or 0):,}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _format_token_count(value: object) -> str:
+    """把 token 数量压成 K / M / B（与网页端、洞察文案同一套规则）。"""
+
+    return format_tokens(value)
 
 
 def _configure_logging(verbose: bool) -> None:

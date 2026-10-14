@@ -13,6 +13,7 @@ from ..usage import (
 )
 from .common import (
     _dump_json,
+    _format_token_count,
     _effective_scan_dirs,
     _format_alert_time,
     _format_count,
@@ -104,7 +105,7 @@ def _show_usage_search(args: argparse.Namespace) -> int:
     )
     sys.stdout.write(
         f"匹配 {search['matched_rows']} 行 / {_format_count(totals['records'])} 条记录 / "
-        f"{totals['sessions']} 个会话 · 合计 {_format_count(totals['total_tokens'])} token · "
+        f"{totals['sessions']} 个会话 · 合计 {_format_token_count(totals['total_tokens'])} token · "
         f"API 等价 {cost_note}"
         f"{'（命中扫描上限，仅统计最近部分记录）' if search['truncated'] else ''}。\n"
     )
@@ -135,10 +136,10 @@ def _show_usage_search(args: argparse.Namespace) -> int:
                 f"{row['project'] or '目录未知'}{account_note}"
             )
         sys.stdout.write(
-            f"{label} | 输入 {_format_count(usage.get('input_tokens', 0))}"
-            f"（缓存 {_format_count(usage.get('cached_input_tokens', 0))}） | "
-            f"输出 {_format_count(usage.get('output_tokens', 0))} | "
-            f"合计 {_format_count(row['total_tokens'])} | {row_cost_text} | "
+            f"{label} | 输入 {_format_token_count(usage.get('input_tokens', 0))}"
+            f"（缓存 {_format_token_count(usage.get('cached_input_tokens', 0))}） | "
+            f"输出 {_format_token_count(usage.get('output_tokens', 0))} | "
+            f"合计 {_format_token_count(row['total_tokens'])} | {row_cost_text} | "
             f"{row['records']} 条\n"
         )
     if search["has_more"]:

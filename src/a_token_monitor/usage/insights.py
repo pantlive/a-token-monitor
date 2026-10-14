@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ..formatting import format_tokens
+
 from ..local_time import to_local
 from ..kimi import (
     kimi_wire_session_id,
@@ -300,7 +302,7 @@ def _insight_observations(
     total_tokens = sum(item.usage.total_tokens for item in conversations)
     observations.append(
         f"平均每个对话 {total_turns / len(conversations):.1f} 轮、"
-        f"{round(total_tokens / len(conversations)):,} tokens"
+        f"{format_tokens(round(total_tokens / len(conversations)))} tokens"
     )
     if any(hour_buckets):
         peak_hour = max(range(24), key=lambda hour: hour_buckets[hour])
@@ -337,7 +339,7 @@ def _insight_observations(
         stats = project_stats[top_project]
         observations.append(
             f"对话最多的是项目 {top_project}（{stats['conversations']} 个对话，"
-            f"{stats['tokens']:,} tokens）"
+            f"{format_tokens(stats['tokens'])} tokens）"
         )
     if day_totals:
         peak_day, peak_tokens = max(
@@ -345,7 +347,7 @@ def _insight_observations(
             key=lambda item: item[1],
         )
         observations.append(
-            f"用量最高的一天是 {peak_day}，共 {peak_tokens:,} tokens"
+            f"用量最高的一天是 {peak_day}，共 {format_tokens(peak_tokens)} tokens"
         )
         weekend_tokens = sum(
             tokens

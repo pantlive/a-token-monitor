@@ -975,7 +975,7 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(filtered, 0)
             self.assertIn("44444444", buffer.getvalue())
-            self.assertIn("9,000", buffer.getvalue())
+            self.assertIn("9.0K", buffer.getvalue())
 
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
@@ -1474,8 +1474,9 @@ class CliTests(unittest.TestCase):
 
         note = _session_usage_note(view)
         self.assertIn("120 轮", note)
-        self.assertIn("300,000 token", note)
-        self.assertIn("1,000,000 token", note)
+        # 中文注释：token 数量按 K/M/B 压缩显示（长数字不再一位位去数）。
+        self.assertIn("300.0K token", note)
+        self.assertIn("1.00M token", note)
         self.assertIn("claude-sonnet-4-5", note)
         self.assertIn("建议开新会话", note)
 

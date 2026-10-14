@@ -26,7 +26,7 @@ from .common import (
     _accounts,
     _dump_json,
     _effective_scan_dirs,
-    _format_count,
+    _format_token_count,
     _guard_provider,
 )
 from .disk import (
@@ -192,8 +192,8 @@ def _session_usage_note(view: object) -> str:
         return ""
     note = (
         f" | {usage.get('turns', 0)} 轮"
-        f" / 上下文 {_format_count(usage.get('context_tokens'))} token"
-        f" / 累计 {_format_count(usage.get('total_tokens'))} token"
+        f" / 上下文 {_format_token_count(usage.get('context_tokens'))} token"
+        f" / 累计 {_format_token_count(usage.get('total_tokens'))} token"
         f" | {usage.get('model') or '未知模型'}"
     )
     if usage.get("reminder"):
