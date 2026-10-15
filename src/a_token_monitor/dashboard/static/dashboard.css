@@ -201,6 +201,20 @@
 
     /* 中文注释：磁盘与会话管理里的「包与版本残留」子块。 */
     .package-block { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+    /* 中文注释：磁盘与会话管理的顶部快速释放：两类可释放空间并排，窄屏自动换行。 */
+    .hk-quick { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 14px 0 4px; }
+    .hk-quick:empty { display: none; }
+    .hk-quick-item { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .hk-quick-label { color: var(--muted-strong); font-size: 12px; font-weight: 650; }
+    .hk-quick-value { font-size: 20px; font-weight: 750; letter-spacing: -.02em; }
+    /* 中文注释：目录明细与已有归档默认折叠，摘要行保留关键数字。 */
+    .hk-details { margin: 14px 0 0; }
+    .hk-details > summary { cursor: pointer; padding: 8px 0; color: var(--muted-strong); font-size: 13px; font-weight: 650; list-style: none; }
+    .hk-details > summary::-webkit-details-marker { display: none; }
+    .hk-details > summary::before { content: "▸ "; color: var(--muted); }
+    .hk-details[open] > summary::before { content: "▾ "; }
+    .hk-details > summary:hover { color: var(--text); }
+    .hk-details > :not(summary) { margin-top: 10px; }
     /* 中文注释：.account-subtitle 会把文字转大写，摘要里的 GiB/MiB 不能跟着变。 */
     .package-block .package-summary { text-transform: none; letter-spacing: 0; }
     .package-block .package-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }

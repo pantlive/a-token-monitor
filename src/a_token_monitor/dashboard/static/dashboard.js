@@ -1633,6 +1633,8 @@
   };
   // 磁盘与会话管理：目录占用、归档与清理。
   let housekeepingState = null;
+  // 中文注释：版本残留状态与磁盘状态一起用于顶部「快速释放」，声明放在前面避免先读后声明。
+  let packagesState = null;
   // 中文注释：项目卡片默认只看前 5 个，展开状态跨刷新保持。
   let housekeepingProjectsExpanded = false;
   // 中文注释：会话表格的当前页码；切换筛选条件时归零，刷新时按总页数收敛。
@@ -1686,9 +1688,6 @@
       return;
     }
     const preview = summary.preview || {};
-    if (countLabel) {
-      countLabel.textContent = `合计 ${formatDataSize(totals.bytes || 0)} · ${Number(preview.count || 0)} 个可归档`;
-    }
     renderHousekeepingStats(summary, housekeepingState);
     const reminderBanners = (summary.reminders || []).map((reminder) => (
       `<div class="alert-banner ${reminder.level === 'danger' ? 'danger' : 'warn'}">${escapeHtml(reminder.message || reminder.title || '')}</div>`
@@ -1718,22 +1717,66 @@
       </article>`;
     }).join('');
     const scanNote = summary.observed_at
-      ? `上次扫描 ${escapeHtml(formatTime(summary.observed_at))}`
+      ? `上次扫描 ${formatTime(summary.observed_at)}`
       : '尚未完成扫描';
+    // 中文注释：目录明细默认折叠，摘要行直接给出目录数和扫描时间，不必展开也能看到规模。
+    const dirsSummary = document.getElementById('housekeeping-dirs-summary');
+    if (dirsSummary) dirsSummary.textContent = `按目录统计 · ${directories.length} 个目录 · ${scanNote}`;
+    const dirsBody = document.getElementById('housekeeping-dirs-body');
+    if (dirsBody) {
+      dirsBody.innerHTML = cards ? `<div class="card-grid">${cards}</div>` : '<div class="empty-state"><span class="empty-title">没有需要统计的目录</span></div>';
+    }
     // 中文注释：按项目筛选时提示因此被跳过的其他项目文件数。
     const skippedProjectNote = Number(preview.skipped_project || 0) > 0
       ? `<div class="usage-note">按项目筛选：另有 ${escapeHtml(formatNumber(preview.skipped_project))} 个文件因属于其他项目被跳过。</div>`
       : '';
     container.innerHTML = `${reminderBanners}
       <div class="usage-note">按当前条件（${escapeHtml(String(preview.criteria ? preview.criteria.older_than_days : 30))} 天前、非活动）可归档或清理 ${escapeHtml(formatNumber(preview.count || 0))} 个文件，约 ${escapeHtml(formatDataSize(preview.bytes || 0))}；过新跳过 ${escapeHtml(formatNumber(preview.skipped_recent || 0))} 个。</div>
-      ${skippedProjectNote}
-      ${cards ? `<div class="account-subtitle"><span>按目录统计</span><span class="muted">${scanNote}</span></div><div class="card-grid">${cards}</div>` : '<div class="empty-state"><span class="empty-title">没有需要统计的目录</span></div>'}`;
+      ${skippedProjectNote}`;
+    renderHousekeepingQuick();
+  };
+
+  // 中文注释：顶部「快速释放」：把会话与版本残留两类可释放空间并排列出，各给一个跳转入口，
+  // 用户不用先滚过目录明细。数字来自已有状态，不触发新的扫描或删除。
+  const renderHousekeepingQuick = () => {
+    const container = document.getElementById('housekeeping-quick');
+    const countLabel = document.getElementById('housekeeping-count');
+    if (!container) return;
+    const preview = (housekeepingState && housekeepingState.preview) || {};
+    const sessionCount = Number(preview.count || 0);
+    const sessionBytes = Number(preview.bytes || 0);
+    const pkgTotals = (packagesState && packagesState.report && packagesState.report.totals) || {};
+    const pkgCount = Number(pkgTotals.removable_count || 0);
+    const pkgBytes = Number(pkgTotals.removable_bytes || 0);
+    const pkgCleanable = Boolean(packagesState && packagesState.cleanup_enabled);
+    if (countLabel) {
+      countLabel.textContent = `可释放约 ${formatDataSize(sessionBytes + pkgBytes)} · ${formatNumber(sessionCount + pkgCount)} 项`;
+    }
+    if (!housekeepingState && !packagesState) {
+      container.innerHTML = '';
+      return;
+    }
+    const packageAction = pkgCount && pkgCleanable ? '查看并清理' : '查看';
+    const sessionAction = sessionCount ? '查看并处理' : '查看';
+    container.innerHTML = `<div class="hk-quick-item">
+        <div class="hk-quick-label">旧版本包</div>
+        <div class="hk-quick-value">${escapeHtml(formatDataSize(pkgBytes))}</div>
+        <div class="cell-sub">${escapeHtml(formatNumber(pkgCount))} 份可清理 · 清理后下次升级会重新下载</div>
+        <a class="btn mini" href="#packages-block">${packageAction}</a>
+      </div>
+      <div class="hk-quick-item">
+        <div class="hk-quick-label">旧会话</div>
+        <div class="hk-quick-value">${escapeHtml(formatDataSize(sessionBytes))}</div>
+        <div class="cell-sub">${escapeHtml(formatNumber(sessionCount))} 个符合当前条件 · 归档后可恢复</div>
+        <a class="btn mini" href="#housekeeping-actions">${sessionAction}</a>
+      </div>`;
   };
   const renderHousekeepingActions = () => {
     const container = document.getElementById('housekeeping-actions');
     if (!container) return;
     if (!housekeepingState) {
       container.innerHTML = '';
+      renderHousekeepingQuick();
       return;
     }
     const payload = housekeepingState;
@@ -1819,7 +1862,8 @@
     container.innerHTML = `<div class="account-subtitle"><span>${escapeHtml(tableTitle)}</span><span class="muted">${tableMeta}</span></div>
       <div class="usage-note">归档会先打包 tar.gz 并写 manifest，校验通过后才删除原文件，可随时恢复；直接清理不可撤销。活动会话、10 分钟内改动过的文件会始终跳过。<br>列表按体积 × 闲置时长排序，最久未用且占用最大的排在最前。</div>
       ${table}
-      ${archives.length ? `<div class="account-subtitle"><span>已有归档</span><span class="muted">${escapeHtml(formatNumber(archives.length))} 份</span></div><div class="card-grid compact-grid">${archiveCards}</div>` : ''}`;
+      ${archives.length ? `<details class="hk-details"><summary>已有归档 · ${escapeHtml(formatNumber(archives.length))} 份</summary><div class="card-grid compact-grid">${archiveCards}</div></details>` : ''}`;
+    renderHousekeepingQuick();
     container.querySelectorAll('[data-hk-session]').forEach((button) => {
       button.addEventListener('click', () => {
         const path = button.dataset.hkSession || '';
@@ -1918,13 +1962,13 @@
   };
   // 包与版本残留：只统计 agent 自更新留下的多版本副本，标明哪些是旧版本。
   // 清理默认可执行（每次仍需勾选 + 确认）；`--no-package-cleanup` 启动时不提供。
-  let packagesState = null;
   let packagesBusy = false;
   const renderPackages = (payload) => {
     const container = document.getElementById('packages-content');
     const summaryLabel = document.getElementById('packages-summary');
     if (!container) return;
     packagesState = payload || null;
+    renderHousekeepingQuick();
     if (!payload || payload.available === false) {
       container.innerHTML = '<div class="empty-state"><span class="empty-title">该运行模式不支持统计版本残留</span><span class="empty-hint">请在 daemon 模式下查看。</span></div>';
       if (summaryLabel) summaryLabel.textContent = '不可用';

@@ -216,9 +216,9 @@ __UPDATE_PANEL__
       </div>
       <div class="section-body" id="housekeeping-body">
       <div class="stat-row" id="housekeeping-stats"></div>
+      <div id="housekeeping-quick" class="hk-quick"></div>
       <div id="housekeeping-content"><div class="empty-state"><span class="empty-title">正在统计目录占用…</span></div></div>
-      <div id="housekeeping-projects"></div>
-      <div class="criteria-row">
+      <div class="criteria-row" id="housekeeping-criteria">
         <label class="field">保留天数<input id="housekeeping-days" type="number" min="1" max="3650" value="30"></label>
         <label class="field">最小体积 MiB<input id="housekeeping-min-size" type="number" min="0" value="0"></label>
         <label class="field">项目<select id="housekeeping-project"><option value="">全部项目</option></select></label>
@@ -229,11 +229,16 @@ __UPDATE_PANEL__
         </div>
       </div>
       <div id="housekeeping-actions"></div>
+      <div id="housekeeping-projects"></div>
       <div id="packages-block" class="package-block">
         <div class="account-subtitle"><span>包与版本残留</span><span class="muted package-summary" id="packages-summary">等待扫描</span></div>
         <div class="usage-note">agent 自更新会为每个版本留一份完整副本，这里只统计已声明的 provider 目录。正在使用的版本（current 链接、auto-update-version、同组最新）永不列入，清理默认关闭。</div>
         <div id="packages-content"><div class="empty-state"><span class="empty-title">正在统计版本残留…</span></div></div>
       </div>
+      <details id="housekeeping-dirs" class="hk-details">
+        <summary id="housekeeping-dirs-summary">按目录统计</summary>
+        <div id="housekeeping-dirs-body"></div>
+      </details>
       </div>
     </section>
   </main>
