@@ -234,7 +234,8 @@ _FIRST_TIMESTAMP_PATTERN = re.compile(r'"timestamp"\s*:\s*"([^"]{8,40})"')
 _HEADER_READ_BYTES = 64 * 1024
 
 # 中文注释：transcript 最近这么多秒内被写过，就当作活动会话（进程证据缺失时兜底）。
-_FILE_ACTIVITY_SECONDS = 90.0
+# 中文注释：Claude Code 一轮对话里可能几分钟才写一次，90 秒太短，按 15 分钟判断。
+_FILE_ACTIVITY_SECONDS = 900.0
 
 
 def list_claude_active_sessions(

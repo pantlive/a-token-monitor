@@ -101,6 +101,14 @@ class SpeedTracker:
                     self._offsets[key] = max(0, size - BACKFILL_BYTES)
                     lines = self._read_new_lines(path, size, key)
                     product = str(session.get("product") or "")
+                    if product != "codex":
+                        # 中文注释：回读最后几十行，先建立「上一条消息」基线，
+                        # 下一条消息完成时就能立刻算出近似速率。
+                        for line in lines[-40:]:
+                            item = _load_json(line)
+                            output = _line_output_tokens(item)
+                            if output > 0:
+                                self._observe_measure(account, key, item, output)
                     if product == "codex":
                         # 中文注释：回读是从文件中间截断的，TTFT 需要「触发本次请求的
                         # 上一条事件」，这里可能缺失；只回填 TPS，不猜 TTFT。
