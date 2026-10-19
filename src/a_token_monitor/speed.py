@@ -56,6 +56,9 @@ class SpeedTracker:
         self._samples: dict[str, deque[tuple[float, int]]] = {}
         # 中文注释：账号 → 最近若干次精确测量 (时间, ttft 秒, tps, 输出 token)。
         self._responses: dict[str, deque[tuple[float, float, float, int]]] = {}
+        # 中文注释：采样账号的最近一次速率；没有它，Claude 这类 provider 只在
+        # 正在出 token 的十几秒里才有数字，用户切过去看时早没了。
+        self._last_live: dict[str, tuple[float, float]] = {}
         # 中文注释：Codex 单次请求的中间状态。一轮里可能有多条请求（工具调用后继续），
         # 所以 TTFT 从「触发本次请求的上一条事件」算起，而不是整个回合的开始。
         self._last_event_at: dict[str, float] = {}
@@ -240,6 +243,11 @@ class SpeedTracker:
             samples.append((moment, previous + output))
             while samples and moment - samples[0][0] > self.window_seconds:
                 samples.popleft()
+            if len(samples) >= 2:
+                span = samples[-1][0] - samples[0][0]
+                delta = samples[-1][1] - samples[0][1]
+                if span > 0 and delta > 0:
+                    self._last_live[account] = (moment, delta / span)
 
     # ---------------------------------------------------------------- 输出
 
@@ -251,11 +259,15 @@ class SpeedTracker:
             offsets = dict(self._offsets)
             samples = {key: list(value) for key, value in self._samples.items()}
             responses = {key: list(value) for key, value in self._responses.items()}
+            last_live = dict(self._last_live)
         live: dict[str, float] = {}
         for key in offsets:
             account = key.split("|", 1)[0]
             points = samples.get(key) or []
             if len(points) < 2:
+                continue
+            # 中文注释：窗口外的采样点不算「实时」，否则停下来几分钟后还会显示成 live。
+            if moment - points[-1][0] > self.window_seconds:
                 continue
             span = points[-1][0] - points[0][0]
             delta = points[-1][1] - points[0][1]
@@ -263,7 +275,7 @@ class SpeedTracker:
                 continue
             live[account] = max(live.get(account, 0.0), delta / span)
         accounts: dict[str, dict[str, Any]] = {}
-        for account in set(live) | set(responses):
+        for account in set(live) | set(responses) | set(last_live):
             history = responses.get(account) or []
             latest = max(history, key=lambda item: item[0]) if history else None
             live_tps = live.get(account)
@@ -283,18 +295,23 @@ class SpeedTracker:
                 }
                 if entry["live"] and live_tps is not None:
                     entry["tps_live"] = round(live_tps, 1)
-            elif live_tps is not None:
+            elif live_tps is not None or account in last_live:
+                if live_tps is not None:
+                    at_live, tps_value = moment, live_tps
+                else:
+                    at_live, tps_value = last_live[account]
                 entry = {
                     "source": "sampled",
                     "ttft_ms": None,
-                    "tps": round(live_tps, 1),
-                    "tps_live": round(live_tps, 1),
+                    "tps": round(tps_value, 1),
                     "output_tokens": None,
-                    "updated_at": moment,
-                    "age_seconds": 0.0,
+                    "updated_at": at_live,
+                    "age_seconds": round(max(0.0, moment - at_live), 1),
                     "history": _sampled_history(samples, account),
-                    "live": True,
+                    "live": live_tps is not None and moment - at_live <= self.window_seconds,
                 }
+                if entry["live"]:
+                    entry["tps_live"] = round(tps_value, 1)
             else:
                 continue
             accounts[account] = entry

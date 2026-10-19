@@ -233,6 +233,21 @@ class SampledSpeedTests(unittest.TestCase):
         snapshot = tracker.snapshot(now=1001.0)
         self.assertEqual(snapshot["accounts"], {})
 
+    def test_last_rate_survives_after_the_window(self) -> None:
+        """采样账号停下来后仍要保留最近一次速率（否则只有正在出字时才看得到）。"""
+
+        tracker = SpeedTracker(window_seconds=4.0)
+        tracker.sample_sessions([self.session], now=1000.0)
+        self._append(50)
+        tracker.sample_sessions([self.session], now=1001.0)
+        self._append(50)
+        tracker.sample_sessions([self.session], now=1003.0)
+        snapshot = tracker.snapshot(now=1600.0)
+        entry = snapshot["accounts"]["claude-work"]
+        self.assertFalse(entry["live"])
+        self.assertGreaterEqual(entry["age_seconds"], 500)
+        self.assertAlmostEqual(entry["tps"], 25.0, places=1)
+
     def test_windows_are_pruned(self) -> None:
         tracker = SpeedTracker(window_seconds=4.0)
         tracker.sample_sessions([self.session], now=1000.0)
