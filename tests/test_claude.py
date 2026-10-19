@@ -520,7 +520,7 @@ class ClaudeActiveSessionTests(unittest.TestCase):
             proc_root = root / "proc"
             proc_root.mkdir()
             for transcript in home.glob("projects/**/*.jsonl"):
-                os.utime(transcript, (time.time() - 600, time.time() - 600))
+                os.utime(transcript, (time.time() - 1800, time.time() - 1800))
 
             sessions = list_claude_active_sessions(
                 home,
