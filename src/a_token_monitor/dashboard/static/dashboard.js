@@ -45,10 +45,18 @@
     if (!seconds) return '—';
     return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
   };
+  const formatSpeedAge = (seconds) => {
+    const value = Number(seconds || 0);
+    if (value < 60) return `${Math.max(1, Math.round(value))} 秒前`;
+    if (value < 3600) return `${Math.round(value / 60)} 分钟前`;
+    return `${Math.round(value / 3600)} 小时前`;
+  };
   const speedLabel = (speed) => {
     if (!speed || !speed.tps) return '';
+    if (!speed.live && Number(speed.age_seconds || 0) > 3600) return '';
     const ttft = speed.ttft_ms ? `TTFT ${formatTtft(speed.ttft_ms)} · ` : '';
-    return `${ttft}${Math.round(Number(speed.tps))} tps`;
+    const age = speed.live ? '' : ` · ${formatSpeedAge(speed.age_seconds)}`;
+    return `${ttft}${Math.round(Number(speed.tps))} tps${age}`;
   };
   // 中文注释：token 单元格显示 K/M/B，悬浮给出精确值（要精确值时不用去数位数）。
   const tokenCell = (value) => `<td class="usage-number" title="${escapeHtml(formatNumber(value))}">${formatTokens(value)}</td>`;
@@ -2306,7 +2314,7 @@
       return `<article class="account-block">
         <div class="account-heading">
           <div class="account-identity"><div class="account-avatar" aria-hidden="true" title="${escapeHtml(subscription)}">${escapeHtml(subscriptionInitials(subscription))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
-          <div class="account-side">${speedLabel(account.speed) ? `<span class="account-speed" title="最近一次请求：TTFT ${escapeHtml(account.speed.ttft_ms ? formatTtft(account.speed.ttft_ms) : '—')} · 输出 ${escapeHtml(String(Math.round(Number(account.speed.tps))))} tps">${escapeHtml(speedLabel(account.speed))}</span>` : ''}<span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
+          <div class="account-side">${speedLabel(account.speed) ? `<span class="account-speed${account.speed.live ? '' : ' is-stale'}" title="最近一次请求：TTFT ${escapeHtml(account.speed.ttft_ms ? formatTtft(account.speed.ttft_ms) : '—')} · 输出 ${escapeHtml(String(Math.round(Number(account.speed.tps))))} tps">${escapeHtml(speedLabel(account.speed))}</span>` : ''}<span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
         </div>
         <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
         <div class="quota-rows-block">${renderQuotaRows(accountQuotas)}</div>
@@ -2587,7 +2595,7 @@
       const speedTotals = speed.totals || {};
       const speedValue = document.getElementById('speed-count');
       if (speedValue) {
-        speedValue.textContent = speedTotals.live_accounts
+        speedValue.textContent = Number(speedTotals.tps || 0) > 0
           ? `${Math.round(Number(speedTotals.tps || 0))} tps`
           : '—';
       }

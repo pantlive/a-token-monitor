@@ -127,14 +127,59 @@ class CodexSpeedTests(unittest.TestCase):
         self.assertFalse(entry["live"])
         self.assertEqual(snapshot["totals"]["accounts"], 1)
 
-    def test_stale_response_is_not_reported(self) -> None:
+    def test_stale_response_stays_visible_but_not_live(self) -> None:
+        """最后一次测量要一直看得到（带年龄），只是不再计入实时合计。"""
+
         self._feed(
             _item_completed("AgentMessage", 1792380703375, 1792380704037),
             _usage_record(120),
         )
         at = self.tracker._responses["codex"][-1][0]
-        snapshot = self.tracker.snapshot(now=at + 10_000)
-        self.assertEqual(snapshot["accounts"], {})
+        snapshot = self.tracker.snapshot(now=at + 120)
+        entry = snapshot["accounts"]["codex"]
+        self.assertFalse(entry["live"])
+        self.assertGreaterEqual(entry["age_seconds"], 100)
+        self.assertAlmostEqual(entry["tps"], 181.3, places=1)
+        # 两分钟内仍计入合计，超过保留期就只留在账号卡片里。
+        self.assertAlmostEqual(snapshot["totals"]["tps"], 181.3, places=1)
+        far = self.tracker.snapshot(now=at + 10_000)
+        self.assertEqual(far["totals"]["tps"], 0.0)
+        self.assertIn("codex", far["accounts"])
+
+
+class BackfillTests(unittest.TestCase):
+    """第一次见到会话文件时回读尾部，重启后立刻能看到最近一次测量。"""
+
+    def test_first_sight_backfills_the_precise_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "rollout.jsonl"
+            lines = [
+                _codex_line({"type": "task_started", "started_at": 1792380700}),
+                _item_completed("UserMessage", 1792380701714, 1792380701714),
+                _item_completed(
+                    "AgentMessage",
+                    1792380703375,
+                    1792380704037,
+                    at="2026-10-19T03:31:44.037Z",
+                ),
+                _usage_record(120),
+            ]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tracker = SpeedTracker()
+            session = {
+                "account": "codex",
+                "product": "codex",
+                "jsonl_path": str(path),
+            }
+            tracker.sample_sessions([session], now=time.time())
+            at = tracker._responses["codex"][-1][0]
+            entry = tracker.snapshot(now=at + 5)["accounts"]["codex"]
+            self.assertEqual(entry["source"], "codex-log")
+            # 回读可能从回合中间开始，TTFT 不猜；TPS 由生成窗口得出。
+            self.assertIsNone(entry["ttft_ms"])
+            self.assertAlmostEqual(entry["tps"], 181.3, places=1)
+            # 历史内容不算实时流量。
+            self.assertEqual(tracker._samples, {})
 
 
 class SampledSpeedTests(unittest.TestCase):

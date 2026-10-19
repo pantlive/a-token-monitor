@@ -23,9 +23,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 # 中文注释：滚动窗口与新鲜度。页面 2 秒刷新一次，窗口取 12 秒够平滑又不迟钝；
-# 超过 90 秒没有新数据就视为「当前未在生成」，页面显示 —。
+# 最后一次测量会一直保留展示（带「x 分钟前」），超过这个时长才不再计入合计。
 DEFAULT_WINDOW_SECONDS = 12.0
-DEFAULT_FRESH_SECONDS = 90.0
+DEFAULT_FRESH_SECONDS = 600.0
+# 中文注释：第一次见到会话文件时回读这么多尾部字节，重建最近一次 Codex 请求的
+# TTFT/TPS——否则守护进程刚启动时什么都要等下一次生成才出现。
+BACKFILL_BYTES = 256 * 1024
 # 中文注释：一次最多读这么多新增字节（约几百行），避免异常文件拖慢状态构建。
 MAX_READ_BYTES = 512 * 1024
 # 中文注释：生成窗口小于这个值直接丢弃——多半是同一时刻的重复记录。
@@ -83,9 +86,19 @@ class SpeedTracker:
             with self._lock:
                 previous = self._sizes.get(key)
                 if previous is None:
-                    # 中文注释：第一次见到这个文件只记位置，不把历史内容当成实时流量。
+                    # 中文注释：第一次见到这个文件：回读尾部重建最近一次精确测量，
+                    # 但不把历史内容算进「实时流量」。
                     self._sizes[key] = size
-                    self._offsets[key] = size
+                    self._offsets[key] = max(0, size - BACKFILL_BYTES)
+                    lines = self._read_new_lines(path, size, key)
+                    product = str(session.get("product") or "")
+                    if product == "codex":
+                        # 中文注释：回读是从文件中间截断的，TTFT 需要「触发本次请求的
+                        # 上一条事件」，这里可能缺失；只回填 TPS，不猜 TTFT。
+                        for line in lines:
+                            self._observe_codex(
+                                account, key, line, moment, allow_ttft=False
+                            )
                     continue
                 if size <= previous:
                     continue
@@ -121,7 +134,15 @@ class SpeedTracker:
 
     # ---------------------------------------------------------------- Codex
 
-    def _observe_codex(self, account: str, key: str, line: str, moment: float) -> None:
+    def _observe_codex(
+        self,
+        account: str,
+        key: str,
+        line: str,
+        moment: float,
+        *,
+        allow_ttft: bool = True,
+    ) -> None:
         """解析 Codex rollout 的流式窗口与用量，得到精确 TTFT / TPS。"""
 
         item = _load_json(line)
@@ -178,7 +199,11 @@ class SpeedTracker:
                 return
             tps = output / generation
             ttft = None
-            if request_start is not None and window_start >= request_start:
+            if (
+                allow_ttft
+                and request_start is not None
+                and window_start >= request_start
+            ):
                 ttft = window_start - request_start
             self._record_response(account, timestamp, ttft, tps, output)
 
@@ -237,11 +262,8 @@ class SpeedTracker:
             live[account] = max(live.get(account, 0.0), delta / span)
         accounts: dict[str, dict[str, Any]] = {}
         for account in set(live) | set(responses):
-            latest = None
-            for at, ttft, tps, output in reversed(responses.get(account, [])):
-                if moment - at <= self.fresh_seconds:
-                    latest = (at, ttft, tps, output)
-                    break
+            history = responses.get(account) or []
+            latest = max(history, key=lambda item: item[0]) if history else None
             live_tps = live.get(account)
             if latest is not None:
                 at, ttft, tps, output = latest
@@ -251,6 +273,7 @@ class SpeedTracker:
                     "tps": round(tps, 1),
                     "output_tokens": output,
                     "updated_at": at,
+                    "age_seconds": round(max(0.0, moment - at), 1),
                     "live": live_tps is not None and moment - at <= self.window_seconds,
                 }
                 if entry["live"] and live_tps is not None:
@@ -263,12 +286,17 @@ class SpeedTracker:
                     "tps_live": round(live_tps, 1),
                     "output_tokens": None,
                     "updated_at": moment,
+                    "age_seconds": 0.0,
                     "live": True,
                 }
             else:
                 continue
             accounts[account] = entry
-        active = [item for item in accounts.values() if item.get("live")]
+        active = [
+            item
+            for item in accounts.values()
+            if float(item.get("age_seconds") or 0) <= self.fresh_seconds
+        ]
         return {
             "sampled_at": moment,
             "window_seconds": self.window_seconds,
