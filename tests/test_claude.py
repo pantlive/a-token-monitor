@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -494,7 +495,9 @@ class ClaudeActiveSessionTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].pids, (100, 101))
 
-    def test_no_process_means_no_session(self) -> None:
+    def test_no_process_falls_back_to_recent_file(self) -> None:
+        """进程证据缺失时，刚被写过的 transcript 按 RECENT_FILE 兜底。"""
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             home = self._home(root)
@@ -504,7 +507,25 @@ class ClaudeActiveSessionTests(unittest.TestCase):
             sessions = list_claude_active_sessions(
                 home,
                 proc_root=proc_root,
-                now=1_789_708_700.0,
+                now=time.time(),
+            )
+
+        self.assertEqual([item.confidence.value for item in sessions], ["recent_file"])
+        self.assertEqual(sessions[0].product, "claude")
+
+    def test_old_transcript_without_process_is_not_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = self._home(root)
+            proc_root = root / "proc"
+            proc_root.mkdir()
+            for transcript in home.glob("projects/**/*.jsonl"):
+                os.utime(transcript, (time.time() - 600, time.time() - 600))
+
+            sessions = list_claude_active_sessions(
+                home,
+                proc_root=proc_root,
+                now=time.time(),
             )
 
         self.assertEqual(sessions, ())

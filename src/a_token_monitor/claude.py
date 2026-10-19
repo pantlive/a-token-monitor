@@ -233,6 +233,9 @@ _MODEL_PATTERN = re.compile(r'"model"\s*:\s*"([a-z0-9][a-z0-9._/-]{1,80})"')
 _FIRST_TIMESTAMP_PATTERN = re.compile(r'"timestamp"\s*:\s*"([^"]{8,40})"')
 _HEADER_READ_BYTES = 64 * 1024
 
+# 中文注释：transcript 最近这么多秒内被写过，就当作活动会话（进程证据缺失时兜底）。
+_FILE_ACTIVITY_SECONDS = 90.0
+
 
 def list_claude_active_sessions(
     claude_home: Path,
@@ -284,6 +287,45 @@ def list_claude_active_sessions(
                 last_seen_at=observed_at,
                 pids=tuple(sorted(pids)),
                 last_event_at=last_event_at,
+                last_event_type="assistant" if header["model"] else "session",
+                product="claude",
+                model=header["model"],
+                project=header["project"],
+            )
+        )
+    # 中文注释：Claude Code 是 Node 进程，写完一行就关掉句柄，采样瞬间
+    # ``/proc/<pid>/fd`` 里常常看不到 transcript；这时按「文件刚被写过」兜底，
+    # 标成 RECENT_FILE，避免正在用的会话显示成 0 个活动。
+    covered = {item.session_id for item in sessions}
+    try:
+        candidates = sorted(
+            projects_root.glob("**/*.jsonl"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+    for transcript in candidates:
+        session_id = claude_session_id_from_open_path(transcript, projects_root)
+        if session_id is None or session_id in covered:
+            continue
+        header = _read_claude_header(transcript)
+        modified = header["modified_at"] or 0.0
+        if observed_at - modified > _FILE_ACTIVITY_SECONDS:
+            break
+        covered.add(session_id)
+        sessions.append(
+            TrackedSession(
+                thread_id=f"claude:{session_id}",
+                session_id=session_id,
+                jsonl_path=str(transcript),
+                cwd=header["project"],
+                source="claude-file-activity",
+                status=SessionStatus.RUNNING,
+                confidence=DetectionConfidence.RECENT_FILE,
+                first_seen_at=header["started_at"] or modified,
+                last_seen_at=observed_at,
+                last_event_at=modified,
                 last_event_type="assistant" if header["model"] else "session",
                 product="claude",
                 model=header["model"],
