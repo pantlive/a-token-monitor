@@ -59,6 +59,10 @@ class SpeedTracker:
         # 中文注释：采样账号的最近一次速率；没有它，Claude 这类 provider 只在
         # 正在出 token 的十几秒里才有数字，用户切过去看时早没了。
         self._last_live: dict[str, tuple[float, float]] = {}
+        # 中文注释：Claude 这类日志只在消息完成时写一条 usage，且同一响应可能重复写；
+        # 记住上一条消息的 (id, 时间, 输出 token) 用于去重和「墙钟近似速率」。
+        self._last_measure: dict[str, tuple[str, float, int]] = {}
+        self._approx: set[str] = set()
         # 中文注释：Codex 单次请求的中间状态。一轮里可能有多条请求（工具调用后继续），
         # 所以 TTFT 从「触发本次请求的上一条事件」算起，而不是整个回合的开始。
         self._last_event_at: dict[str, float] = {}
@@ -234,8 +238,11 @@ class SpeedTracker:
     ) -> None:
         """通用采样：取这一行的输出 token 数累加，给所有 provider 一个实时速率。"""
 
-        output = _line_output_tokens(_load_json(line))
+        item = _load_json(line)
+        output = _line_output_tokens(item)
         if output <= 0:
+            return
+        if self._observe_measure(account, key, item, output):
             return
         with self._lock:
             samples = self._samples.setdefault(key, deque(maxlen=256))
@@ -248,6 +255,38 @@ class SpeedTracker:
                 delta = samples[-1][1] - samples[0][1]
                 if span > 0 and delta > 0:
                     self._last_live[account] = (moment, delta / span)
+
+    def _observe_measure(
+        self,
+        account: str,
+        key: str,
+        item: Mapping[str, Any] | None,
+        output: int,
+    ) -> bool:
+        """按「消息完成」测量近似速率；没有消息 id/时间戳时返回 False 走累计采样。"""
+
+        if item is None:
+            return False
+        message = item.get("message") if isinstance(item.get("message"), Mapping) else {}
+        ident = str(message.get("id") or item.get("requestId") or item.get("uuid") or "")
+        at = _parse_timestamp(item.get("timestamp"))
+        if not ident or at is None:
+            return False
+        with self._lock:
+            previous = self._last_measure.get(key)
+            self._last_measure[key] = (ident, at, output)
+        if previous is not None and previous[0] == ident:
+            # 中文注释：同一个响应被重复写入，忽略。
+            return True
+        if previous is not None:
+            elapsed = at - previous[1]
+            if elapsed >= 1.0:
+                # 中文注释：含思考/工具等待的墙钟速率，所以在 UI 上标「≈」。
+                rate = output / elapsed
+                with self._lock:
+                    self._last_live[account] = (at, rate)
+                    self._approx.add(account)
+        return True
 
     # ---------------------------------------------------------------- 输出
 
@@ -302,6 +341,7 @@ class SpeedTracker:
                     at_live, tps_value = last_live[account]
                 entry = {
                     "source": "sampled",
+                    "approx": True,
                     "ttft_ms": None,
                     "tps": round(tps_value, 1),
                     "output_tokens": None,

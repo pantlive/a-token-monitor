@@ -65,7 +65,7 @@
     if (!speed || !speed.tps) return '';
     const stale = !speed.live;
     if (stale && Number(speed.age_seconds || 0) > 3600) return '';
-    const tps = `<span class="speed-tps">${Math.round(Number(speed.tps))}<small>tps</small></span>`;
+    const tps = `<span class="speed-tps">${speed.approx ? '≈' : ''}${Math.round(Number(speed.tps))}<small>tps</small></span>`;
     const ttft = speed.ttft_ms
       ? `<span class="speed-note">TTFT ${formatTtft(speed.ttft_ms)}</span>`
       : '';
