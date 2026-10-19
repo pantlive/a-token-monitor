@@ -76,7 +76,7 @@ class SpeedTracker:
             if not isinstance(session, Mapping):
                 continue
             raw_path = session.get("jsonl_path")
-            account = session.get("account")
+            account = session.get("account") or session.get("product")
             if not raw_path or not account:
                 continue
             path = Path(str(raw_path))

@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Any, Mapping, Sequence
 
 from ..accounts import read_codex_plan_type
+from ..housekeeping import _SESSION_SPECS
 from ..housekeeping import (
     HousekeepingMonitor,
 )
@@ -102,6 +103,44 @@ class _AccountSet:
             self._registries = dict(registries)
             self._account_metadata = dict(account_metadata or {})
             self._revision += 1
+
+
+def _recent_provider_files(
+    homes: Mapping[str, Sequence[Path]] | None,
+    *,
+    window_seconds: float = 600.0,
+) -> list[dict[str, str]]:
+    """返回各 provider 目录里最近改动过的会话文件（只读路径，不解析内容）。"""
+
+    if not homes:
+        return []
+    moment = time.time()
+    candidates: list[dict[str, str]] = []
+    for key, home_paths in homes.items():
+        spec = _SESSION_SPECS.get(key)
+        if spec is None:
+            continue
+        for home in home_paths:
+            root = Path(home) / spec.sessions_dir if spec.sessions_dir else Path(home)
+            pattern = spec.pattern
+            try:
+                matches = [item for item in root.glob(pattern) if item.is_file()]
+            except OSError:
+                continue
+            fresh = []
+            for item in matches:
+                try:
+                    if moment - item.stat().st_mtime <= window_seconds:
+                        fresh.append(item)
+                except OSError:
+                    continue
+            if not fresh:
+                continue
+            newest = max(fresh, key=lambda item: item.stat().st_mtime)
+            candidates.append(
+                {"product": key, "jsonl_path": str(newest)}
+            )
+    return candidates
 
 
 def _visible_sessions(sessions: Sequence[TrackedSession]) -> list[TrackedSession]:
@@ -377,11 +416,17 @@ def build_multi_dashboard_state(
     # 中文注释：实时速度只从本地会话日志采样（每次状态刷新一次），不读提示词。
     if speed is not None:
         speed.sample_sessions(sessions)
+        # 中文注释：Claude / Grok / Kimi / DSH / Command Code 的会话不一定在
+        # ``sessions`` 里（没有活动进程就不入表），按 provider 目录直接找最近
+        # 改动的会话文件补采，否则这些账号永远没有速度。
+        speed.sample_sessions(_recent_provider_files(homes))
         speed_state = speed.snapshot()
         for account in accounts:
+            name = str(account.get("name") or "")
+            product = str((account.get("quota") or {}).get("product") or "")
             account["speed"] = speed_state["accounts"].get(
-                str(account.get("name") or "")
-            )
+                name
+            ) or speed_state["accounts"].get(product)
     else:
         speed_state = {
             "sampled_at": time.time(),
