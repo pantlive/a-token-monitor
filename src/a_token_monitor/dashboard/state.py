@@ -108,9 +108,15 @@ class _AccountSet:
 def _recent_provider_files(
     homes: Mapping[str, Sequence[Path]] | None,
     *,
+    accounts_by_home: Mapping[str, Mapping[str, str]] | None = None,
     window_seconds: float = 600.0,
 ) -> list[dict[str, str]]:
-    """返回各 provider 目录里最近改动过的会话文件（只读路径，不解析内容）。"""
+    """返回各 provider 目录里最近改动过的会话文件（只读路径，不解析内容）。
+
+    ``accounts_by_home`` 把数据目录路径映射到账号卡片使用的身份（账号 ID /
+    展示名），让这里采到的速度与会话列表里的账号对上号——否则同一份日志会以
+    「账号 ID」和「产品名」两个键各采一次，概览 KPI 就会把同一个账号算两遍。
+    """
 
     if not homes:
         return []
@@ -137,9 +143,9 @@ def _recent_provider_files(
             if not fresh:
                 continue
             newest = max(fresh, key=lambda item: item.stat().st_mtime)
-            candidates.append(
-                {"product": key, "jsonl_path": str(newest)}
-            )
+            candidate = {"product": key, "jsonl_path": str(newest)}
+            candidate.update((accounts_by_home or {}).get(str(home), {}))
+            candidates.append(candidate)
     return candidates
 
 
@@ -362,6 +368,7 @@ def build_multi_dashboard_state(
 
     # 中文注释：登记了账号读取的 provider（Claude Code、Command Code、DSH、Grok、
     # Kimi）各自成为账号卡片；额度经各家官方接口读取（带缓存），失败时只展示身份。
+    account_keys_by_home: dict[str, dict[str, str]] = {}
     for spec in home_providers():
         if spec.read_account is None:
             continue
@@ -369,7 +376,11 @@ def build_multi_dashboard_state(
             if not home.is_dir():
                 continue
             try:
-                _merge_provider_home(spec, home, accounts_by_key, quota_by_key, sessions)
+                identity = _merge_provider_home(
+                    spec, home, accounts_by_key, quota_by_key, sessions
+                )
+                if identity:
+                    account_keys_by_home[str(home)] = identity
                 _record_provider_success(health, spec.product_id)
             except Exception as error:  # noqa: BLE001 - 单个 provider 失败不影响其他 provider
                 _guard_provider(
@@ -418,15 +429,21 @@ def build_multi_dashboard_state(
         speed.sample_sessions(sessions)
         # 中文注释：Claude / Grok / Kimi / DSH / Command Code 的会话不一定在
         # ``sessions`` 里（没有活动进程就不入表），按 provider 目录直接找最近
-        # 改动的会话文件补采，否则这些账号永远没有速度。
-        speed.sample_sessions(_recent_provider_files(homes))
+        # 改动的会话文件补采，否则这些账号永远没有速度。补采必须沿用账号卡片
+        # 的归组键，不然同一份日志会被当成两个账号重复计入概览合计。
+        speed.sample_sessions(
+            _recent_provider_files(homes, accounts_by_home=account_keys_by_home)
+        )
         speed_state = speed.snapshot()
+        product_counts: dict[str, int] = {}
         for account in accounts:
-            name = str(account.get("name") or "")
-            product = str((account.get("quota") or {}).get("product") or "")
-            account["speed"] = speed_state["accounts"].get(
-                name
-            ) or speed_state["accounts"].get(product)
+            product = str(account.get("product") or "")
+            if product:
+                product_counts[product] = product_counts.get(product, 0) + 1
+        for account in accounts:
+            account["speed"] = _account_speed(
+                speed_state["accounts"], account, product_counts
+            )
     else:
         speed_state = {
             "sampled_at": time.time(),
@@ -453,18 +470,44 @@ def build_multi_dashboard_state(
     }
 
 
+def _account_speed(
+    speeds: Mapping[str, dict[str, Any]],
+    account: Mapping[str, Any],
+    product_counts: Mapping[str, int],
+) -> dict[str, Any] | None:
+    """按账号卡片上的身份找到它的速度。
+
+    速度的键来自会话记录（通常是账号 ID）；卡片上有 ``account_id`` 和展示名，
+    两个都要试。产品名只在没有别的账号用该产品时兜底，避免多个 Claude/Kimi
+    目录互相串数据。
+    """
+
+    name = str(account.get("name") or "")
+    account_id = str(account.get("account_id") or "")
+    for key in (account_id, name):
+        if key and key in speeds:
+            return speeds[key]
+    product = str(account.get("product") or "")
+    if product and product_counts.get(product, 0) <= 1 and product in speeds:
+        return speeds[product]
+    return None
+
+
 def _merge_provider_home(
     spec: ProviderSpec,
     home: Path,
     accounts_by_key: dict[str, dict[str, Any]],
     quota_by_key: dict[tuple[str, str, str], dict[str, Any]],
     sessions: list[dict[str, Any]],
-) -> None:
-    """把一个 provider 数据目录的账号、额度和活动会话并入 Dashboard 状态。"""
+) -> dict[str, str]:
+    """把一个 provider 数据目录的账号、额度和活动会话并入 Dashboard 状态。
+
+    返回该目录对应的速度身份（账号 ID 与展示名），供速度采样复用同一账号键。
+    """
 
     product = spec.product_id
     if spec.read_account is None:
-        return
+        return {}
     provider_account = spec.read_account(home)
     provider_quota = spec.read_quota(home) if spec.read_quota is not None else None
     account_key = provider_account.account_key
@@ -496,7 +539,7 @@ def _merge_provider_home(
             quota_with_account["product"] = product
             quota_by_key[(account_key, "snapshot", "snapshot")] = quota_with_account
     if spec.active_sessions is None:
-        return
+        return _provider_speed_identity(provider_account)
     for session in spec.active_sessions(home):
         sessions.append(
             session_view(
@@ -508,6 +551,20 @@ def _merge_provider_home(
                 product=product,
             )
         )
+    return _provider_speed_identity(provider_account)
+
+
+def _provider_speed_identity(provider_account: Any) -> dict[str, str]:
+    """返回速度采样要用的账号身份：账号 ID 优先，展示名兜底。"""
+
+    identity: dict[str, str] = {}
+    account_id = getattr(provider_account, "account_id", None)
+    display_name = getattr(provider_account, "display_name", None)
+    if isinstance(account_id, str) and account_id:
+        identity["account_id"] = account_id
+    if isinstance(display_name, str) and display_name:
+        identity["account"] = display_name
+    return identity
 
 
 def _record_account_id(record: Mapping[str, Any]) -> str | None:

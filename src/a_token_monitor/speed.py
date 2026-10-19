@@ -6,6 +6,9 @@
   ``started_at_ms`` / ``completed_at_ms``，配上 ``token_usage_record`` 的
   ``usage.output_tokens``，可以算出「回合开始 → 首个输出 item」的 TTFT 和
   「输出 token ÷ 生成窗口」的 TPS。
+* **Claude Code** 的新版 transcript 会写 ``api-request``（请求开始）和 assistant
+  行上的 ``requestRef``，可以按「请求开始 → 消息最后一段写完」算每条请求的 TPS；
+  没有这两类记录的旧 transcript 退回「相邻消息完成时间差」的墙钟近似。
 * 其它 provider 的日志只有「每条消息完成时的时间戳 + token 数」，没有请求开始时刻，
   所以 TTFT 不给（显示 —）；TPS 用**新增输出 token / 时间差**的滚动速率近似。
 
@@ -33,8 +36,25 @@ _HISTORY_POINTS = 12
 BACKFILL_BYTES = 256 * 1024
 # 中文注释：一次最多读这么多新增字节（约几百行），避免异常文件拖慢状态构建。
 MAX_READ_BYTES = 512 * 1024
+# 中文注释：首次见到文件时回读尾部用于重建基线，只看最后这么多行。
+_BACKFILL_TAIL_LINES = 200
+# 中文注释：近似测量（Claude）两次消息之间可能隔着工具执行，12 秒窗口会让卡片
+# 大部分时间都显示成灰色「x 秒前」；一分钟内的测量仍算「正在出 token」。
+_APPROX_LIVE_SECONDS = 60.0
 # 中文注释：生成窗口小于这个值直接丢弃——多半是同一时刻的重复记录。
 MIN_GENERATION_SECONDS = 0.05
+# 中文注释：近似速率（Claude 的请求窗口 / 消息间隔）至少要这么长的窗口，
+# 否则时间戳的毫秒级抖动会把速率放大成天文数字。
+_MIN_APPROX_SECONDS = 0.5
+# 中文注释：记住最近多少个 Claude 请求的开始时间，供随后的 assistant 行回填。
+_MAX_REQUEST_STARTS = 2000
+# 中文注释：Codex rollout 里由模型生成、带输出 token 的 item 类型（统一小写比较）。
+# ``Extension`` 是联网搜索这类工具产物，窗口覆盖的是搜索耗时，不能算作生成。
+_CODEX_OUTPUT_ITEM_TYPES = frozenset({"agentmessage", "reasoning", "plan"})
+# 中文注释：真正会触发一次新请求的 response_item——工具输出回到模型。
+_CODEX_TRIGGER_RESPONSE_ITEMS = frozenset(
+    {"function_call_output", "custom_tool_call_output", "local_shell_call_output"}
+)
 
 
 class SpeedTracker:
@@ -56,12 +76,18 @@ class SpeedTracker:
         self._samples: dict[str, deque[tuple[float, int]]] = {}
         # 中文注释：账号 → 最近若干次精确测量 (时间, ttft 秒, tps, 输出 token)。
         self._responses: dict[str, deque[tuple[float, float, float, int]]] = {}
+        # 中文注释：近似测量（Claude 的请求窗口 / 消息间隔）的走势；卡片上的
+        # 迷你条不能只依赖滚动采样点，否则这类账号的走势条永远是空的。
+        self._approx_history: dict[str, deque[float]] = {}
         # 中文注释：采样账号的最近一次速率；没有它，Claude 这类 provider 只在
         # 正在出 token 的十几秒里才有数字，用户切过去看时早没了。
         self._last_live: dict[str, tuple[float, float]] = {}
         # 中文注释：Claude 这类日志只在消息完成时写一条 usage，且同一响应可能重复写；
         # 记住上一条消息的 (id, 时间, 输出 token) 用于去重和「墙钟近似速率」。
         self._last_measure: dict[str, tuple[str, float, int]] = {}
+        # 中文注释：Claude 的请求窗口：api-request 的 id → 开始时间，assistant
+        # 行用 requestRef 回填到对应请求。
+        self._request_starts: dict[str, float] = {}
         self._approx: set[str] = set()
         # 中文注释：Codex 单次请求的中间状态。一轮里可能有多条请求（工具调用后继续），
         # 所以 TTFT 从「触发本次请求的上一条事件」算起，而不是整个回合的开始。
@@ -83,7 +109,13 @@ class SpeedTracker:
             if not isinstance(session, Mapping):
                 continue
             raw_path = session.get("jsonl_path")
-            account = session.get("account") or session.get("product")
+            # 中文注释：优先用账号 ID 作归组键，与会话记录、账号卡片上的身份
+            # 一致；展示名只作兜底，否则同一账号会以两个键各采一次。
+            account = (
+                session.get("account_id")
+                or session.get("account")
+                or session.get("product")
+            )
             if not raw_path or not account:
                 continue
             path = Path(str(raw_path))
@@ -102,10 +134,14 @@ class SpeedTracker:
                     lines = self._read_new_lines(path, size, key)
                     product = str(session.get("product") or "")
                     if product != "codex":
-                        # 中文注释：回读最后几十行，先建立「上一条消息」基线，
-                        # 下一条消息完成时就能立刻算出近似速率。
-                        for line in lines[-40:]:
+                        # 中文注释：回读尾部，先建立「上一条消息」基线、填一点
+                        # 走势，下一条消息完成时就能立刻算出近似速率。按写入
+                        # 顺序处理，api-request 先登记，随后的消息才能用上窗口。
+                        for line in lines[-_BACKFILL_TAIL_LINES:]:
                             item = _load_json(line)
+                            if item is None:
+                                continue
+                            self._observe_request(item)
                             output = _line_output_tokens(item)
                             if output > 0:
                                 self._observe_measure(account, key, item, output)
@@ -177,41 +213,55 @@ class SpeedTracker:
             return
         if kind == "event_msg" and payload_type == "item_completed":
             inner = payload.get("item") if isinstance(payload.get("item"), Mapping) else {}
-            if str(inner.get("type") or "") not in {"AgentMessage", "reasoning"}:
+            item_type = str(inner.get("type") or "").lower()
+            if item_type == "usermessage":
                 with self._lock:
                     self._last_event_at[key] = timestamp
+                return
+            if item_type not in _CODEX_OUTPUT_ITEM_TYPES:
+                # 中文注释：工具类 item 是这一轮的产物，不是下一轮请求的触发点；
+                # 用它当起点会把生成窗口压到只剩工具执行之后的几毫秒。
                 return
             started = _millis(payload.get("started_at_ms"))
             completed = _millis(payload.get("completed_at_ms"))
             if started is None or completed is None or completed <= started:
-                with self._lock:
-                    self._last_event_at[key] = timestamp
                 return
             with self._lock:
                 windows = self._windows.setdefault(key, [])
                 if not windows:
-                    # 中文注释：本次请求由上一行事件触发（用户消息 / 工具输出）。
+                    # 中文注释：本次请求由上一行触发事件（用户消息 / 工具输出）开始。
                     previous = self._last_event_at.get(key)
                     if previous is not None:
                         self._request_start[key] = previous
                 windows.append((started, completed))
+            return
+        if kind == "response_item" and payload_type in _CODEX_TRIGGER_RESPONSE_ITEMS:
+            with self._lock:
                 self._last_event_at[key] = timestamp
             return
         if kind != "token_usage_record":
-            with self._lock:
-                self._last_event_at[key] = timestamp
+            return
         if kind == "token_usage_record":
             usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
             output = _int(usage.get("output_tokens"))
             with self._lock:
                 windows = self._windows.pop(key, [])
                 request_start = self._request_start.pop(key, None)
-                self._last_event_at[key] = timestamp
+                # 中文注释：用量记录结束了这次请求；下一次请求必须有新的触发事件
+                # （工具输出 / 用户消息），否则会拿上一次的旧时间当起点。
+                self._last_event_at.pop(key, None)
             if output <= 0 or not windows:
                 return
             window_start = min(start for start, _ in windows)
             window_end = max(end for _, end in windows)
-            generation = window_end - window_start
+            # 中文注释：``output_tokens`` 是整个响应（含推理）的合计，而单个 item 的
+            # ``started_at_ms``/``completed_at_ms`` 往往只覆盖最后一段输出（推理 item
+            # 甚至只有 1 毫秒），拿它当分母会把 TPS 放大几十倍。有触发事件时用
+            # 「请求开始 → 最后一个输出 item 结束」；回读尾部缺触发事件时才退回 item 窗口。
+            if request_start is not None and window_end > request_start:
+                generation = window_end - request_start
+            else:
+                generation = window_end - window_start
             if generation < MIN_GENERATION_SECONDS:
                 return
             tps = output / generation
@@ -247,6 +297,11 @@ class SpeedTracker:
         """通用采样：取这一行的输出 token 数累加，给所有 provider 一个实时速率。"""
 
         item = _load_json(line)
+        if item is None:
+            return
+        if self._observe_request(item):
+            # 中文注释：Claude 的 api-request 行只记录请求开始时间，本身没有用量。
+            return
         output = _line_output_tokens(item)
         if output <= 0:
             return
@@ -264,6 +319,25 @@ class SpeedTracker:
                 if span > 0 and delta > 0:
                     self._last_live[account] = (moment, delta / span)
 
+    def _observe_request(self, item: Mapping[str, Any]) -> bool:
+        """记录 Claude transcript 里的请求开始时间；返回 True 表示这一行已消费。"""
+
+        if item.get("type") != "api-request":
+            return False
+        ident = str(item.get("id") or "")
+        at = _parse_timestamp(item.get("timestamp"))
+        if ident and at is not None:
+            with self._lock:
+                self._request_starts[ident] = at
+                if len(self._request_starts) > _MAX_REQUEST_STARTS:
+                    # 中文注释：长会话会累积上千条请求，只保留最近的即可——
+                    # 消息行紧跟在对应请求之后，旧请求不会再被引用。
+                    for stale in list(self._request_starts)[
+                        : len(self._request_starts) - _MAX_REQUEST_STARTS
+                    ]:
+                        self._request_starts.pop(stale, None)
+        return True
+
     def _observe_measure(
         self,
         account: str,
@@ -271,7 +345,12 @@ class SpeedTracker:
         item: Mapping[str, Any] | None,
         output: int,
     ) -> bool:
-        """按「消息完成」测量近似速率；没有消息 id/时间戳时返回 False 走累计采样。"""
+        """按「消息完成」测量近似速率；没有消息 id/时间戳时返回 False 走累计采样。
+
+        新版 Claude transcript 同时写了 ``api-request`` 和 assistant 行的
+        ``requestRef``，这时用「请求开始 → 最后一段写完」当生成窗口，工具执行和
+        等待时间不会被算进去；旧 transcript 没有这些记录，退回相邻消息完成的墙钟差。
+        """
 
         if item is None:
             return False
@@ -280,20 +359,38 @@ class SpeedTracker:
         at = _parse_timestamp(item.get("timestamp"))
         if not ident or at is None:
             return False
+        request_ref = item.get("requestRef")
         with self._lock:
             previous = self._last_measure.get(key)
             self._last_measure[key] = (ident, at, output)
-        if previous is not None and previous[0] == ident:
-            # 中文注释：同一个响应被重复写入，忽略。
-            return True
-        if previous is not None:
-            elapsed = at - previous[1]
-            if elapsed >= 1.0:
-                # 中文注释：含思考/工具等待的墙钟速率，所以在 UI 上标「≈」。
-                rate = output / elapsed
-                with self._lock:
-                    self._last_live[account] = (at, rate)
-                    self._approx.add(account)
+            request_start = (
+                self._request_starts.get(request_ref)
+                if isinstance(request_ref, str) and request_ref
+                else None
+            )
+        duplicate = previous is not None and previous[0] == ident
+        rate: float | None = None
+        if request_start is not None:
+            span = at - request_start
+            if span >= _MIN_APPROX_SECONDS:
+                rate = output / span
+        if rate is None and previous is not None and not duplicate:
+            span = at - previous[1]
+            if span >= _MIN_APPROX_SECONDS:
+                rate = output / span
+        if rate is not None:
+            with self._lock:
+                # 中文注释：同一响应的多段写入会依次更新同一个测量，走势条上
+                # 只保留最终值，避免一条消息塞进三四个点。
+                self._last_live[account] = (at, rate)
+                history = self._approx_history.setdefault(
+                    account, deque(maxlen=_HISTORY_POINTS)
+                )
+                if duplicate and history:
+                    history[-1] = round(rate, 1)
+                else:
+                    history.append(round(rate, 1))
+                self._approx.add(account)
         return True
 
     # ---------------------------------------------------------------- 输出
@@ -307,6 +404,9 @@ class SpeedTracker:
             samples = {key: list(value) for key, value in self._samples.items()}
             responses = {key: list(value) for key, value in self._responses.items()}
             last_live = dict(self._last_live)
+            approx_history_by_account = {
+                key: list(value) for key, value in self._approx_history.items()
+            }
         live: dict[str, float] = {}
         for key in offsets:
             account = key.split("|", 1)[0]
@@ -347,6 +447,9 @@ class SpeedTracker:
                     at_live, tps_value = moment, live_tps
                 else:
                     at_live, tps_value = last_live[account]
+                # 中文注释：Claude 这类按消息完成测量的账号没有滚动采样点，
+                # live 只能按「最近一次测量是否够新」判断；走势条用近似历史。
+                approx_history = list(approx_history_by_account.get(account) or [])
                 entry = {
                     "source": "sampled",
                     "approx": True,
@@ -355,8 +458,10 @@ class SpeedTracker:
                     "output_tokens": None,
                     "updated_at": at_live,
                     "age_seconds": round(max(0.0, moment - at_live), 1),
-                    "history": _sampled_history(samples, account),
-                    "live": live_tps is not None and moment - at_live <= self.window_seconds,
+                    "history": approx_history or _sampled_history(samples, account),
+                    "live": moment - at_live <= max(
+                        self.window_seconds, _APPROX_LIVE_SECONDS
+                    ),
                 }
                 if entry["live"]:
                     entry["tps_live"] = round(tps_value, 1)

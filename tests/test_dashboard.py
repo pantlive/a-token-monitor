@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from a_token_monitor.alerts import TrafficAlertStore
+from a_token_monitor.claude import ClaudeAccount
 from a_token_monitor.housekeeping import (
     AuditTarget,
     DiskThresholds,
@@ -49,6 +50,7 @@ from a_token_monitor.dashboard import (
 from a_token_monitor.health import HealthTracker
 from a_token_monitor.i18n import substitute
 from a_token_monitor.retention import RetentionController, RetentionError
+from a_token_monitor.speed import SpeedTracker
 from a_token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
@@ -1811,6 +1813,89 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
             if account.get("product") == "claude"
         ]
         self.assertTrue(claude_accounts)
+
+
+class SpeedAccountKeyTests(unittest.TestCase):
+    """同一份日志不能以两个账号键各采一次，否则概览合计会重复。"""
+
+    def _claude_state(self, root: Path, registry: MultiSessionRegistry) -> dict:
+        claude_home = root / ".claude"
+        claude_home.mkdir(parents=True)
+        projects = claude_home / "projects" / "-home-dev-proj"
+        projects.mkdir(parents=True)
+        transcript = projects / "session-1.jsonl"
+        transcript.write_text(
+            "\n".join(
+                json.dumps(line)
+                for line in (
+                    {
+                        "type": "api-request",
+                        "id": "request-1",
+                        "timestamp": "2026-10-19T03:31:52.000Z",
+                    },
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-10-19T03:31:54.000Z",
+                        "requestRef": "request-1",
+                        "message": {
+                            "id": "message-1",
+                            "usage": {"output_tokens": 200},
+                        },
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        account = ClaudeAccount(
+            home=claude_home,
+            account_id="claude-account-id",
+            display_name="dev@example.com",
+            profile_name="claude",
+        )
+        speed = SpeedTracker()
+        now = time.time()
+        with (
+            patch_provider("claude", "read_account", return_value=account),
+            patch_provider("claude", "read_quota", return_value=None),
+            patch_provider("claude", "active_sessions", return_value=()),
+        ):
+            state = build_multi_dashboard_state(
+                {"personal": registry},
+                homes={
+                    "grok": (root / "missing" / "grok",),
+                    "kimi": (root / "missing" / "kimi",),
+                    "dsh": (root / "missing" / "dsh",),
+                    "commandcode": (root / "missing" / "commandcode",),
+                    "claude": (claude_home,),
+                },
+                speed=speed,
+            )
+        self.assertLess(abs(transcript.stat().st_mtime - now), 600)
+        return state
+
+    def test_recent_provider_file_uses_the_account_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            registry = MultiSessionRegistry(root / "state")
+            state = self._claude_state(root, registry)
+        self.assertEqual(list(state["speed"]["accounts"]), ["claude-account-id"])
+        claude_account = next(
+            account for account in state["accounts"] if account.get("product") == "claude"
+        )
+        self.assertIsNotNone(claude_account["speed"])
+
+    def test_sampled_account_is_counted_once_in_the_kpi(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            registry = MultiSessionRegistry(root / "state")
+            state = self._claude_state(root, registry)
+        # 空 transcript 没有用量，这里只验证键集合：一个账号一个键，
+        # 不会同时出现账号 ID 与产品名两份。
+        self.assertEqual(
+            set(state["speed"]["accounts"]),
+            {"claude-account-id"},
+        )
 
 
 class ThemeTests(unittest.TestCase):
