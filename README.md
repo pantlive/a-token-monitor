@@ -103,7 +103,11 @@ different meter from your subscription bill.
 ### Usage and API-equivalent cost
 
 A 30-day cost trend, then the same numbers by account, model or project, with filters,
-Top 5 rankings and a monthly budget. Token counts are compact (`5.86B`, `23.76M`, `181.2K`)
+Top 5 rankings and a monthly budget. Account cards and the overview also show **live output
+speed**: Codex gets an exact time-to-first-token (TTFT) and TPS from the streaming windows in
+its rollout, while other providers get a sampled TPS from the output tokens appended to their
+session logs (their logs have no request start, so TTFT shows —). Local logs only, no traffic
+inspection. Token counts are compact (`5.86B`, `23.76M`, `181.2K`)
 so you never have to count digits; hover a cell for the exact value, or read it from
 `--json`.
 

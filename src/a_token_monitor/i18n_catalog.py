@@ -1047,6 +1047,10 @@ EN.update({
     "发现有新版本时同时打印发布说明": "Also print the release notes when a new version is found",
     "检查后执行升级命令（需要确认）": "Run the upgrade command after checking (asks for confirmation)",
     "升级时不再询问确认": "Do not ask for confirmation before upgrading",
+    # 中文注释：实时输出速度（账号卡片 + 概览 KPI）。
+    "实时输出速度": "Live output speed",
+    "首 token 延迟（中位）": "Time to first token (median)",
+    "最近一次请求：TTFT": "Last request: TTFT",
     # 中文注释：磁盘与会话管理里的「包与版本残留」子块。
     "包与版本残留": "Packages and version leftovers",
     "正在统计版本残留…": "Scanning version leftovers…",

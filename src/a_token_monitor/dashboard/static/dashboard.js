@@ -39,6 +39,17 @@
     if (amount >= 1e3) return `${(amount / 1e3).toFixed(1)}K`;
     return String(amount);
   };
+  // 中文注释：实时速度展示——TTFT 用秒（一位小数），TPS 取整。
+  const formatTtft = (value) => {
+    const seconds = Number(value || 0) / 1000;
+    if (!seconds) return '—';
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+  };
+  const speedLabel = (speed) => {
+    if (!speed || !speed.tps) return '';
+    const ttft = speed.ttft_ms ? `TTFT ${formatTtft(speed.ttft_ms)} · ` : '';
+    return `${ttft}${Math.round(Number(speed.tps))} tps`;
+  };
   // 中文注释：token 单元格显示 K/M/B，悬浮给出精确值（要精确值时不用去数位数）。
   const tokenCell = (value) => `<td class="usage-number" title="${escapeHtml(formatNumber(value))}">${formatTokens(value)}</td>`;
   const formatBytes = (value) => `${(Number(value || 0) / 1024 / 1024).toFixed(1)} MiB`;
@@ -2295,7 +2306,7 @@
       return `<article class="account-block">
         <div class="account-heading">
           <div class="account-identity"><div class="account-avatar" aria-hidden="true" title="${escapeHtml(subscription)}">${escapeHtml(subscriptionInitials(subscription))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
-          <div class="account-side"><span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
+          <div class="account-side">${speedLabel(account.speed) ? `<span class="account-speed" title="最近一次请求：TTFT ${escapeHtml(account.speed.ttft_ms ? formatTtft(account.speed.ttft_ms) : '—')} · 输出 ${escapeHtml(String(Math.round(Number(account.speed.tps))))} tps">${escapeHtml(speedLabel(account.speed))}</span>` : ''}<span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
         </div>
         <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
         <div class="quota-rows-block">${renderQuotaRows(accountQuotas)}</div>
@@ -2572,6 +2583,16 @@
       document.getElementById('quota-window-count').textContent = Array.isArray(state.quotas) ? state.quotas.reduce((total, quota) => total + (Array.isArray(quota.windows) ? quota.windows.length : 0), 0) : 0;
       document.getElementById('accounts-online').textContent = accounts.length;
       if (!latestUsageState) document.getElementById('spend-count').textContent = '按需加载';
+      const speed = state.speed || {};
+      const speedTotals = speed.totals || {};
+      const speedValue = document.getElementById('speed-count');
+      if (speedValue) {
+        speedValue.textContent = speedTotals.live_accounts
+          ? `${Math.round(Number(speedTotals.tps || 0))} tps`
+          : '—';
+      }
+      const speedTtft = document.getElementById('speed-ttft');
+      if (speedTtft) speedTtft.textContent = formatTtft(speedTotals.ttft_ms);
       const trafficTotals = (state.traffic && state.traffic.totals) || {};
       const uploadBurst = document.getElementById('upload-burst-count');
       const uploadAlerts = document.getElementById('upload-alert-count');

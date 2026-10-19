@@ -14,6 +14,7 @@ from ..housekeeping import (
 )
 from ..health import HealthTracker
 from ..multi_models import TrackedSession, session_view
+from ..speed import SpeedTracker
 from ..quota import (
     QuotaSnapshot,
     quota_period,
@@ -221,6 +222,7 @@ def build_multi_dashboard_state(
     budget_usd: float | None = None,
     traffic: TrafficSnapshot | None = None,
     health: HealthTracker | None = None,
+    speed: SpeedTracker | None = None,
 ) -> dict[str, Any]:
     """合并多个账号状态，同时保留每个账号独立的额度快照。"""
 
@@ -372,9 +374,25 @@ def build_multi_dashboard_state(
         if usage_aggregator is not None
         else UsageAggregator.empty_snapshot()
     )
+    # 中文注释：实时速度只从本地会话日志采样（每次状态刷新一次），不读提示词。
+    if speed is not None:
+        speed.sample_sessions(sessions)
+        speed_state = speed.snapshot()
+        for account in accounts:
+            account["speed"] = speed_state["accounts"].get(
+                str(account.get("name") or "")
+            )
+    else:
+        speed_state = {
+            "sampled_at": time.time(),
+            "window_seconds": 0,
+            "accounts": {},
+            "totals": {"tps": 0.0, "accounts": 0, "live_accounts": 0, "ttft_ms": None},
+        }
     return {
         "updated_at": time.time(),
         "accounts": accounts,
+        "speed": speed_state,
         # 保留单账号旧字段，新的页面使用 quotas 以免混淆不同账号。
         "quota": (quotas[0] if len(registries) == 1 and len(quotas) == 1 else None),
         "quotas": quotas,

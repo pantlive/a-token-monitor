@@ -218,3 +218,6 @@
     /* 中文注释：.account-subtitle 会把文字转大写，摘要里的 GiB/MiB 不能跟着变。 */
     .package-block .package-summary { text-transform: none; letter-spacing: 0; }
     .package-block .package-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+
+    /* 中文注释：账号卡片右上角的实时速度徽标（TTFT · tps）。 */
+    .account-speed { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border: 1px solid var(--cyan-border); border-radius: 99px; background: var(--cyan-soft); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
