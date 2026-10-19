@@ -1051,6 +1051,7 @@ EN.update({
     "实时输出速度": "Live output speed",
     "首 token 延迟（中位）": "Time to first token (median)",
     "最近一次请求：TTFT": "Last request: TTFT",
+    "最近一次请求：输出": "Last request: output",
     # 中文注释：磁盘与会话管理里的「包与版本残留」子块。
     "包与版本残留": "Packages and version leftovers",
     "正在统计版本残留…": "Scanning version leftovers…",

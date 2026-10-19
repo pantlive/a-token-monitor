@@ -26,6 +26,8 @@ from typing import Any, Iterable, Mapping
 # 最后一次测量会一直保留展示（带「x 分钟前」），超过这个时长才不再计入合计。
 DEFAULT_WINDOW_SECONDS = 12.0
 DEFAULT_FRESH_SECONDS = 600.0
+# 中文注释：卡片上的迷你走势条取最近多少次测量。
+_HISTORY_POINTS = 12
 # 中文注释：第一次见到会话文件时回读这么多尾部字节，重建最近一次 Codex 请求的
 # TTFT/TPS——否则守护进程刚启动时什么都要等下一次生成才出现。
 BACKFILL_BYTES = 256 * 1024
@@ -274,6 +276,9 @@ class SpeedTracker:
                     "output_tokens": output,
                     "updated_at": at,
                     "age_seconds": round(max(0.0, moment - at), 1),
+                    "history": [
+                        round(item[2], 1) for item in history[-_HISTORY_POINTS:]
+                    ],
                     "live": live_tps is not None and moment - at <= self.window_seconds,
                 }
                 if entry["live"] and live_tps is not None:
@@ -287,6 +292,7 @@ class SpeedTracker:
                     "output_tokens": None,
                     "updated_at": moment,
                     "age_seconds": 0.0,
+                    "history": _sampled_history(samples, account),
                     "live": True,
                 }
             else:
@@ -379,6 +385,26 @@ def _line_output_tokens(item: Mapping[str, Any] | None) -> int:
     if last is not None:
         return _int(last.get("output_tokens"))
     return _int(payload.get("output_tokens"))
+
+
+def _sampled_history(
+    samples: Mapping[str, list[tuple[float, int]]],
+    account: str,
+) -> list[float]:
+    """把采样点的累计值换算成相邻区间的速率，作为走势。"""
+
+    points: list[tuple[float, int]] = []
+    for key in sorted(samples):
+        if key.split("|", 1)[0] == account:
+            points.extend(samples[key])
+    rates: list[float] = []
+    ordered = sorted(points)
+    for (start, first), (end, second) in zip(ordered, ordered[1:]):
+        span = end - start
+        if span <= 0:
+            continue
+        rates.append(round(max(0, second - first) / span, 1))
+    return rates[-_HISTORY_POINTS:]
 
 
 def _median(values: list[float]) -> float | None:
