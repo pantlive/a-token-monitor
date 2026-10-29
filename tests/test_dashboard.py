@@ -1746,6 +1746,74 @@ class NoCodexDashboardTests(unittest.TestCase):
             captured.output,
         )
 
+    def test_claude_config_dir_home_gets_its_own_account(self) -> None:
+        """~/.claude-work 这类 CLAUDE_CONFIG_DIR 目录是独立账号，额度不能被默认目录覆盖。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            default_home = root / ".claude"
+            work_home = root / ".claude-work"
+            default_home.mkdir()
+            work_home.mkdir()
+            (root / ".claude.json").write_text(
+                json.dumps(
+                    {
+                        "userID": "user-personal",
+                        "oauthAccount": {"emailAddress": "me@example.com"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (work_home / ".claude.json").write_text(
+                json.dumps(
+                    {
+                        "userID": "user-work",
+                        "oauthAccount": {"emailAddress": "work@example.com"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            used = {default_home: 10.0, work_home: 70.0}
+
+            def quota(home: Path) -> QuotaSnapshot:
+                return QuotaSnapshot(
+                    observed_at=1_000.0,
+                    windows=(
+                        QuotaWindow(
+                            limit_id="claude",
+                            name="5-hour",
+                            used_percent=used[home],
+                            window_minutes=300.0,
+                            resets_at=2_000.0,
+                        ),
+                    ),
+                    source="claude-oauth",
+                )
+
+            with (
+                patch_provider("claude", "read_quota", side_effect=quota),
+                patch_provider("claude", "active_sessions", return_value=()),
+            ):
+                state = build_multi_dashboard_state(
+                    {},
+                    homes={"claude": (work_home, default_home)},
+                )
+
+        claude_accounts = {
+            account["account_id"]: account
+            for account in state["accounts"]
+            if account.get("product") == "claude"
+        }
+        self.assertEqual(set(claude_accounts), {"user-personal", "user-work"})
+        work = claude_accounts["user-work"]
+        self.assertEqual(work["name"], "work@example.com")
+        self.assertEqual(
+            work["profiles"], [{"name": "claude", "codex_home": str(work_home)}]
+        )
+        self.assertEqual(work["quota"]["windows"][0]["used_percent"], 70.0)
+        personal = claude_accounts["user-personal"]
+        self.assertEqual(personal["quota"]["windows"][0]["used_percent"], 10.0)
+
 
 class ClaudeSessionDashboardTests(unittest.TestCase):
     """验证 Claude Code 活动会话通过统一适配器进入 Dashboard 状态。"""

@@ -586,9 +586,19 @@ def _parse_claude_line(
 
 
 def _config_file(home: Path) -> Path:
-    """返回 Claude Code 身份配置文件的位置。"""
+    """返回 Claude Code 身份配置文件的位置。
 
-    return Path(home).expanduser().parent / ".claude.json"
+    用 ``CLAUDE_CONFIG_DIR`` 另开的数据目录（例如 ``~/.claude-work``）把
+    ``.claude.json`` 写在目录内；默认的 ``~/.claude`` 则写在上一级
+    ``~/.claude.json``。目录内有就用目录内的，否则多个目录会读到同一份
+    身份，被 Dashboard 合并成一个账号。
+    """
+
+    path = Path(home).expanduser()
+    inside = path / ".claude.json"
+    if inside.is_file():
+        return inside
+    return path.parent / ".claude.json"
 
 
 def _read_json_object(path: Path) -> Mapping[str, Any] | None:

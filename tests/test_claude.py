@@ -377,6 +377,42 @@ class ClaudeLayoutTests(unittest.TestCase):
         self.assertEqual(account.account_key, "user-abc")
         self.assertNotIn("must-not-be-read", repr(account))
 
+    def test_config_dir_home_reads_its_own_identity(self) -> None:
+        """CLAUDE_CONFIG_DIR 目录自带 .claude.json，不能读到默认账号的身份。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            default_home = root / ".claude"
+            work_home = root / ".claude-work"
+            default_home.mkdir()
+            work_home.mkdir()
+            (root / ".claude.json").write_text(
+                json.dumps(
+                    {
+                        "userID": "user-personal",
+                        "oauthAccount": {"emailAddress": "me@example.com"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (work_home / ".claude.json").write_text(
+                json.dumps(
+                    {
+                        "userID": "user-work",
+                        "oauthAccount": {"emailAddress": "work@example.com"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            personal = read_claude_account(default_home)
+            work = read_claude_account(work_home)
+
+        self.assertEqual(personal.account_id, "user-personal")
+        self.assertEqual(personal.display_name, "me@example.com")
+        self.assertEqual(work.account_id, "user-work")
+        self.assertEqual(work.display_name, "work@example.com")
+
     def test_home_matching(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = Path(temporary_directory) / ".claude"
