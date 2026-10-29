@@ -266,14 +266,15 @@ All of these work on both `daemon` and `service install`.
 
 ## Dashboard details
 
-- **Accounts & quotas**: one card per subscription, always showing the
+- **Accounts & quotas**: one card per account, always showing the
   `5 hours / week / month` rows (missing periods are marked “N/A” and cards stay strictly
   aligned); the card title is the subscription type (`product · plan`) while the account
   ID and profile move to a secondary line. Codex plan names are read from the
   `chatgpt_plan_type` claim of `id_token` in the local `auth.json` (the token content
   itself is not parsed); Grok and Command Code use the plan names returned by their own
   quota endpoints, and Claude Code uses the subscription type (Pro / Max, …) stored in
-  its local credentials.
+  its local credentials. Accounts whose quota windows cannot be read, or whose provider
+  has no quota concept, keep their card and still show usage and sessions.
 - **Usage & cost estimation**: switch between the account / model / project dimensions
   with one set of aggregation rules; filters stack, the table ends with a total row and
   share percentages, and the Top 5 accounts and projects by cost are always shown.
