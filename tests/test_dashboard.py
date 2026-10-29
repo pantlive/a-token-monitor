@@ -1814,6 +1814,59 @@ class NoCodexDashboardTests(unittest.TestCase):
         personal = claude_accounts["user-personal"]
         self.assertEqual(personal["quota"]["windows"][0]["used_percent"], 10.0)
 
+    def test_account_without_quota_is_still_listed(self) -> None:
+        """额度接口暂时不可用时账号仍保留在状态里，页面才能展示它的用量与会话。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            default_home = root / ".claude"
+            work_home = root / ".claude-work"
+            default_home.mkdir()
+            work_home.mkdir()
+            (root / ".claude.json").write_text(
+                json.dumps({"userID": "user-personal"}),
+                encoding="utf-8",
+            )
+            (work_home / ".claude.json").write_text(
+                json.dumps({"userID": "user-work"}),
+                encoding="utf-8",
+            )
+
+            def quota(home: Path) -> QuotaSnapshot | None:
+                if home == work_home:
+                    return None
+                return QuotaSnapshot(
+                    observed_at=1_000.0,
+                    windows=(
+                        QuotaWindow(
+                            limit_id="claude",
+                            name="5-hour",
+                            used_percent=10.0,
+                            window_minutes=300.0,
+                            resets_at=2_000.0,
+                        ),
+                    ),
+                    source="claude-oauth",
+                )
+
+            with (
+                patch_provider("claude", "read_quota", side_effect=quota),
+                patch_provider("claude", "active_sessions", return_value=()),
+            ):
+                state = build_multi_dashboard_state(
+                    {},
+                    homes={"claude": (work_home, default_home)},
+                )
+
+        accounts = {
+            account["account_id"]: account
+            for account in state["accounts"]
+            if account.get("product") == "claude"
+        }
+        self.assertEqual(set(accounts), {"user-personal", "user-work"})
+        self.assertIsNone(accounts["user-work"]["quota"])
+        self.assertIsNotNone(accounts["user-personal"]["quota"])
+
 
 class ClaudeSessionDashboardTests(unittest.TestCase):
     """验证 Claude Code 活动会话通过统一适配器进入 Dashboard 状态。"""
@@ -2975,25 +3028,28 @@ class FaviconTests(unittest.TestCase):
         self.assertIn("const QUOTA_PERIOD_ORDER = ['five_hours', 'day', 'week', 'month', 'other'];", page)
         self.assertIn("const renderQuotaRows = (quotas) => {", page)
         self.assertIn("该订阅没有${escapeHtml(label)}额度", page)
-        self.assertIn("该订阅不提供额度窗口，这里只统计用量", page)
+        self.assertIn("暂无额度窗口数据，这里只统计用量", page)
         self.assertIn("待采集", page)
         self.assertIn("另有 ${rest.length} 条", page)
         # 旧的「一个窗口一张卡片」渲染不应该留下任何残骸。
         for stale in ("renderQuotaCards", "quota-card", "quota-grid", "quota-meta"):
             self.assertNotIn(stale, page)
 
-    def test_subscriptions_without_quota_windows_are_hidden(self) -> None:
-        """没有 5 小时 / 周 / 月任一窗口的订阅整张卡片都不显示，计数只算显示出来的。"""
+    def test_accounts_without_quota_windows_stay_visible(self) -> None:
+        """额度窗口缺失的账号也保留卡片，计数包含全部账号。"""
 
         page = _DASHBOARD_HTML
-        self.assertIn("const accountsWithQuota = new Set(", page)
-        self.assertIn(".filter((name) => accountsWithQuota.has(name));", page)
-        self.assertIn("没有带额度窗口的订阅", page)
-        self.assertIn("不在本区显示", page)
-        # 计数用过滤后的 names，而不是全部账号。
+        # 账号卡片不再按「有没有额度窗口」过滤；额度接口失败或 provider 没有额度
+        # 概念的账号仍然要出现在「账号与额度」区。
+        self.assertNotIn("accountsWithQuota", page)
+        self.assertNotIn("不在本区显示", page)
+        self.assertIn("const names = [...new Set([", page)
+        self.assertIn("暂无额度窗口数据，这里只统计用量", page)
+        self.assertIn("暂无账号", page)
+        # 计数用全部 names，不随额度读取结果变化。
         self.assertIn(
             "document.getElementById('account-section-count').textContent = "
-            "names.length ? `${names.length} 个账号` : '暂无额度订阅';",
+            "names.length ? `${names.length} 个账号` : '暂无账号';",
             page,
         )
 

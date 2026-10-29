@@ -192,7 +192,7 @@
   const renderQuotaRows = (quotas) => {
     const windows = (Array.isArray(quotas) ? quotas : []).flatMap((quota) => quota.windows || []);
     if (!windows.length) {
-      return '<div class="quota-note">该订阅不提供额度窗口，这里只统计用量</div>';
+      return '<div class="quota-note">暂无额度窗口数据，这里只统计用量</div>';
     }
     const buckets = new Map();
     windows.forEach((window) => {
@@ -2295,23 +2295,18 @@
     const quotas = Array.isArray(state.quotas) ? state.quotas : [];
     const sessions = Array.isArray(state.sessions) ? state.sessions : [];
     const configuredAccounts = Array.isArray(state.accounts) ? state.accounts : [];
-    // 中文注释：本区展示的是额度窗口，所以没有任何额度窗口的订阅（DeepSeek Harness、
-    // Claude Code 这类没有额度概念的 provider）整张卡片都不出现，计数也只算显示出来的
-    // 订阅——否则会看到一排「0 个窗口」的空卡片。
-    const accountsWithQuota = new Set(
-      quotas
-        .filter((quota) => (quota.windows || []).length > 0)
-        .map((quota) => quota.account || 'codex')
-    );
+    // 中文注释：账号区展示所有已知账号，而不是只展示带额度窗口的订阅。额度接口
+    // 暂时不可用，或 provider 本身没有额度概念时，账号卡片仍然可见，只显示用量与
+    // 活动会话；否则某个账号会随额度读取结果时隐时现。
     const names = [...new Set([
       ...configuredAccounts.map((account) => account.name),
       ...quotas.map((quota) => quota.account || 'codex'),
       ...sessions.map((session) => session.account || 'codex')
-    ])].filter((name) => accountsWithQuota.has(name));
-    document.getElementById('quota-source').textContent = names.length ? `${names.length} 个账号` : '暂无额度订阅';
-    document.getElementById('account-section-count').textContent = names.length ? `${names.length} 个账号` : '暂无额度订阅';
+    ])];
+    document.getElementById('quota-source').textContent = names.length ? `${names.length} 个账号` : '暂无账号';
+    document.getElementById('account-section-count').textContent = names.length ? `${names.length} 个账号` : '暂无账号';
     if (names.length === 0) {
-      container.innerHTML = '<div class="empty-state"><span class="empty-title">没有带额度窗口的订阅</span><span class="empty-hint">没有额度概念的 provider（例如 DeepSeek Harness、Claude Code）不在本区显示，它们的使用量仍计入「用量与成本估算」。</span></div>';
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">暂无账号</span><span class="empty-hint">还没有配置任何 agent 数据目录，可在设置页添加扫描目录。</span></div>';
       return;
     }
     container.innerHTML = names.map((name) => {
