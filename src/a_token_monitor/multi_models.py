@@ -281,7 +281,17 @@ def session_view(
     """
 
     resolved_account_id = session.account_id or account_id
-    resolved_account = session.account_name or resolved_account_id or account_name
+    # 中文注释：``account`` 是 Dashboard 账号卡片的归组键。优先用调用方给的展示名
+    # （Claude/Grok 等 provider 的邮箱或用户名），否则同一账号的活动会话会带着
+    # 哈希账号 ID 另起一张「Codex」卡片，真正账号卡片下面反而看不到会话。
+    # 但历史 Codex 会话可能属于另一个账号：会话自带 ID 与当前 profile 不一致时，
+    # 仍按会话 ID 归组，避免把旧会话算到新账号头上。
+    if session.account_name:
+        resolved_account = session.account_name
+    elif session.account_id and session.account_id != account_id:
+        resolved_account = session.account_id
+    else:
+        resolved_account = account_name or resolved_account_id
     return {
         # 统一身份
         "account": resolved_account,

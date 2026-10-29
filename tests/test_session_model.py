@@ -111,6 +111,31 @@ class UnifiedSessionModelTests(unittest.TestCase):
         ):
             self.assertNotIn(internal, view)
 
+    def test_session_view_prefers_display_name_for_current_account(self) -> None:
+        """provider 会话应使用账号展示名归组，不能拿哈希 ID 另起一张卡片。"""
+
+        view = session_view(
+            _session(),
+            "user@example.com",
+            account_id="hash-id",
+            product="claude",
+        )
+
+        self.assertEqual(view["account"], "user@example.com")
+        self.assertEqual(view["account_id"], "hash-id")
+
+    def test_session_view_keeps_an_older_recorded_account_id(self) -> None:
+        """历史会话属于另一个账号时仍按会话自带的 ID 归组。"""
+
+        view = session_view(
+            _session(account_id="old-account"),
+            "new-account",
+            account_id="new-account",
+        )
+
+        self.assertEqual(view["account"], "old-account")
+        self.assertEqual(view["account_id"], "old-account")
+
     def test_session_view_never_exposes_raw_resume_errors(self) -> None:
         session = _session(
             last_error="额度中断后不自动恢复，历史会话状态",

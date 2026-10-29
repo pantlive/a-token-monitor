@@ -174,6 +174,52 @@ class GrokUsageTests(unittest.TestCase):
         self.assertEqual(window.used_percent, 42.5)
         self.assertEqual(window.window_minutes, 10080.0)
 
+    def test_reads_billing_event_beyond_the_tail_window(self) -> None:
+        """billing 事件在长日志靠前的位置时仍要能找到，不能只看尾部 256 KiB。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            log_path = grok_home / "logs" / "unified.jsonl"
+            log_path.parent.mkdir(parents=True)
+            billing = {
+                "ts": "2026-08-27T02:00:00Z",
+                "msg": "billing: fetched credits config",
+                "ctx": {
+                    "subscriptionTier": "SuperGrok",
+                    "config": {
+                        "creditUsagePercent": 55.5,
+                        "currentPeriod": {
+                            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                            "start": "2026-08-21T02:14:01+00:00",
+                            "end": "2026-08-28T02:14:01+00:00",
+                        },
+                    },
+                },
+            }
+            filler = [
+                json.dumps(
+                    {
+                        "ts": "2026-08-27T03:00:00Z",
+                        "msg": "shell.tool.exec_done",
+                        "ctx": {"output": "x" * 4096},
+                    }
+                )
+                for _ in range(100)
+            ]
+            log_path.write_text(
+                "\n".join([json.dumps(billing), *filler]) + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = read_grok_quota(grok_home)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        window = snapshot.window("grok", "weekly")
+        self.assertIsNotNone(window)
+        assert window is not None
+        self.assertEqual(window.used_percent, 55.5)
+
     def test_does_not_read_auth_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             grok_home = Path(temporary_directory) / ".grok"

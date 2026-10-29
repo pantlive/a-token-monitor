@@ -24,7 +24,11 @@ from .quota import QuotaSnapshot, QuotaWindow
 
 _GROK_INFERENCE_DONE = b"shell.turn.inference_done"
 _GROK_BILLING = b"billing: fetched credits config"
+# 中文注释：billing 事件只在 Grok 启动/刷新额度时写一次，之后日志会继续追加大量
+# 请求记录；固定只看尾部 256 KiB 会在日志变长后把额度整段漏掉。按块向前回溯，
+# 直到找到最近一次 billing 事件；上限避免异常大日志每次都全量扫描。
 _MAX_BILLING_TAIL_BYTES = 256 * 1024
+_MAX_BILLING_LOOKBACK_BYTES = 16 * 1024 * 1024
 _MAX_LINE_BYTES = 64 * 1024
 _TOKEN_FIELDS = (
     "prompt_tokens",
@@ -456,50 +460,82 @@ def read_grok_quota(
     grok_home: Path,
     now: float | None = None,
 ) -> QuotaSnapshot | None:
-    """从 unified.jsonl 尾部读取最近一次 Grok 额度配置。"""
+    """从 unified.jsonl 向前回溯最近一次 Grok 额度配置。"""
 
     log_path = grok_unified_log(grok_home)
     try:
-        size = log_path.stat().st_size
+        handle = log_path.open("rb")
     except OSError:
         return None
-    offset = max(0, size - _MAX_BILLING_TAIL_BYTES)
-    try:
-        with log_path.open("rb") as handle:
-            handle.seek(offset)
-            content = handle.read(_MAX_BILLING_TAIL_BYTES)
-    except OSError:
-        return None
-    if offset > 0:
-        newline = content.find(b"\n")
-        if newline >= 0:
-            content = content[newline + 1 :]
-    latest: Mapping[str, Any] | None = None
-    latest_ts: float | None = None
-    for raw_line in content.splitlines():
-        if _GROK_BILLING not in raw_line:
-            continue
+    with handle:
         try:
-            event = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, Mapping):
-            continue
-        if event.get("msg") != "billing: fetched credits config":
-            continue
-        ctx = event.get("ctx")
-        if not isinstance(ctx, Mapping):
-            continue
-        config = ctx.get("config")
-        if not isinstance(config, Mapping):
-            continue
-        timestamp = _event_timestamp(event) or (now if now is not None else time.time())
-        if latest_ts is None or timestamp >= latest_ts:
-            latest = ctx
-            latest_ts = timestamp
+            size = os.fstat(handle.fileno()).st_size
+        except OSError:
+            return None
+        latest, latest_ts = _latest_billing_event(
+            handle,
+            size,
+            now=now,
+        )
     if latest is None or latest_ts is None:
         return None
     return _quota_from_billing(latest, latest_ts)
+
+
+def _latest_billing_event(
+    handle: Any,
+    size: int,
+    *,
+    now: float | None = None,
+) -> tuple[Mapping[str, Any] | None, float | None]:
+    """按块从文件尾部向前查找最近一次 billing 事件。
+
+    ``handle`` 必须是二进制只读文件。返回 ``(ctx, timestamp)``；找不到或日志
+    超出回溯上限时返回 ``(None, None)``。分块边界上的半行会留到下一块拼接，
+    不会因为长行恰好跨块而漏掉事件。
+    """
+
+    scan_start = max(0, size - _MAX_BILLING_LOOKBACK_BYTES)
+    position = size
+    remainder = b""
+    latest: Mapping[str, Any] | None = None
+    latest_ts: float | None = None
+    while position > scan_start and latest is None:
+        start = max(scan_start, position - _MAX_BILLING_TAIL_BYTES)
+        try:
+            handle.seek(start)
+            chunk = handle.read(position - start)
+        except OSError:
+            return None, None
+        lines = (chunk + remainder).split(b"\n")
+        # 中文注释：start > 0 时第一段可能是半行，留给下一块（更靠前的内容）
+        # 拼成完整行后再解析。
+        remainder = lines.pop(0) if start > 0 else b""
+        for raw_line in reversed(lines):
+            if _GROK_BILLING not in raw_line:
+                continue
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, Mapping):
+                continue
+            if event.get("msg") != "billing: fetched credits config":
+                continue
+            ctx = event.get("ctx")
+            if not isinstance(ctx, Mapping):
+                continue
+            config = ctx.get("config")
+            if not isinstance(config, Mapping):
+                continue
+            timestamp = _event_timestamp(event) or (
+                now if now is not None else time.time()
+            )
+            if latest_ts is None or timestamp >= latest_ts:
+                latest = ctx
+                latest_ts = timestamp
+        position = start
+    return latest, latest_ts
 
 
 def _quota_from_billing(

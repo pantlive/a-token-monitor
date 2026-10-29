@@ -439,6 +439,15 @@
             : matches('claude') ? 'Claude Code'
               : 'Codex';
   };
+  // 中文注释：profile 名称（claude / codex）在多个数据目录下会重复；补上目录名，
+  // 用户才能一眼区分 ~/.claude 与 ~/.claude-work 这类同产品账号。
+  const accountProfileLabel = (profile) => {
+    if (typeof profile === 'string') return profile;
+    const name = (profile && profile.name) || '';
+    const home = String((profile && profile.codex_home) || '');
+    const directory = home.split(/[\\/]/).filter(Boolean).pop() || '';
+    return directory && directory !== name ? `${name} (${directory})` : name;
+  };
   // 账号 → 产品 · 套餐：套餐取自 /api/state（与卡片同源、同一套展示名归一化）。
   const usageAccountSubscriptions = () => {
     const map = new Map();
@@ -2314,7 +2323,7 @@
       const accountQuotas = quotas.filter((quota) => (quota.account || 'codex') === name);
       const accountSessions = sessions.filter((session) => (session.account || 'codex') === name);
       const accountCounts = account.counts || {};
-      const profiles = (account.profiles || []).map((profile) => typeof profile === 'string' ? profile : profile.name).filter((profile) => profile).join(' · ');
+      const profiles = (account.profiles || []).map(accountProfileLabel).filter((profile) => profile).join(' · ');
       const accountId = account.account_id || name;
       const product = accountProductLabel(account);
       const plans = distinctSorted(accountQuotas.map((quota) => planLabel(quota.plan_type)).concat([planLabel(account.plan_type)]));
