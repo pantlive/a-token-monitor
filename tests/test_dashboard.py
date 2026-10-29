@@ -1935,6 +1935,77 @@ class ClaudeSessionDashboardTests(unittest.TestCase):
         ]
         self.assertTrue(claude_accounts)
 
+    def test_claude_session_is_grouped_under_the_account_display_name(self) -> None:
+        """Claude 活动会话必须归到邮箱卡片，不能另起一张哈希 ID 的 Codex 卡片。"""
+
+        session = TrackedSession(
+            thread_id="claude:session-1",
+            session_id="session-1",
+            jsonl_path="/home/dev/.claude/projects/-home-dev-proj/session-1.jsonl",
+            cwd="/home/dev/proj",
+            source="claude-cli",
+            status=SessionStatus.RUNNING,
+            confidence=DetectionConfidence.OPEN_FILE,
+            first_seen_at=100.0,
+            last_seen_at=200.0,
+            pids=(9,),
+            last_event_at=150.0,
+            last_event_type="assistant",
+            product="claude",
+            model="claude-sonnet-4-5",
+            project="/home/dev/proj",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            claude_home = root / ".claude"
+            claude_home.mkdir(parents=True)
+            (root / ".claude.json").write_text(
+                json.dumps(
+                    {
+                        "userID": "claude-hash-id",
+                        "oauthAccount": {"emailAddress": "work@example.com"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = MultiSessionRegistry(root / "state")
+            with (
+                patch_provider(
+                    "claude",
+                    "active_sessions",
+                    return_value=(session,),
+                ),
+                patch_provider("claude", "read_quota", return_value=None),
+            ):
+                state = build_multi_dashboard_state(
+                    {"personal": registry},
+                    homes={
+                        "grok": (root / "missing" / "grok",),
+                        "kimi": (root / "missing" / "kimi",),
+                        "dsh": (root / "missing" / "dsh",),
+                        "commandcode": (root / "missing" / "commandcode",),
+                        "claude": (claude_home,),
+                    },
+                )
+
+        entries = [
+            item for item in state["sessions"] if item.get("product") == "claude"
+        ]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["account"], "work@example.com")
+        claude_accounts = [
+            account
+            for account in state["accounts"]
+            if account.get("product") == "claude"
+        ]
+        self.assertEqual(len(claude_accounts), 1)
+        account = claude_accounts[0]
+        self.assertEqual(account["name"], "work@example.com")
+        self.assertEqual(account["account_id"], "claude-hash-id")
+        self.assertEqual(account["counts"]["active"], 1)
+        # 不能再出现一张以哈希 ID 命名、产品被误判成 Codex 的重复卡片。
+        self.assertNotIn("claude-hash-id", {item["name"] for item in state["accounts"]})
+
 
 class SpeedAccountKeyTests(unittest.TestCase):
     """同一份日志不能以两个账号键各采一次，否则概览合计会重复。"""
@@ -3183,6 +3254,13 @@ class FaviconTests(unittest.TestCase):
             ("goat", "GOAT"),
         ):
             self.assertIn(f"{raw}: '{label}'", page)
+        # 同产品多目录（~/.claude 与 ~/.claude-work）必须能从 profile 标签区分。
+        self.assertIn("const accountProfileLabel = (profile) => {", page)
+        self.assertIn(
+            "return directory && directory !== name ? `${name} (${directory})` : name;",
+            page,
+        )
+        self.assertIn("(account.profiles || []).map(accountProfileLabel)", page)
 
     def test_both_pages_use_the_shared_logo(self) -> None:
         for html in (_DASHBOARD_HTML, _SETTINGS_HTML):
