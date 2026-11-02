@@ -334,9 +334,15 @@
         <td><span class="mono">${escapeHtml(item.url)}</span></td>
         <td>${item.builtin ? '<span class="pill other">内置</span>' : `<button class="btn mini danger" type="button" data-redact-upstream-remove="${escapeHtml(item.name)}"${disabled}>移除</button>`}</td>
       </tr>`).join('');
+    const defaultOff = new Set(payload.default_disabled_rules || []);
     const ruleBoxes = (Array.isArray(payload.rules) ? payload.rules : []).map((rule) => {
-      const on = !(config.disabled_rules || []).includes(rule);
-      return `<label class="field check"><input type="checkbox" data-redact-rule="${escapeHtml(rule)}"${on ? ' checked' : ''}${disabled}><span class="mono">${escapeHtml(rule)}</span></label>`;
+      // 中文注释：默认关闭的规则（公网 IP）复选框默认不勾选；enabled_rules
+      // 里显式点名的规则覆盖默认状态。
+      const enabled = (config.enabled_rules || []).includes(rule);
+      const off = (config.disabled_rules || []).includes(rule);
+      const on = enabled || (!off && !defaultOff.has(rule));
+      const note = defaultOff.has(rule) ? ` <span class="pill other">${'默认关闭'}</span>` : '';
+      return `<label class="field check"><input type="checkbox" data-redact-rule="${escapeHtml(rule)}"${on ? ' checked' : ''}${disabled}><span class="mono">${escapeHtml(rule)}</span>${note}</label>`;
     }).join('');
     const extra = (config.extra_patterns || []).map((item) => `${item.name}=${item.pattern}`).join('\n');
     const configError = payload.config_error ? `<div class="usage-note">${'现有规则配置有误'}: ${escapeHtml(payload.config_error)}</div>` : '';
@@ -439,11 +445,18 @@
         }
         extraPatterns.push({ name: line.slice(0, index).trim(), pattern: line.slice(index + 1).trim() });
       }
-      const disabledRules = [...container.querySelectorAll('[data-redact-rule]')].filter((box) => !box.checked).map((box) => box.dataset.redactRule);
+      const boxes = [...container.querySelectorAll('[data-redact-rule]')];
+      const checked = boxes.filter((box) => box.checked).map((box) => box.dataset.redactRule);
+      const unchecked = boxes.filter((box) => !box.checked).map((box) => box.dataset.redactRule);
+      // 中文注释：默认关闭的规则只有显式勾选才进 enabled_rules，否则从
+      // disabled_rules 里去掉（保持默认关闭）；其余未勾选的就是 disabled。
+      const enabledRules = checked.filter((rule) => defaultOff.has(rule));
+      const disabledRules = unchecked.filter((rule) => !defaultOff.has(rule));
       mutateRedact({
         action: 'set-config',
         config: {
           disabled_rules: disabledRules,
+          enabled_rules: enabledRules,
           extra_patterns: extraPatterns,
           allow_patterns: redactSplit(document.getElementById('redact-allow')?.value),
           literal_values: redactSplit(document.getElementById('redact-literals')?.value),

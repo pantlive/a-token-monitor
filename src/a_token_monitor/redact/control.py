@@ -19,13 +19,22 @@ from typing import Any, Callable, Mapping
 from .hooks import AGENTS
 from .install import MODES, AgentPaths, Installer, InstallError, proxy_url
 from .proxy import DEFAULT_PORT, DEFAULT_UPSTREAMS, LOOPBACK_HOSTS, RedactProxyServer
-from .rules import RULE_NAMES, RedactConfig, RedactStore, Redactor, _write_private_json, summarize
+from .rules import (
+    RULE_NAMES,
+    RedactConfig,
+    RedactStore,
+    Redactor,
+    _write_private_json,
+    default_disabled_rules,
+    summarize,
+)
 
 
 AGENT_LABELS = {"claude": "Claude Code", "codex": "Codex", "grok": "Grok"}
 # 中文注释：设置页可编辑的规则字段；upstreams 单独用 upstream 动作改。
 _CONFIG_FIELDS = (
     "disabled_rules",
+    "enabled_rules",
     "extra_patterns",
     "allow_patterns",
     "literal_values",
@@ -196,6 +205,7 @@ class RedactController:
             },
             "config_error": config_error,
             "rules": list(RULE_NAMES),
+            "default_disabled_rules": list(default_disabled_rules()),
         }
 
     # ----- 写操作 -----

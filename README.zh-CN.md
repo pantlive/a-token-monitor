@@ -297,6 +297,7 @@ Dashboard 合并同时发生的状态刷新，浏览器在慢请求期间不会�
   **Web 配置 > `--redact-proxy` / `--redact-proxy-port`**，持久化在 `redact/web.json`。
   改端口时会同步改写已经走代理的 agent 配置。改 agent 配置前会先备份，并且只在 Dashboard
   监听本机地址时允许；用 `--dashboard-host 0.0.0.0` 开放时这一块只读（规则测试仍可用）。
+  规则列表里会标出默认关闭的规则（公网 IP），可勾选后通过 `enabled_rules` 打开。
 
 ### 健康检查
 
@@ -483,7 +484,13 @@ a-token-monitor redact uninstall
 - **本地日志仍有原文**：各 agent 自己的会话日志在脱敏之前写入，原文还在本机。
 - **规则**：内置 OpenAI / Anthropic / xAI / GitHub / GitLab / AWS / Google / Slack / Stripe / npm /
   Hugging Face 密钥、私钥块、JWT、`Bearer`、URL 里的密码和 `password=...` 这类赋值；另外会精确匹配
-  名字含 `TOKEN`、`SECRET`、`API_KEY`、`PASSWORD` 的环境变量的值。`redact/config.json` 可以调整：
+  名字含 `TOKEN`、`SECRET`、`API_KEY`、`PASSWORD` 的环境变量的值。个人信息类规则覆盖邮箱、手机号、
+  银行卡号（Luhn 校验位）、身份证号（校验码）、美国 SSN（只认实际发放的号段）、护照号（跟在
+  passport / 护照 / パスポ一卜 后面）、生日（跟在生日 / 出生 / DOB / born 后面）、IBAN（mod-97 校验位）、
+  MAC 地址、序列号（跟在 S/N / Serial / 序列号 后面）、`/home/`、`/Users/`、`C:\Users\` 主目录里的用户名、
+  终端提示符或 ssh 命令里的 `user@host`，以及 `hostname:` / `user:` 这样的行。公网 IP 默认关闭——日志和
+  配置里几乎处处都有 IP，命中率太高，需要时在 `enabled_rules` 里显式开启（内网、本机和文档示例地址永不替换）。
+  `redact/config.json` 可以调整：
 
 ```json
 {
@@ -492,6 +499,7 @@ a-token-monitor redact uninstall
   "extra_patterns": [{"name": "corp_id", "pattern": "CORP-[0-9]{8}"}],
   "allow_patterns": ["^AKIAIOSFODNN7EXAMPLE$"],
   "disabled_rules": ["jwt"],
+  "enabled_rules": ["public_ipv4", "public_ipv6"],
   "prompt_action": "block",
   "restore": true,
   "vault_ttl_days": 30

@@ -15,17 +15,21 @@
 from __future__ import annotations
 
 from .rules import (
+    DEFAULT_OFF_RULES,
     PLACEHOLDER_PATTERN,
     Finding,
     RedactConfig,
     RedactStore,
     Redactor,
+    default_disabled_rules,
 )
 
 __all__ = [
+    "DEFAULT_OFF_RULES",
     "PLACEHOLDER_PATTERN",
     "Finding",
     "RedactConfig",
     "RedactStore",
     "Redactor",
+    "default_disabled_rules",
 ]

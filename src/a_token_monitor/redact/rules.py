@@ -24,7 +24,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 try:  # 中文注释：Windows 没有 fcntl，退化为进程内锁（hook 并发写只在 POSIX 上常见）。
     import fcntl
@@ -48,6 +48,10 @@ _SECRET_ENV_NAME = re.compile(
 )
 _ENV_VALUE_SKIP = re.compile(r"^(?:true|false|yes|no|on|off|none|null|\d+)$", re.IGNORECASE)
 
+# 中文注释：公网 IP 规则默认关闭（规则命中率高、日志里几乎都有），需要时在
+# redact/config.json 的 enabled_rules 里显式开启，或按 allow_patterns 白名单放行。
+DEFAULT_OFF_RULES: frozenset[str] = frozenset({"public_ipv4", "public_ipv6"})
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -58,10 +62,168 @@ class Rule:
     group: int = 0
     # 中文注释：通用的「key = value」规则误报多，额外要求值看起来像随机串。
     require_entropy: bool = False
+    # 中文注释：命中值要过回调校验（IBAN 校验位、Luhn、SSN 号段、生日等）。
+    validate: Callable[[str], bool] | None = None
+    # 中文注释：去掉命中值末尾的空格再校验/替换（IBAN 的宽松字符类会吞掉后面的空格）。
+    trim_ws: bool = False
+    # 中文注释：覆盖全局最小长度（IPv4 只有 7 个字符）。
+    min_length: int = _MIN_SECRET_LENGTH
 
 
-def _rule(name: str, pattern: str, group: int = 0, *, require_entropy: bool = False) -> Rule:
-    return Rule(name, re.compile(pattern), group, require_entropy)
+def _rule(name: str, pattern: str, group: int = 0, *, require_entropy: bool = False, validate: Callable[[str], bool] | None = None, trim_ws: bool = False, min_length: int = _MIN_SECRET_LENGTH) -> Rule:
+    return Rule(name, re.compile(pattern), group, require_entropy, validate, trim_ws, min_length)
+
+
+# ----- 值校验（命中后还要过格式与校验位检查） -----
+
+
+def _luhn_valid(value: str) -> bool:
+    """银行卡/信用卡号的 Luhn 校验位；位数 16–19。"""
+
+    digits = [int(char) for char in value if char.isdigit()]
+    if not 16 <= len(digits) <= 19:
+        return False
+    total = 0
+    for index, digit in enumerate(reversed(digits)):
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+def _iban_valid(value: str) -> bool:
+    """国际银行账号（IBAN）的 mod-97 校验位。"""
+
+    compact = re.sub(r"\s+", "", value).upper()
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}", compact):
+        return False
+    rearranged = compact[4:] + compact[:4]
+    number = "".join(
+        str(ord(char) - 55) if char.isalpha() else char for char in rearranged
+    )
+    try:
+        return int(number) % 97 == 1
+    except ValueError:  # pragma: no cover - 正则已保证全是字母数字
+        return False
+
+
+# 中文注释：SSA 从不发放 000、666 和 900-999 号段，其余号段都可能真实存在；
+# 组号（第 4-5 位）和序号（第 6-9 位）也不能全 0。
+_SSN_AREAS: tuple[tuple[int, int], ...] = ((1, 666), (667, 900))
+
+
+def _ssn_valid(value: str) -> bool:
+    """美国社会安全号：只认实际会发放的号段。"""
+
+    if not re.fullmatch(r"[0-9]{3}-?[0-9]{2}-?[0-9]{4}", value):
+        return False
+    compact = re.sub(r"[^0-9]", "", value)
+    area = int(compact[:3])
+    group = int(compact[3:5])
+    serial = int(compact[5:9])
+    if not any(low <= area < high for low, high in _SSN_AREAS):
+        return False
+    return group != 0 and serial != 0
+
+
+# 中文注释：中国大陆居民身份证号的校验码（ISO 7064:1983, MOD 11-2）。
+_ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
+_ID_CHECK_CHARS = "10X98765432"
+
+
+def _china_id_valid(value: str) -> bool:
+    """中国大陆 18 位身份证号：校验码和出生日期都对得上才认。"""
+
+    if not re.fullmatch(r"\d{17}[\dXx]", value):
+        return False
+    total = sum(int(digit) * weight for digit, weight in zip(value[:17], _ID_WEIGHTS))
+    if _ID_CHECK_CHARS[total % 11] != value[17].upper():
+        return False
+    birth = f"{value[6:10]}-{value[10:12]}-{value[12:14]}"
+    return _birthday_valid(birth)
+
+
+def _birthday_valid(value: str) -> bool:
+    """生日值：年月日数字都落在合理范围。"""
+
+    match = re.fullmatch(r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})日?", value)
+    if match is None:
+        return False
+    year, month, day = (int(part) for part in match.groups())
+    if not 1900 <= year <= 2100:
+        return False
+    if not 1 <= month <= 12:
+        return False
+    days_in_month = (31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+                     31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    return 1 <= day <= days_in_month[month - 1]
+
+
+def _public_ipv4_valid(value: str) -> bool:
+    """公网 IPv4：排除内网、本机、文档示例和保留地址段。"""
+
+    try:
+        octets = [int(part) for part in value.split(".")]
+    except ValueError:
+        return False
+    if len(octets) != 4 or any(not 0 <= octet <= 255 for octet in octets):
+        return False
+    first, second, third = octets[0], octets[1], octets[2]
+    if first >= 224:  # 组播 / 保留
+        return False
+    if first == 10:  # 10.0.0.0/8
+        return False
+    if first == 127:  # 本机回环
+        return False
+    if first == 169 and second == 254:  # 链路本地
+        return False
+    if first == 172 and 16 <= second <= 31:  # 172.16.0.0/12
+        return False
+    if first == 192 and second == 168:  # 192.168.0.0/16
+        return False
+    if first == 100 and 64 <= second <= 127:  # CGNAT 100.64.0.0/10
+        return False
+    if first == 192 and second == 0 and third in (0, 2):  # 文档示例
+        return False
+    if first == 198 and (second in (18, 19) or (second == 51 and third == 100)):  # 文档示例
+        return False
+    if first == 203 and second == 0 and third == 113:  # 文档示例
+        return False
+    if first == 233 and second == 252 and third == 0:  # 组播文档示例
+        return False
+    return True
+
+
+def _ipv6_groups(value: str) -> list[int] | None:
+    """把 IPv6 地址拆成 8 组整数；不合法返回 None。"""
+
+    if value.count("::") > 1:
+        return None
+    if "::" in value:
+        head, _, tail = value.partition("::")
+        left = [int(group, 16) for group in head.split(":") if group]
+        right = [int(group, 16) for group in tail.split(":") if group]
+        missing = 8 - len(left) - len(right)
+        if missing < 1:
+            return None
+        return left + [0] * missing + right
+    groups = value.split(":")
+    if len(groups) != 8:
+        return None
+    return [int(group, 16) for group in groups]
+
+
+def _public_ipv6_valid(value: str) -> bool:
+    """公网 IPv6：全球单播（2000::/3），排除文档示例 2001:db8::/32。"""
+
+    groups = _ipv6_groups(value)
+    if groups is None or len(groups) != 8:
+        return False
+    if not 0x2000 <= groups[0] <= 0x3FFF:
+        return False
+    return not (groups[0] == 0x2001 and groups[1] == 0x0DB8)
 
 
 BUILTIN_RULES: tuple[Rule, ...] = (
@@ -99,9 +261,93 @@ BUILTIN_RULES: tuple[Rule, ...] = (
         1,
         require_entropy=True,
     ),
+    # ----- 个人信息 -----
+    _rule(
+        "ssh_target",
+        r"(?i)\b(?:ssh|scp|sftp|rsync)\s+([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)*)",
+        1,
+    ),
+    _rule(
+        "email",
+        r"(?i)(?<![A-Za-z0-9._\-])(?!git@)([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)+(?![A-Za-z0-9\-]))",
+        1,
+    ),
+    _rule("phone_number", r"(?<![0-9+])(?:\+?86[\s\-]?)?1[3-9][0-9]{9}(?![0-9])"),
+    _rule(
+        "bank_card",
+        r"(?<!\d)[0-9](?:[0-9 \-]{14,18})[0-9](?!\d)",
+        validate=_luhn_valid,
+    ),
+    _rule(
+        "china_id",
+        r"(?<!\d)\d{17}[\dXx](?!\d)",
+        validate=_china_id_valid,
+    ),
+    _rule(
+        "ssn",
+        r"(?<![\d-])[0-9]{3}-[0-9]{2}-[0-9]{4}(?![\d-])",
+        validate=_ssn_valid,
+    ),
+    _rule(
+        "passport",
+        r"(?i)(?:\bpassport\b|护照|パスポ一卜)\s*(?:number|no\.?|番号|号)?\s*[:：]?\s*([A-Za-z]{1,3}[0-9]{5,9}|\d{6,9})",
+        1,
+    ),
+    _rule(
+        "birthday",
+        r"(?i)(?:生日|出生年月日|出生日期|出生|birthday|DOB|born)\s*(?:日期|年月日)?\s*[:：]?\s*(\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?)",
+        1,
+        validate=_birthday_valid,
+    ),
+    _rule(
+        "iban",
+        r"(?i)\b[A-Z]{2}\d{2}[A-Z0-9 ]{11,30}\b",
+        validate=_iban_valid,
+        trim_ws=True,
+    ),
+    _rule("mac_address", r"(?i)(?<![0-9A-Fa-f]:)(?<![0-9A-Fa-f-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f](?::|-))"),
+    _rule(
+        "serial_number",
+        r"(?i)(?:\bS/N\b|\bSN\b|\bSerial\s+(?:No\.?|Number)?\b|\b序列号\b)\s*[:：]?\s*(?=[A-Za-z0-9\-_./]*\d)([A-Za-z0-9][A-Za-z0-9\-_./]{3,31})",
+        1,
+    ),
+    # ----- 本机身份与公网地址 -----
+    _rule(
+        "home_username",
+        r"(?i)(?<![A-Za-z0-9_])(?:/home/|/Users/|C:\\Users\\)([A-Za-z0-9][A-Za-z0-9._\-]{1,63})(?=/|\\|\s|$)",
+        1,
+    ),
+    _rule(
+        "user_at_host",
+        r"(?i)([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)*)(?=:[\w./~\-]*[$#>])",
+        1,
+    ),
+    _rule(
+        "hostname_line",
+        r"(?im)^\s*(?:hostname|user(?:name)?)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._\-]{2,63})",
+        1,
+    ),
+    _rule(
+        "public_ipv4",
+        r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])",
+        validate=_public_ipv4_valid,
+        min_length=7,
+    ),
+    _rule(
+        "public_ipv6",
+        r"(?<![0-9A-Fa-f:])(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?:(?::[0-9A-Fa-f]{1,4}){1,6})|:(?:(?::[0-9A-Fa-f]{1,4}){1,7}|:))(?![0-9A-Fa-f:])",
+        validate=_public_ipv6_valid,
+        min_length=3,
+    ),
 )
 
 RULE_NAMES: tuple[str, ...] = tuple(rule.name for rule in BUILTIN_RULES)
+
+
+def default_disabled_rules() -> tuple[str, ...]:
+    """默认关闭的规则：公网 IP 命中率太高，默认不启用。"""
+
+    return tuple(name for name in RULE_NAMES if name in DEFAULT_OFF_RULES)
 
 
 def _shannon_entropy(value: str) -> float:
@@ -137,6 +383,7 @@ class RedactConfig:
     """``<state_dir>/redact/config.json`` 的内容；缺省即全部内置规则。"""
 
     disabled_rules: tuple[str, ...] = ()
+    enabled_rules: tuple[str, ...] = ()
     extra_patterns: tuple[tuple[str, str], ...] = ()
     allow_patterns: tuple[str, ...] = ()
     literal_values: tuple[str, ...] = ()
@@ -148,9 +395,12 @@ class RedactConfig:
     upstreams: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        unknown = set(self.disabled_rules) - set(RULE_NAMES)
+        unknown = (set(self.disabled_rules) | set(self.enabled_rules)) - set(RULE_NAMES)
         if unknown:
             raise ValueError(f"未知的脱敏规则: {', '.join(sorted(unknown))}")
+        overlap = set(self.disabled_rules) & set(self.enabled_rules)
+        if overlap:
+            raise ValueError(f"规则不能同时出现在 disabled_rules 和 enabled_rules: {', '.join(sorted(overlap))}")
         if self.prompt_action not in {"block", "warn"}:
             raise ValueError("prompt_action 只能是 block 或 warn")
         if self.vault_ttl_days <= 0:
@@ -196,6 +446,7 @@ class RedactConfig:
             raise ValueError("prompt_action 必须是字符串")
         return cls(
             disabled_rules=strings("disabled_rules"),
+            enabled_rules=strings("enabled_rules"),
             extra_patterns=tuple(extra_pairs),
             allow_patterns=strings("allow_patterns"),
             literal_values=strings("literal_values"),
@@ -380,7 +631,10 @@ class Redactor:
         self.store = store
         self.config = config if config is not None else store.load_config()
         self._key = store.load_key()
-        disabled = set(self.config.disabled_rules)
+        # 中文注释：默认关闭的规则（公网 IP）始终先按关闭处理，再由 enabled_rules
+        # 里点名的规则覆盖；否则只启用一条公网 IP 规则时，另一条会被意外打开。
+        disabled = set(self.config.disabled_rules) | DEFAULT_OFF_RULES
+        disabled -= set(self.config.enabled_rules)
         self._rules: list[Rule] = [rule for rule in BUILTIN_RULES if rule.name not in disabled]
         self._rules.extend(
             Rule(name, re.compile(pattern)) for name, pattern in self.config.extra_patterns
@@ -448,33 +702,66 @@ class Redactor:
     def _allowed(self, value: str) -> bool:
         return any(pattern.search(value) for pattern in self._allow)
 
+    @classmethod
+    def without_store(cls) -> Redactor:
+        """构造一个不读写密钥表的实例，只做规则匹配（本地展示用）。"""
+
+        instance = cls.__new__(cls)
+        instance._rules = [rule for rule in BUILTIN_RULES if rule.name not in DEFAULT_OFF_RULES]
+        instance._allow = []
+        instance._known_pattern = None
+        instance._lock = threading.Lock()
+        return instance
+
     def find(self, text: str) -> list[tuple[int, int, str, str]]:
         """返回不重叠的命中 ``(start, end, kind, value)``，按位置排序。"""
 
         if not text:
             return []
         protected = [match.span() for match in PLACEHOLDER_PATTERN.finditer(text)]
-        candidates: list[tuple[int, int, str, str]] = []
+        # (start, end, kind, value, priority)；priority 越小越优先（0 为已知密钥，
+        # 1+ 为规则在列表里的顺序，靠前的规则在同一位置命中时优先）。
+        candidates: list[tuple[int, int, str, str, int]] = []
         with self._lock:
             known = self._known_pattern
         if known is not None:
             for match in known.finditer(text):
-                candidates.append((match.start(), match.end(), self._kind_for_known(match.group(0)), match.group(0)))
-        for rule in self._rules:
+                candidates.append((match.start(), match.end(), self._kind_for_known(match.group(0)), match.group(0), 0))
+        for priority, rule in enumerate(self._rules, start=1):
             for match in rule.pattern.finditer(text):
                 start, end = match.span(rule.group)
                 if start < 0 or end <= start:
                     continue
                 value = text[start:end]
-                if len(value) < _MIN_SECRET_LENGTH:
+                if rule.trim_ws:
+                    trimmed = value.rstrip()
+                    # 中文注释：宽松字符类可能吞掉后面的普通单词（例如 IBAN 后面的
+                    # " x"）；校验不过就逐个去掉末尾的空白+单词，直到校验通过。
+                    while (
+                        rule.validate is not None
+                        and trimmed
+                        and not rule.validate(trimmed)
+                    ):
+                        tail = re.search(r"\s+\S+$", trimmed)
+                        if tail is None:
+                            break
+                        trimmed = trimmed[: tail.start()]
+                    if len(trimmed) != len(value):
+                        end = start + len(trimmed)
+                        value = trimmed
+                if len(value) < rule.min_length:
                     continue
                 if rule.require_entropy and not _looks_random(value):
                     continue
-                candidates.append((start, end, rule.name, value))
-        candidates.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+                if rule.validate is not None and not rule.validate(value):
+                    continue
+                candidates.append((start, end, rule.name, value, priority))
+        # 中文注释：同一开始位置时，规则列表里靠前的更具体（例如 url_password
+        # 优先于 email），同样位置再按长度取最长。
+        candidates.sort(key=lambda item: (item[0], item[4], -(item[1] - item[0])))
         chosen: list[tuple[int, int, str, str]] = []
         last_end = -1
-        for start, end, kind, value in candidates:
+        for start, end, kind, value, _priority in candidates:
             if start < last_end:
                 continue
             if any(start < p_end and p_start < end for p_start, p_end in protected):
@@ -596,3 +883,24 @@ def summarize(findings: Sequence[Finding]) -> str:
 
     counts = Counter(finding.kind for finding in findings)
     return ", ".join(f"{kind}×{count}" for kind, count in sorted(counts.items()))
+
+
+def redact_text_plain(text: str) -> str:
+    """把文本里的敏感值换成 ``[REDACTED]``（不写密钥表、不需要状态目录）。
+
+    供告警内容摘要等只展示、不还原的场景使用；规则与 ``Redactor`` 完全一致，
+    但默认关闭的规则（公网 IP）同样默认关闭。
+    """
+
+    redactor = Redactor.without_store()
+    hits = redactor.find(text)
+    if not hits:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end, _kind, _value in hits:
+        parts.append(text[cursor:start])
+        parts.append("[REDACTED]")
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)

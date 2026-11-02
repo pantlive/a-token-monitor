@@ -171,6 +171,244 @@ class RuleTests(_TempState):
                 self.assertEqual(split_partial_tail(text), expected)
 
 
+class PersonalInfoRuleTests(_TempState):
+    """个人信息与机器标识规则：邮箱、手机号、证件号、生日、MAC、序列号等。"""
+
+    def redact(self, text: str) -> list[str]:
+        return [finding.kind for finding in self.redactor().redact(text)[1]]
+
+    def test_email(self) -> None:
+        text = "mail me@example.com now; contact me@example.com again"
+        redacted, findings = self.redactor().redact(text)
+        self.assertEqual({finding.kind for finding in findings}, {"email"})
+        self.assertNotIn("me@example.com", redacted)
+        # 中文注释：localhost 不算邮箱域名；URL 里的密码不被 email 抢走。
+        self.assertEqual(self.redact("user@localhost"), [])
+        self.assertEqual(self.redact("https://bob:s3cr3t-pass-9@db.example.com/x"), ["url_password"])
+        # 中文注释：git@github.com 的 SCP 形式不误伤。
+        self.assertEqual(self.redact("git clone git@github.com:org/repo.git"), [])
+
+    def test_phone_number(self) -> None:
+        text = "tel 13800138000 x"
+        redacted, findings = self.redactor().redact(text)
+        self.assertEqual([finding.kind for finding in findings], ["phone_number"])
+        self.assertNotIn("13800138000", redacted)
+        self.assertEqual(self.redact("18612345678"), ["phone_number"])
+        # 中文注释：非 1[3-9] 开头的 11 位数字不是手机号。
+        self.assertEqual(self.redact("126" + "12345678"), [])
+
+    def test_bank_card_luhn(self) -> None:
+        card = "4111 1111 1111 1111"
+        redacted, findings = self.redactor().redact(f"card {card} ok")
+        self.assertEqual([finding.kind for finding in findings], ["bank_card"])
+        self.assertNotIn(card, redacted)
+        # 中文注释：校验位不对的 16 位数字不替换。
+        self.assertEqual(self.redact("card " + "4111 1111 1111 1111"[:-1] + "2 ok"), [])
+
+    def test_china_id_checksum(self) -> None:
+        idc = "11010519491231002X"
+        redacted, findings = self.redactor().redact(f"id {idc} x")
+        self.assertEqual([finding.kind for finding in findings], ["china_id"])
+        self.assertNotIn(idc, redacted)
+        # 中文注释：校验码不对不替换。
+        self.assertEqual(self.redact("id " + "11010519491231002X"[:-1] + "Y x"), [])
+
+    def test_ssn_only_issued_areas(self) -> None:
+        valid = "123-45-6789"
+        redacted, findings = self.redactor().redact(f"ssn {valid} x")
+        self.assertEqual([finding.kind for finding in findings], ["ssn"])
+        self.assertNotIn(valid, redacted)
+        # 中文注释：000 / 666 / 900 号段、全 0 组号/序号都不认。
+        for bad in ("000-12-3456", "666-12-3456", "900-12-3456", "123-00-6789", "123-45-0000"):
+            self.assertEqual(self.redact(f"ssn {bad} x"), [], bad)
+
+    def test_passport_after_keyword(self) -> None:
+        first, second = "E12345678", "AB9876543"
+        cases = {
+            f"passport {first}": first,
+            f"passport number {first}": first,
+            f"护照：{first}": first,
+            f"护照号 {second}": second,
+            f"パスポ一卜 {first}": first,
+        }
+        for text, secret in cases.items():
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["passport"])
+                self.assertNotIn(secret, redacted)
+        # 中文注释：单独的数字不是护照号。
+        self.assertEqual(self.redact(f"my number is {first}"), [])
+
+    def test_birthday_only_after_keyword(self) -> None:
+        first, second = "1990-01-01", "1985/12/31"
+        cases = {
+            f"生日 {first}": first,
+            f"出生日期：{second}": second,
+            f"DOB: {first}": first,
+            f"born {first}": first,
+        }
+        for text, secret in cases.items():
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["birthday"])
+                self.assertNotIn(secret, redacted)
+        # 中文注释：单独的日期不动；非法日期不替换。
+        self.assertEqual(self.redact("今天是 2024-01-01"), [])
+        self.assertEqual(self.redact("生日 1990-13-01"), [])
+
+    def test_iban_checksum(self) -> None:
+        iban = "DE89 3704 0044 0532 0130 00"
+        redacted, findings = self.redactor().redact(f"iban {iban} x")
+        self.assertEqual([finding.kind for finding in findings], ["iban"])
+        self.assertNotIn(iban, redacted)
+        # 中文注释：校验位不对的 IBAN 不替换。
+        self.assertEqual(self.redact(f"iban {'DE89 3704 0044 0532 0130 01'} x"), [])
+
+    def test_mac_address(self) -> None:
+        for mac in ("00:11:22:33:44:55", "AA-BB-CC-DD-EE-FF"):
+            with self.subTest(mac=mac):
+                redacted, findings = self.redactor().redact(f"mac {mac} x")
+                self.assertEqual([finding.kind for finding in findings], ["mac_address"])
+                self.assertNotIn(mac, redacted)
+        # 中文注释：IPv6 地址不是 MAC。
+        self.assertEqual(self.redact("2606:4700:4700::1111"), [])
+
+    def test_serial_number_after_keyword(self) -> None:
+        first, second = "ABC-123456", "XYZ-987654"
+        cases = {
+            f"S/N: {first}": first,
+            f"SN: {second}": second,
+            f"Serial Number: {first}": first,
+            f"序列号：{second}": second,
+        }
+        for text, secret in cases.items():
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["serial_number"])
+                self.assertNotIn(secret, redacted)
+        # 中文注释：没有 S/N 关键字的编号不替换；纯字母没有数字的也不像序列号。
+        self.assertEqual(self.redact(f"order {first}"), [])
+        self.assertEqual(self.redact("S/N: ABCDEFGH"), [])
+
+    def test_home_username_in_paths(self) -> None:
+        user = "develuser"
+        cases = {
+            f"/home/{user}/project": user,
+            f"/Users/{user}/app": user,
+            "C:\\Users\\" + user + "\\x": user,
+        }
+        for text, secret in cases.items():
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["home_username"])
+                self.assertNotIn(secret, redacted)
+        # 中文注释：/srv/app 不是用户主目录。
+        self.assertEqual(self.redact("/srv/app/data"), [])
+
+    def test_user_at_host_and_ssh(self) -> None:
+        login = "develuser" + "@server"
+        redacted, findings = self.redactor().redact(login + ":~$")
+        self.assertEqual([finding.kind for finding in findings], ["user_at_host"])
+        self.assertNotIn(login, redacted)
+        redacted, findings = self.redactor().redact("ssh " + login + " -p 22")
+        self.assertEqual([finding.kind for finding in findings], ["ssh_target"])
+        self.assertNotIn(login, redacted)
+
+    def test_hostname_and_user_lines(self) -> None:
+        user, host = "develuser", "myhost123"
+        for text, secret in (
+            (f"hostname: {host}", host),
+            (f"user = {user}", user),
+            (f"  username: {user}", user),
+        ):
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["hostname_line"])
+                self.assertNotIn(secret, redacted)
+        self.assertEqual(self.redact('{"hostname": "x"}'), [])
+
+
+class PublicIpRuleTests(_TempState):
+    """公网 IP 默认关闭，显式 enabled_rules 开启后生效。"""
+
+    def redactor(self, **config: Any) -> Redactor:
+        return Redactor(self.store, RedactConfig(**config), env={})
+
+    def test_public_ips_are_off_by_default(self) -> None:
+        text = "connect 8.8.8.8 via 2606:4700:4700::1111 and 192.168.1.1"
+        redacted, findings = self.redactor().redact(text)
+        self.assertEqual(findings, [])
+        self.assertEqual(redacted, text)
+
+    def test_enabled_rules_turns_them_on(self) -> None:
+        from a_token_monitor.redact.rules import default_disabled_rules
+
+        ip_rules = tuple(default_disabled_rules())
+        red = self.redactor(enabled_rules=ip_rules)
+        text = "connect 8.8.8.8 and 2606:4700:4700::1111"
+        redacted, findings = red.redact(text)
+        self.assertEqual({finding.kind for finding in findings}, set(ip_rules))
+        self.assertNotIn("8.8.8.8", redacted)
+        self.assertNotIn("2606:4700:4700::1111", redacted)
+
+    def test_enabling_one_public_rule_keeps_the_other_off(self) -> None:
+        from a_token_monitor.redact.rules import default_disabled_rules
+
+        ipv4 = next(name for name in default_disabled_rules() if name.endswith("v4"))
+        ipv6 = next(name for name in default_disabled_rules() if name.endswith("v6"))
+        red = self.redactor(enabled_rules=(ipv4,))
+        redacted, findings = red.redact("connect 8.8.8.8 and 2606:4700:4700::1111")
+        self.assertEqual([finding.kind for finding in findings], [ipv4])
+        self.assertNotIn("8.8.8.8", redacted)
+        # 中文注释：只点名启用 IPv4 时，IPv6 仍然保持默认关闭。
+        self.assertIn("2606:4700:4700::1111", redacted)
+        self.assertNotEqual(ipv4, ipv6)
+
+    def test_private_doc_and_reserved_addresses_never_redact(self) -> None:
+        from a_token_monitor.redact.rules import default_disabled_rules
+
+        red = self.redactor(enabled_rules=tuple(default_disabled_rules()))
+        text = (
+            "10.0.0.1 127.0.0.1 192.168.1.1 172.16.0.1 169.254.1.1 "
+            "100.64.0.1 203.0.113.5 198.51.100.7 233.252.0.1 "
+            "2001:db8::1 fe80::1 ::1"
+        )
+        redacted, findings = red.redact(text)
+        self.assertEqual(findings, [])
+        self.assertEqual(redacted, text)
+
+    def test_default_disabled_rules_listing(self) -> None:
+        from a_token_monitor.redact.rules import DEFAULT_OFF_RULES, default_disabled_rules
+
+        self.assertEqual(set(default_disabled_rules()), set(DEFAULT_OFF_RULES))
+        self.assertEqual(
+            set(default_disabled_rules()) - set(RedactConfig().enabled_rules),
+            set(DEFAULT_OFF_RULES),
+        )
+
+
+class PlainRedactTests(unittest.TestCase):
+    """``redact_text_plain``：只展示不还原，不写密钥表。"""
+
+    def test_redacts_without_vault_and_keeps_public_ips_off(self) -> None:
+        from a_token_monitor.redact.rules import redact_text_plain
+
+        text = "mail me@example.com tel 13800138000 ip 8.8.8.8"
+        out = redact_text_plain(text)
+        self.assertIn("[REDACTED]", out)
+        self.assertNotIn("me@example.com", out)
+        self.assertNotIn("13800138000", out)
+        # 中文注释：公网 IP 默认关闭；不产生任何 vault 占位符。
+        self.assertIn("8.8.8.8", out)
+        self.assertNotIn("[[SECRET:", out)
+
+    def test_plain_text_without_hits_is_unchanged(self) -> None:
+        from a_token_monitor.redact.rules import redact_text_plain
+
+        self.assertEqual(redact_text_plain("hello world"), "hello world")
+        self.assertEqual(redact_text_plain(""), "")
+
+
 def _sse(*payloads: Any) -> list[bytes]:
     lines: list[bytes] = []
     for payload in payloads:
@@ -701,6 +939,26 @@ class ControllerTests(_TempState):
         result = controller.apply({"action": "scan", "text": "id CORP-12345678"})
         self.assertEqual(result["kinds"], ["corp_id"])
         self.assertNotIn("CORP-12345678", result["redacted"])
+
+    def test_enabled_rules_round_trip_and_default_off_listing(self) -> None:
+        from a_token_monitor.redact.rules import DEFAULT_OFF_RULES
+
+        ipv4 = next(name for name in DEFAULT_OFF_RULES if "v4" in name)
+        controller = self.controller()
+        snap = controller.snapshot()
+        # 中文注释：快照里列出默认关闭的规则（公网 IP）。
+        self.assertEqual(set(snap["default_disabled_rules"]), set(DEFAULT_OFF_RULES))
+        controller.apply({"action": "set-config", "config": {"enabled_rules": [ipv4]}})
+        saved = json.loads(self.store.config_path.read_text())
+        self.assertEqual(saved["enabled_rules"], [ipv4])
+        result = controller.apply({"action": "scan", "text": "connect 8.8.8.8"})
+        self.assertEqual(result["kinds"], [ipv4])
+        self.assertEqual(result["count"], 1)
+        # 中文注释：enabled_rules 与 disabled_rules 互斥。
+        with self.assertRaises(RedactControlError):
+            controller.apply(
+                {"action": "set-config", "config": {"enabled_rules": [ipv4], "disabled_rules": [ipv4]}}
+            )
 
     def test_upstreams_and_read_only_mode(self) -> None:
         controller = self.controller()
