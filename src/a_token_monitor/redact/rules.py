@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -25,6 +26,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
+
+from .events import RedactEvent, RedactEventLog
 
 try:  # 中文注释：Windows 没有 fcntl，退化为进程内锁（hook 并发写只在 POSIX 上常见）。
     import fcntl
@@ -386,6 +389,9 @@ class Finding:
     start: int
     end: int
     placeholder: str
+    # 中文注释：命中值占多少字节；只用于统计「拦下/脱敏了多少数据」，不留原值。
+    # 不参与比较，保持旧的 Finding(kind, start, end, placeholder) 等值判断。
+    size: int = field(default=0, compare=False)
 
 
 @dataclass
@@ -505,6 +511,7 @@ class RedactStore:
         self.key_path = self.root / "key"
         self.vault_path = self.root / "vault.json"
         self.lock_path = self.root / "vault.lock"
+        self.events = RedactEventLog(self.root)
         self._thread_lock = threading.Lock()
 
     def ensure(self) -> None:
@@ -696,6 +703,36 @@ class Redactor:
                 return str(entry.get("kind") or "literal")
         return "literal"
 
+    def record_event(
+        self,
+        *,
+        agent: str,
+        channel: str,
+        action: str,
+        findings: Sequence[Finding],
+        payload_bytes: int,
+    ) -> None:
+        """记录一次脱敏事件的元数据；只写统计，不写原值，失败不影响主流程。"""
+
+        if not findings:
+            return
+        kinds = Counter(finding.kind for finding in findings)
+        event = RedactEvent(
+            at=time.time(),
+            agent=str(agent),
+            channel=str(channel),
+            action=str(action),
+            findings=len(findings),
+            kinds=dict(kinds),
+            secret_bytes=sum(max(0, finding.size) for finding in findings),
+            payload_bytes=max(0, int(payload_bytes)),
+        )
+        try:
+            self.store.events.append(event)
+        except (OSError, ValueError) as error:
+            # 中文注释：统计失败不能挡住脱敏本身；hook 仍要正常返回。
+            logging.getLogger(__name__).warning("脱敏事件记录失败，已忽略: %s", error)
+
     def flush(self) -> None:
         """把本进程新产生的映射写进密钥表（hook 退出前、代理每个请求后调用）。"""
 
@@ -795,7 +832,7 @@ class Redactor:
             parts.append(text[cursor:start])
             parts.append(placeholder)
             cursor = end
-            findings.append(Finding(kind, start, end, placeholder))
+            findings.append(Finding(kind, start, end, placeholder, len(value.encode("utf-8"))))
             with self._lock:
                 entry = self._vault.get(placeholder)
                 # 中文注释：每天最多刷新一次 last_seen，避免每个请求都写文件。

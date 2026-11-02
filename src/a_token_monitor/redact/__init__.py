@@ -4,6 +4,7 @@
 
 * ``rules``      脱敏规则、确定性占位符、本地密钥表（vault）与配置
 * ``streaming``  模型响应（SSE / JSON）里把占位符还原成原值
+* ``events``     拦截记录：只存时间、来源、类别与字节数，供 Dashboard 画时间轴
 * ``proxy``      本地 HTTP 代理：请求脱敏后转发上游，响应流式还原
 * ``hooks``      Claude Code / Codex / Grok 的 hook 入口
 * ``install``    把代理或 hook 写进各 agent 的配置，以及卸载

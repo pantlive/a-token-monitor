@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from a_token_monitor.redact.control import RedactControlError, RedactController
+from a_token_monitor.redact.events import RedactEvent
 from a_token_monitor.redact.hooks import handle_event, run_hook
 from a_token_monitor.redact.install import MARKER, AgentPaths, Installer, InstallError, proxy_url
 from a_token_monitor.redact.proxy import ProxyError, RedactProxyServer
@@ -708,9 +709,123 @@ class ProxyTests(_TempState):
                 self.assertEqual(response.status, status)
         self.assertEqual(_Upstream.seen, [])
 
+    def test_proxy_records_interception_metadata(self) -> None:
+        response = self._post("/t/v1/messages")
+        response.read()
+        snapshot = self.store.events.snapshot()
+        self.assertEqual(snapshot["stats"]["events"], 1)
+        event = snapshot["events"][0]
+        self.assertEqual(event["agent"], "t")
+        self.assertEqual(event["channel"], "request")
+        self.assertEqual(event["action"], "redact")
+        self.assertEqual(event["findings"], 1)
+        self.assertEqual(event["kinds"], {"github_token": 1})
+        self.assertGreater(event["payload_bytes"], event["secret_bytes"])
+        self.assertNotIn(GITHUB, self.store.events.events_path.read_text(encoding="utf-8"))
+
     def test_refuses_non_loopback_bind(self) -> None:
         with self.assertRaises(ProxyError):
             RedactProxyServer(self.redactor(), host="0.0.0.0", port=0)
+
+
+class EventLogTests(_TempState):
+    """拦截记录只保存元数据：时间、来源、类别与字节数，不保存原值和上下文。"""
+
+    def test_records_metadata_and_updates_cumulative_stats(self) -> None:
+        redactor = self.redactor()
+        address = "alert@example.com"
+        text = f"token {GITHUB} contact {address}"
+        _, findings = redactor.redact(text)
+        self.assertGreaterEqual(len(findings), 2)
+        redactor.record_event(
+            agent="claude",
+            channel="prompt",
+            action="block",
+            findings=findings,
+            payload_bytes=len(text.encode("utf-8")),
+        )
+        snapshot = self.store.events.snapshot()
+        stats = snapshot["stats"]
+        self.assertEqual(stats["events"], 1)
+        self.assertEqual(stats["findings"], len(findings))
+        self.assertEqual(stats["blocked_events"], 1)
+        self.assertEqual(stats["redacted_events"], 0)
+        self.assertEqual(stats["blocked_bytes"], len(text.encode("utf-8")))
+        self.assertEqual(stats["kinds"]["github_token"], 1)
+        self.assertEqual(stats["kinds"]["email"], 1)
+        event = snapshot["events"][0]
+        self.assertEqual(event["agent"], "claude")
+        self.assertEqual(event["channel"], "prompt")
+        self.assertEqual(event["action"], "block")
+        self.assertEqual(event["findings"], len(findings))
+        self.assertEqual(event["secret_bytes"], sum(finding.size for finding in findings))
+        for path in (self.store.events.events_path, self.store.events.stats_path):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            content = path.read_text(encoding="utf-8")
+            self.assertNotIn(GITHUB, content)
+            self.assertNotIn(address, content)
+            self.assertNotIn('"value"', content)
+
+    def test_events_are_newest_first_and_limit_applies_to_details_only(self) -> None:
+        log = self.store.events
+        for at in (100.0, 300.0, 200.0):
+            log.append(
+                RedactEvent(
+                    at=at,
+                    agent="codex",
+                    channel="request",
+                    action="redact",
+                    findings=1,
+                    kinds={"jwt": 1},
+                    secret_bytes=3,
+                    payload_bytes=10,
+                )
+            )
+        snapshot = log.snapshot(limit=2)
+        self.assertEqual([event["at"] for event in snapshot["events"]], [300.0, 200.0])
+        self.assertEqual(snapshot["stats"]["events"], 3)
+        self.assertEqual(snapshot["stats"]["first_at"], 100.0)
+        self.assertEqual(snapshot["stats"]["last_at"], 300.0)
+        self.assertEqual(snapshot["stats"]["payload_bytes"], 30)
+
+    def test_old_event_lines_are_trimmed_but_totals_survive(self) -> None:
+        from unittest.mock import patch
+
+        log = self.store.events
+        with patch("a_token_monitor.redact.events._MAX_EVENT_FILE_BYTES", 1), patch(
+            "a_token_monitor.redact.events.MAX_EVENTS", 2
+        ):
+            for at in (100.0, 200.0, 300.0, 400.0):
+                log.append(
+                    RedactEvent(
+                        at=at,
+                        agent="claude",
+                        channel="prompt",
+                        action="block",
+                        findings=1,
+                        kinds={"jwt": 1},
+                        secret_bytes=3,
+                        payload_bytes=10,
+                    )
+                )
+        snapshot = log.snapshot(limit=10)
+        self.assertEqual([event["at"] for event in snapshot["events"]], [400.0, 300.0])
+        self.assertEqual(snapshot["stats"]["events"], 4)
+        self.assertEqual(snapshot["stats"]["blocked_events"], 4)
+
+    def test_missing_stats_falls_back_to_retained_events(self) -> None:
+        redactor = self.redactor()
+        _, findings = redactor.redact(GITHUB)
+        redactor.record_event(agent="grok", channel="tool_output", action="redact", findings=findings, payload_bytes=64)
+        self.store.events.stats_path.unlink()
+        snapshot = self.store.events.snapshot()
+        self.assertEqual(snapshot["stats"]["events"], 1)
+        self.assertEqual(snapshot["stats"]["findings"], 1)
+        self.assertEqual(snapshot["stats"]["redacted_events"], 1)
+        # 中文注释：stats.json 丢失后继续写事件，会先从明细重建再累加。
+        _, again = redactor.redact(GITHUB)
+        redactor.record_event(agent="grok", channel="request", action="redact", findings=again, payload_bytes=32)
+        self.assertEqual(self.store.events.snapshot()["stats"]["events"], 2)
 
 
 class HookTests(_TempState):
@@ -731,6 +846,16 @@ class HookTests(_TempState):
         red = self.redactor(prompt_action="warn")
         result = handle_event({"hook_event_name": "UserPromptSubmit", "prompt": GITHUB}, red)
         self.assertIn("systemMessage", result)  # type: ignore[operator]
+
+    def test_hook_records_interception_metadata(self) -> None:
+        handle_event({"hook_event_name": "UserPromptSubmit", "prompt": f"use {GITHUB}"}, self.red)
+        handle_event({"hook_event_name": "PostToolUse", "tool_response": {"stdout": GITHUB}}, self.red)
+        snapshot = self.store.events.snapshot()
+        self.assertEqual(snapshot["stats"]["blocked_events"], 1)
+        self.assertEqual(snapshot["stats"]["redacted_events"], 1)
+        self.assertEqual([event["channel"] for event in snapshot["events"]], ["tool_output", "prompt"])
+        self.assertEqual([event["action"] for event in snapshot["events"]], ["redact", "block"])
+        self.assertNotIn(GITHUB, json.dumps(snapshot, ensure_ascii=False))
 
     def test_post_tool_output_replaced_per_agent(self) -> None:
         claude = handle_event(
@@ -1044,6 +1169,25 @@ class ControllerTests(_TempState):
         self.assertEqual(readonly.apply({"action": "scan", "text": GITHUB})["count"], 1)
         self.assertFalse(self.store.vault_path.exists())
 
+    def test_snapshot_includes_interception_stats_without_values(self) -> None:
+        controller = self.controller()
+        redactor = Redactor(self.store, RedactConfig(), env={})
+        _, findings = redactor.redact(f"token {GITHUB}")
+        redactor.record_event(
+            agent="claude",
+            channel="prompt",
+            action="block",
+            findings=findings,
+            payload_bytes=len(f"token {GITHUB}".encode("utf-8")),
+        )
+        snapshot = controller.snapshot()
+        self.assertEqual(snapshot["stats"]["events"], 1)
+        self.assertEqual(snapshot["events"][0]["agent"], "claude")
+        self.assertNotIn(GITHUB, json.dumps(snapshot, ensure_ascii=False))
+        # 中文注释：规则自测只是预览，不写拦截记录。
+        controller.apply({"action": "scan", "text": GITHUB})
+        self.assertEqual(controller.snapshot()["stats"]["events"], 1)
+
     def test_proxy_start_failure_is_reported_not_raised(self) -> None:
         def broken(*args: Any, **kwargs: Any) -> Any:
             raise OSError("Address already in use")
@@ -1086,6 +1230,8 @@ class DashboardRedactApiTests(_TempState):
         self.assertEqual(status, 200)
         self.assertTrue(payload["available"])
         self.assertEqual([agent["key"] for agent in payload["agents"]], ["claude", "codex", "grok"])
+        self.assertEqual(payload["stats"]["events"], 0)
+        self.assertEqual(payload["events"], [])
         status, payload = self._call(url, {"action": "set-agent", "agent": "grok", "mode": "hook"})
         self.assertEqual(status, 200)
         self.assertTrue(paths.grok_hook_file.is_file())

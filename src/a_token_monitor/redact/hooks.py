@@ -86,11 +86,20 @@ def _on_prompt(payload: Mapping[str, Any], redactor: Redactor, agent: str) -> di
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         prompt = payload.get("userPrompt") if isinstance(payload.get("userPrompt"), str) else ""
-    _, findings = redactor.redact(str(prompt))
+    text = str(prompt)
+    _, findings = redactor.redact(text)
     if not findings:
         return None
+    action = "warn" if redactor.config.prompt_action == "warn" else "block"
+    redactor.record_event(
+        agent=agent,
+        channel="prompt",
+        action=action,
+        findings=findings,
+        payload_bytes=len(text.encode("utf-8")),
+    )
     reason = _block_reason(findings)
-    if redactor.config.prompt_action == "warn":
+    if action == "warn":
         return {"systemMessage": f"a-token-monitor: 提示词里有疑似密钥（{summarize(findings)}），已按配置放行。"}
     result: dict[str, Any] = {"decision": "block", "reason": reason}
     if agent == "claude":
@@ -149,6 +158,13 @@ def _on_post_tool(payload: Mapping[str, Any], redactor: Redactor, agent: str) ->
     redacted, findings = redactor.redact_json(output)
     if not findings:
         return None
+    redactor.record_event(
+        agent=agent,
+        channel="tool_output",
+        action="redact",
+        findings=findings,
+        payload_bytes=len(_model_text(output).encode("utf-8")),
+    )
     note = f"a-token-monitor 已把工具输出里的 {len(findings)} 处疑似密钥换成占位符（{summarize(findings)}）。"
     if agent == "codex":
         # 中文注释：Codex 不能替换输出，block 会用 reason 代替原工具结果交给模型。

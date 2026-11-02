@@ -192,6 +192,13 @@ class _Handler(BaseHTTPRequestHandler):
             self.server.logger.info(
                 "%s %s 脱敏 %d 处: %s", self.command, name, len(findings), summarize(findings)
             )
+            self.server.redactor.record_event(
+                agent=name,
+                channel="request",
+                action="redact",
+                findings=findings,
+                payload_bytes=self._payload_bytes,
+            )
         self.server.redactor.flush()
         self._forward(upstream, "/" + rest.split("?", 1)[0] if rest else "", body)
 
@@ -219,10 +226,13 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     def _redact_body(self, body: bytes) -> tuple[bytes, list[Finding]]:
+        # 中文注释：记录解压后的正文大小，压缩请求也能按真实内容计算拦截量。
+        self._payload_bytes = len(body)
         if not body:
             return body, []
         encoding = self.headers.get("Content-Encoding", "")
         decoded = _decode_request_body(body, encoding)
+        self._payload_bytes = len(decoded)
         content_type = (self.headers.get("Content-Type") or "").lower()
         if "json" in content_type or decoded[:1] in (b"{", b"["):
             try:
