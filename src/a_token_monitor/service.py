@@ -70,6 +70,8 @@ class ServiceConfig:
     # service.json 里仍按 ``<key>_homes`` 分字段保存，空元组表示「未配置」。
     provider_homes: Mapping[str, tuple[Path, ...]] = field(default_factory=dict)
     alert_context_content: bool = False
+    redact_proxy: bool = False
+    redact_proxy_port: int = 8790
     # 中文注释：版本/安装残留默认可在网页清理；--no-package-cleanup 可关掉。
     allow_package_cleanup: bool = True
     budget_usd: float | None = None
@@ -134,6 +136,8 @@ class ServiceConfig:
             dashboard_port=self.dashboard_port,
             budget_usd=self.budget_usd,
             alert_context_content=self.alert_context_content,
+            redact_proxy=self.redact_proxy,
+            redact_proxy_port=self.redact_proxy_port,
             allow_package_cleanup=self.allow_package_cleanup,
             upload_burst_warn_mb=self.upload_burst_warn_mb,
             upload_burst_danger_mb=self.upload_burst_danger_mb,
@@ -180,6 +184,8 @@ class ServiceConfig:
             },
             "budget_usd": self.budget_usd,
             "alert_context_content": self.alert_context_content,
+            "redact_proxy": self.redact_proxy,
+            "redact_proxy_port": self.redact_proxy_port,
             "allow_package_cleanup": self.allow_package_cleanup,
             "upload_burst_warn_mb": self.upload_burst_warn_mb,
             "upload_burst_danger_mb": self.upload_burst_danger_mb,
@@ -269,6 +275,9 @@ class ServiceConfig:
             },
             budget_usd=_optional_float(raw_payload, "budget_usd"),
             alert_context_content=raw_payload.get("alert_context_content") is True,
+            # 中文注释：老 service.json 没有这两个字段时不启用代理。
+            redact_proxy=raw_payload.get("redact_proxy") is True,
+            redact_proxy_port=int(_optional_float(raw_payload, "redact_proxy_port") or 8790),
             # 中文注释：老 service.json 没这个字段时按默认（允许）处理。
             allow_package_cleanup=raw_payload.get("allow_package_cleanup") is not False,
             upload_burst_warn_mb=_optional_float(
@@ -344,6 +353,8 @@ class ServiceConfig:
             dashboard_port=self.dashboard_port,
             budget_usd=self.budget_usd,
             alert_context_content=self.alert_context_content,
+            redact_proxy=self.redact_proxy,
+            redact_proxy_port=self.redact_proxy_port,
             allow_package_cleanup=self.allow_package_cleanup,
             upload_burst_warn_mb=self.upload_burst_warn_mb,
             upload_burst_danger_mb=self.upload_burst_danger_mb,

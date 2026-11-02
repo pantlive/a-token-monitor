@@ -275,7 +275,7 @@ Dashboard 合并同时发生的状态刷新，浏览器在慢请求期间不会�
 
 ### 设置页
 
-独立的 `/settings` 页面，目前包含两块：
+独立的 `/settings` 页面，目前包含三块：
 
 - **扫描目录**：查看、添加、编辑和移除各 provider（Codex / Grok / Kimi Code /
   DeepSeek Harness / Command Code / Claude Code / OpenCode / Cursor /
@@ -292,6 +292,11 @@ Dashboard 合并同时发生的状态刷新，浏览器在慢请求期间不会�
   清理前给出预览（删除范围 + 预计释放空间）；daemon 每天按生效保留期自动清理
   并 VACUUM 压缩。清理只删过期历史行，绝不影响活动会话和增量索引检查点；
   自动清理失败会记录原因并在 Dashboard 顶栏提示。
+- **密钥脱敏**：给每个 agent 切换 关闭 / hook / 代理 / 两者；daemon 运行中直接启停脱敏代理、
+  改端口；添加代理上游；编辑 `redact/config.json` 里的规则，并粘贴文本测试。代理设置的优先级为
+  **Web 配置 > `--redact-proxy` / `--redact-proxy-port`**，持久化在 `redact/web.json`。
+  改端口时会同步改写已经走代理的 agent 配置。改 agent 配置前会先备份，并且只在 Dashboard
+  监听本机地址时允许；用 `--dashboard-host 0.0.0.0` 开放时这一块只读（规则测试仍可用）。
 
 ### 健康检查
 
@@ -441,6 +446,63 @@ a-token-monitor service uninstall
 - 没有 systemd/launchd 时直接前台运行 `daemon`；`/healthz` 与 `/readyz`
   可用于容器与反向代理探测。
 
+## 发给模型前的密钥脱敏
+
+agent 读文件、跑命令时，`.env` 里的密钥、日志里的 token 会随下一次请求一起发给模型。
+`redact` 子命令把这些值换成占位符 `[[SECRET:类别:编号]]` 后再发出去。同一个值每次都换成
+同一个占位符，请求前缀不变，prompt cache 照常命中。
+
+每个 agent 可以单独选一种方式：
+
+| 方式 | 做法 | 覆盖范围 |
+| --- | --- | --- |
+| hook | `UserPromptSubmit` 拦下带密钥的提示词；`PostToolUse` 把工具输出里的密钥换成占位符；`PreToolUse` 把工具参数里的占位符还原成原值，命令和写入的文件拿到真实值 | 只管工具输出和提示词；Codex 不能替换输出，脱敏后的文本以 hook 反馈代替原结果 |
+| proxy | 本地代理 `127.0.0.1:8790` 改写每个请求正文里的所有文本，模型回复（含流式输出和工具参数）里的占位符再还原 | 全部上下文，包括系统提示和历史消息 |
+| both | 两者同时启用 | 同上 |
+
+```bash
+a-token-monitor redact scan "token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+a-token-monitor redact install --claude both --codex hook --grok hook
+a-token-monitor redact status
+a-token-monitor redact proxy
+a-token-monitor daemon --dashboard --redact-proxy
+a-token-monitor redact uninstall
+```
+
+- **代理与订阅登录**：代理原样转发 `Authorization` 等请求头，不保存凭据，订阅登录照常生效。
+  Claude Code 写 `ANTHROPIC_BASE_URL`，Codex 写 `openai_base_url`（ChatGPT 登录的请求也走这里），
+  Grok 写 `[endpoints] cli_chat_proxy_base_url`。只有 Claude Code 的文档写明了订阅登录可以走
+  gateway；Codex 与 Grok 用订阅登录走代理，官方文档没写，请自行评估账号风险，拿不准就只用 hook。
+- **代理要常驻**：启用 proxy 方式后，代理不运行时这些 agent 会连不上。用 `redact proxy` 前台运行，
+  或给 `daemon` / `service install` 加 `--redact-proxy`。代理只监听本机地址，拒绝带 `Origin` 的浏览器请求。
+- **Codex**：新 hook 要在 Codex 里运行 `/hooks` 审核信任后才会执行。Codex 默认用 zstd 压缩请求，
+  Python 3.14 之前没有内置 zstd，安装代理时会同时写入 `features.enable_request_compression = false`。
+  Codex 先尝试 WebSocket，代理返回 426 后它会改用 HTTP。
+- **还原**：占位符与原值的对照表保存在 `redact/vault.json`（0600），默认保留 30 天。
+  思考过程（thinking / reasoning）不还原，它带签名，必须原样回传。
+- **本地日志仍有原文**：各 agent 自己的会话日志在脱敏之前写入，原文还在本机。
+- **规则**：内置 OpenAI / Anthropic / xAI / GitHub / GitLab / AWS / Google / Slack / Stripe / npm /
+  Hugging Face 密钥、私钥块、JWT、`Bearer`、URL 里的密码和 `password=...` 这类赋值；另外会精确匹配
+  名字含 `TOKEN`、`SECRET`、`API_KEY`、`PASSWORD` 的环境变量的值。`redact/config.json` 可以调整：
+
+```json
+{
+  "dotenv_files": ["~/project/.env"],
+  "literal_values": ["corp-internal-value"],
+  "extra_patterns": [{"name": "corp_id", "pattern": "CORP-[0-9]{8}"}],
+  "allow_patterns": ["^AKIAIOSFODNN7EXAMPLE$"],
+  "disabled_rules": ["jwt"],
+  "prompt_action": "block",
+  "restore": true,
+  "vault_ttl_days": 30
+}
+```
+
+dsh 没有能改写内容的 hook，只能走代理：用 `redact upstream set <名称> <上游地址>` 登记它的上游，
+再把 dsh 那个 provider 的 `baseURL` 改成 `http://127.0.0.1:8790/<名称>`。
+
+以上操作都可以在 Dashboard 设置页的「密钥脱敏」一块里完成。
+
 ## 数据与安全
 
 卸载服务不会删除监控数据。状态目录（默认 `~/.a-token-monitor`）内各文件：
@@ -454,6 +516,7 @@ a-token-monitor service uninstall
 | `scan-dirs.json` | 设置页保存的 Web 扫描目录覆盖配置 |
 | `settings.json` | 设置页保存的 Web 保留天数覆盖配置 |
 | `archives/` | 会话归档：`sessions-*.tar.gz`（旧命名 `codex-sessions-*` 仍可恢复）及 `.manifest.json` |
+| `redact/` | 脱敏：`config.json` 规则、`web.json` 设置页保存的代理设置、`key` 占位符密钥、`vault.json` 占位符对照表、`backups/` 改动前的 agent 配置备份 |
 
 Dashboard 除页面和只读接口外，只额外接受少数写接口（`POST /api/alerts`、
 `POST /api/housekeeping`、设置页的扫描目录与历史数据接口），都要求

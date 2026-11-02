@@ -317,7 +317,7 @@ snapshot, and browser polling does not overlap slow requests.
 
 ### Settings page
 
-A separate `/settings` page with two blocks:
+A separate `/settings` page with three blocks:
 
 - **Scan directories**: view, add, edit and remove the data directories of each provider
   (Codex / Grok / Kimi Code / DeepSeek Harness / Command Code / Claude Code / OpenCode /
@@ -339,6 +339,14 @@ A separate `/settings` page with two blocks:
   Cleanup only removes expired rows and never touches active sessions or incremental-index
   checkpoints; a failed automatic cleanup records the reason and surfaces it in the
   Dashboard top bar.
+- **Secret redaction**: switch each agent between off / hook / proxy / both, start or stop the
+  redaction proxy and change its port while the daemon runs, add proxy upstreams, edit the
+  rules in `redact/config.json` and test them on pasted text. Priority for the proxy is
+  **web config > `--redact-proxy` / `--redact-proxy-port`**, persisted in `redact/web.json`.
+  Changing the port also rewrites the proxy URL in the agent configs already using it.
+  Changes to agent configs are backed up first and only allowed while the Dashboard listens
+  on a loopback address; with `--dashboard-host 0.0.0.0` the block is read-only (rule
+  testing still works).
 
 ### Health checks
 
@@ -510,6 +518,72 @@ a-token-monitor service uninstall
 - Without systemd/launchd, run `daemon` in the foreground; `/healthz` and `/readyz` work
   for container and reverse-proxy probes.
 
+## Redacting secrets before they reach the model
+
+When an agent reads a file or runs a command, keys from `.env` files and tokens in logs go to
+the model with the next request. The `redact` command replaces those values with placeholders
+of the form `[[SECRET:kind:id]]` first. The same value always gets the same placeholder, so the
+request prefix stays stable and prompt caching keeps working.
+
+Pick a method per agent:
+
+| Method | What it does | Coverage |
+| --- | --- | --- |
+| hook | `UserPromptSubmit` blocks prompts that contain secrets; `PostToolUse` replaces secrets in tool output with placeholders; `PreToolUse` turns placeholders in tool arguments back into the real values, so commands and written files get the real secret | Tool output and prompts only; Codex cannot replace output, so the redacted text is returned as hook feedback in place of the original result |
+| proxy | A local proxy on `127.0.0.1:8790` rewrites every text field in each request body and restores placeholders in the model's replies, including streamed output and tool arguments | The whole context, including system prompts and earlier messages |
+| both | Both at once | Same as proxy |
+
+```bash
+a-token-monitor redact scan "token=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+a-token-monitor redact install --claude both --codex hook --grok hook
+a-token-monitor redact status
+a-token-monitor redact proxy
+a-token-monitor daemon --dashboard --redact-proxy
+a-token-monitor redact uninstall
+```
+
+- **Proxy and subscription login**: the proxy forwards `Authorization` and the other request
+  headers unchanged and stores no credentials, so subscription logins keep working. It sets
+  `ANTHROPIC_BASE_URL` for Claude Code, `openai_base_url` for Codex (ChatGPT-login requests use it
+  too) and `[endpoints] cli_chat_proxy_base_url` for Grok. Only Claude Code documents subscription
+  logins through a gateway; for Codex and Grok with a subscription login the official docs say
+  nothing, so weigh the account risk yourself and use hooks only if unsure.
+- **Keep the proxy running**: with the proxy method, these agents cannot connect while the proxy
+  is down. Run `redact proxy` in the foreground or add `--redact-proxy` to `daemon` /
+  `service install`. The proxy binds to loopback only and rejects browser requests that carry `Origin`.
+- **Codex**: new hooks only run after you review and trust them with `/hooks` in Codex. Codex
+  compresses requests with zstd by default and Python before 3.14 has no built-in zstd, so
+  installing the proxy also writes `features.enable_request_compression = false`. Codex tries
+  WebSocket first and falls back to HTTP when the proxy answers 426.
+- **Restoring**: the placeholder-to-value table lives in `redact/vault.json` (0600) and entries are
+  kept for 30 days by default. Reasoning (thinking / reasoning) is never restored, because it is
+  signed and has to be sent back unchanged.
+- **Local logs still hold the original**: each agent writes its own session log before redaction,
+  so the original text stays on this machine.
+- **Rules**: built-in rules cover OpenAI / Anthropic / xAI / GitHub / GitLab / AWS / Google / Slack /
+  Stripe / npm / Hugging Face keys, private key blocks, JWTs, `Bearer` tokens, passwords in URLs and
+  assignments such as `password=...`. Values of environment variables whose names contain `TOKEN`,
+  `SECRET`, `API_KEY` or `PASSWORD` are matched exactly. Tune them in `redact/config.json`:
+
+```json
+{
+  "dotenv_files": ["~/project/.env"],
+  "literal_values": ["corp-internal-value"],
+  "extra_patterns": [{"name": "corp_id", "pattern": "CORP-[0-9]{8}"}],
+  "allow_patterns": ["^AKIAIOSFODNN7EXAMPLE$"],
+  "disabled_rules": ["jwt"],
+  "prompt_action": "block",
+  "restore": true,
+  "vault_ttl_days": 30
+}
+```
+
+dsh has no hook that can rewrite content, so it needs the proxy: register its upstream with
+`redact upstream set <name> <upstream URL>`, then point that dsh provider's `baseURL` at
+`http://127.0.0.1:8790/<name>`.
+
+All of this can also be done from the "Secret redaction" block of the Dashboard settings page.
+
 ## Data and security
 
 Uninstalling the service never deletes monitoring data. Files in the state directory
@@ -524,6 +598,7 @@ Uninstalling the service never deletes monitoring data. Files in the state direc
 | `scan-dirs.json` | Web scan-directory overrides saved from the settings page |
 | `settings.json` | Web retention overrides saved from the settings page |
 | `archives/` | Session archives: `sessions-*.tar.gz` (legacy `codex-sessions-*` archives still restore) plus `.manifest.json` |
+| `redact/` | Redaction: `config.json` rules, `web.json` proxy settings from the settings page, `key` placeholder key, `vault.json` placeholder table, `backups/` agent config backups |
 
 Besides pages and read-only endpoints, the Dashboard accepts only a few write endpoints
 (`POST /api/alerts`, `POST /api/housekeeping`, and the settings page's scan-directory and

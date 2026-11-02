@@ -22,6 +22,7 @@ from ..providers import (
     resolve_provider_homes,
     update_provider_homes,
 )
+from ..redact.control import RedactController
 from ..registry import MultiSessionRegistry
 from ..retention import HistoryDataManager, RetentionController
 from ..scan_dirs import ScanDirsController
@@ -112,6 +113,7 @@ class DashboardServer:
         history: HistoryDataManager | None = None,
         retention: RetentionController | None = None,
         state_dir: Path | str | None = None,
+        redact: RedactController | None = None,
     ) -> None:
         if registries is not None and registry is not None:
             raise ValueError("registry 和 registries 只能传入一个")
@@ -133,6 +135,7 @@ class DashboardServer:
         self.health = health
         self.history = history
         self.retention = retention
+        self.redact = redact
         self.session_thresholds = session_thresholds or SessionSwitchThresholds()
         self.usage_aggregator = usage_aggregator or UsageAggregator(homes=self.homes)
         # 中文注释：版本检查与 CLI 共用状态目录里的缓存文件；没有状态目录时
@@ -197,6 +200,7 @@ class DashboardServer:
             retention=self.retention,
             updates=self.updates,
             allow_package_cleanup=self.config.allow_package_cleanup,
+            redact=self.redact,
         )
         server = _DashboardHTTPServer(
             (self.config.host, self.config.port),

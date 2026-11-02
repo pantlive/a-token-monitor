@@ -67,6 +67,8 @@ files = [
     "src/a_token_monitor/local_time.py",
     "src/a_token_monitor/usage",
     "src/a_token_monitor/dashboard",
+    "src/a_token_monitor/redact",
+    "src/a_token_monitor/cli/redact.py",
 ]
 follow_imports = "silent"
 warn_unused_ignores = true

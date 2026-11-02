@@ -25,6 +25,7 @@ __PAGE_STYLES__  </style>
     <nav>
       <a class="sidebar-link active" href="#scan-dirs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg><span>扫描目录</span></a>
       <a class="sidebar-link" href="#history-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="8"/></svg><span>历史数据</span></a>
+      <a class="sidebar-link" href="#redact-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>密钥脱敏</span></a>
     </nav>
     <div class="sidebar-bottom">
       <div class="sidebar-foot">修改立即生效 · 只记录元数据<span class="sidebar-version">· v__VERSION__</span></div>
@@ -44,7 +45,7 @@ __THEME_TOGGLE__
       <div>
         <div class="eyebrow">Settings</div>
         <h1>设置</h1>
-        <p class="hero-description">Dashboard 的在线设置项。当前包含扫描目录管理和历史数据管理；之后的设置项会以平级子块追加到本页。</p>
+        <p class="hero-description">Dashboard 的在线设置项。当前包含扫描目录、历史数据和密钥脱敏；之后的设置项会以平级子块追加到本页。</p>
       </div>
     </section>
 
@@ -66,6 +67,14 @@ __THEME_TOGGLE__
         <div id="history-content"><div class="empty-state"><span class="empty-title">正在读取历史数据状态…</span></div></div>
         <div id="history-preview-content"></div>
         <div id="history-result"></div>
+      </section>
+      <section id="redact-settings" class="panel settings-block">
+        <div class="panel-heading">
+          <div><div class="section-kicker">Secret redaction</div><h2>密钥脱敏</h2><p class="section-description">发给模型前把密钥换成占位符。每个 agent 可选 hook 或代理；改 agent 配置前自动备份，重启 agent 后生效。</p></div>
+          <div class="section-meta"><span class="section-count" id="redact-count">等待加载</span></div>
+        </div>
+        <div id="redact-messages"></div>
+        <div id="redact-content"><div class="empty-state"><span class="empty-title">正在读取脱敏设置…</span></div></div>
       </section>
     </div>
   </main>

@@ -435,6 +435,30 @@ class PageSubstitutionTests(unittest.TestCase):
         )
 
 
+class EnglishScriptSyntaxTests(unittest.TestCase):
+    """英文替换不能把页面脚本改坏（例如译文里的撇号截断了单引号字符串）。"""
+
+    def test_english_page_scripts_parse(self) -> None:
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("没有 node，跳过脚本语法检查")
+        from a_token_monitor.dashboard import _DASHBOARD_HTML, _SETTINGS_HTML
+
+        for name, page in (("dashboard", _DASHBOARD_HTML), ("settings", _SETTINGS_HTML)):
+            english = i18n.substitute(page, "en")
+            script = english[english.rindex("<script>") + len("<script>"): english.rindex("</script>")]
+            with tempfile.TemporaryDirectory() as directory, self.subTest(page=name):
+                path = Path(directory) / f"{name}.js"
+                path.write_text(script, encoding="utf-8")
+                result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr[-600:])
+
+
 class EnglishCompletenessTests(unittest.TestCase):
     """英文目录补齐后才启用：英文页面里不允许出现中文。"""
 

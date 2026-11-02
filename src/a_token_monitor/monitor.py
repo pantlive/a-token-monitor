@@ -74,6 +74,9 @@ class MonitorConfig:
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
     alert_context_content: bool = False
+    # 中文注释：daemon 同时运行发给模型前的脱敏代理（redact proxy）。
+    redact_proxy: bool = False
+    redact_proxy_port: int = 8790
     # 中文注释：版本/安装残留默认可在网页清理；--no-package-cleanup 可关掉。
     allow_package_cleanup: bool = True
     budget_usd: float | None = None
@@ -115,6 +118,8 @@ class MonitorConfig:
             raise ValueError("dashboard_host 不能为空")
         if not 0 <= self.dashboard_port <= 65535:
             raise ValueError("dashboard_port 必须在 0 到 65535 之间")
+        if not 0 <= self.redact_proxy_port <= 65535:
+            raise ValueError("redact_proxy_port 必须在 0 到 65535 之间")
         if self.alert_context_content and self.dashboard_host not in {
             "127.0.0.1", "::1", "localhost",
         }:

@@ -1,2 +1,9 @@
 
     .settings-block { scroll-margin-top: 88px; }
+    .field textarea { min-width: 208px; min-height: 76px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); font: inherit; font-family: var(--mono, ui-monospace, monospace); font-size: 12px; resize: vertical; }
+    .field textarea:focus { border-color: var(--cyan); outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+    .field.full { flex-basis: 100%; }
+    .field.check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-strong); font-size: 12px; cursor: pointer; }
+    .field.check input { min-width: 0; width: 14px; height: 14px; margin: 0; padding: 0; accent-color: var(--cyan); }
+    .redact-rules { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; }
+    .redact-output { margin: 0; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); white-space: pre-wrap; word-break: break-all; font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }

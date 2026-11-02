@@ -40,6 +40,10 @@ from .parser import (
     _localize_parser,
     build_parser,
 )
+from .redact import (
+    InstallError,
+    _run_redact,
+)
 from .quota import (
     _show_quota,
 )
@@ -110,6 +114,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return _show_update(args)
     if args.command == "service":
         return _manage_service(args)
+    if args.command == "redact":
+        return _run_redact(args)
     if args.command == "daemon":
         return _monitor(args).run()
     parser.error(f"未知命令: {args.command}")
@@ -139,6 +145,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         AlertStoreError,
         AppServerError,
         HousekeepingError,
+        InstallError,
         OSError,
         RegistryError,
         ServiceError,

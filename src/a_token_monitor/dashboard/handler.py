@@ -28,6 +28,7 @@ from ..housekeeping import (
 from ..health import HealthTracker, sanitize_error
 from ..packages import clean_release_entries, scan_release_leftovers
 from ..providers import ProviderHomes, home_keys
+from ..redact.control import RedactControlError, RedactController
 from ..registry import RegistryError
 from ..retention import HistoryDataManager, RetentionController, RetentionError
 from ..scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
@@ -106,6 +107,7 @@ class _DashboardContext:
     health: HealthTracker | None = None
     history: HistoryDataManager | None = None
     retention: RetentionController | None = None
+    redact: RedactController | None = None
     state_cache_lock: Lock = field(default_factory=Lock, repr=False)
     state_cache: dict[str, Any] = field(default_factory=dict, repr=False)
     packages_lock: Lock = field(default_factory=Lock, repr=False)
@@ -229,6 +231,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/insights": "_get_insights",
         "/api/update": "_get_update",
         "/api/packages": "_get_packages",
+        "/api/redact": "_get_redact",
     }
     _HEAD_ROUTES: ClassVar[dict[str, str]] = {
         "/": "_head_dashboard_page",
@@ -245,6 +248,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/insights": "_head_insights",
         "/api/update": "_head_update",
         "/api/packages": "_head_packages",
+        "/api/redact": "_head_redact",
     }
     _POST_ROUTES: ClassVar[dict[str, str]] = {
         "/api/alerts": "_post_alerts",
@@ -253,6 +257,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/history": "_post_history",
         "/api/update": "_post_update",
         "/api/packages": "_post_packages",
+        "/api/redact": "_post_redact",
     }
 
     def do_GET(self) -> None:
@@ -754,6 +759,59 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             include_body=False,
         )
 
+
+    def _get_redact(self) -> None:
+        """GET /api/redact：各 agent 的脱敏方式、代理运行状态与规则配置。"""
+
+        controller = self.context.redact
+        if controller is None:
+            self._send_json(status=200, payload={"updated_at": time.time(), "available": False})
+            return
+        self._send_json(
+            status=200,
+            payload={"updated_at": time.time(), **controller.snapshot()},
+        )
+
+    def _head_redact(self) -> None:
+        """HEAD /api/redact：只回响应头。"""
+
+        self._send_json(
+            status=200,
+            payload={"updated_at": time.time(), "available": self.context.redact is not None},
+            include_body=False,
+        )
+
+    def _post_redact(self) -> None:
+        """POST /api/redact：切换 hook / 代理、热启停代理、修改规则与上游、测试规则。"""
+
+        controller = self.context.redact
+        if controller is None:
+            self._send_json(status=503, payload={"error": "redact_unavailable"})
+            return
+        try:
+            body = self._read_json_body()
+        except AlertStoreError as error:
+            self._send_json(
+                status=400,
+                payload={"error": "invalid_redact_action", "message": str(error)},
+            )
+            return
+        try:
+            payload = controller.apply(body)
+        except RedactControlError as error:
+            status = 403 if not controller.writable and body.get("action") != "scan" else 400
+            self._send_json(
+                status=status,
+                payload={"error": "invalid_redact_action", "message": str(error)},
+            )
+            return
+        except OSError as error:
+            self._send_json(
+                status=500,
+                payload={"error": "redact_write_failed", "message": sanitize_error(error)},
+            )
+            return
+        self._send_json(status=200, payload={"updated_at": time.time(), **payload})
 
     def _head_scan_dirs(self) -> None:
         """HEAD /api/scan-dirs：只回响应头，不做实际查询。"""
@@ -1529,6 +1587,7 @@ def _make_handler(
     retention: RetentionController | None = None,
     updates: UpdateChecker | None = None,
     allow_package_cleanup: bool = False,
+    redact: RedactController | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """为一个 Dashboard 服务创建绑定了依赖的请求处理器类型。"""
 
@@ -1551,6 +1610,7 @@ def _make_handler(
         health=health,
         history=history,
         retention=retention,
+        redact=redact,
     )
     return type(
         "DashboardRequestHandler",

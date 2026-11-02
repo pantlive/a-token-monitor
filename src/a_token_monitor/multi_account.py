@@ -31,6 +31,7 @@ from .providers import (
     home_providers,
     resolve_provider_homes,
 )
+from .redact.control import RedactController, dashboard_writable
 from .registry import MultiSessionRegistry
 from .retention import HistoryDataManager, RetentionController
 from .scan_dirs import ScanDirsController
@@ -184,6 +185,7 @@ class MultiAccountMonitor:
         self._dashboard_aggregator: UsageAggregator | None = None
         self._index_thread: threading.Thread | None = None
         self._dashboard: DashboardServer | None = None
+        self._redact: RedactController | None = None
         self._stop_event = threading.Event()
         self._scan_lock = threading.Lock()
         self._started = False
@@ -650,6 +652,10 @@ class MultiAccountMonitor:
         self._dashboard_aggregator = None
         if dashboard is not None:
             dashboard.close()
+        redact = self._redact
+        self._redact = None
+        if redact is not None:
+            redact.close()
         for item in self.account_monitors:
             item.monitor.close()
         self._started = False
@@ -667,6 +673,16 @@ class MultiAccountMonitor:
             with lock_store.lock():
                 if self.scan_dirs_controller is not None:
                     self.scan_dirs_controller.reload_callback = self.apply_scan_dirs
+                # 中文注释：脱敏代理由控制器管理，设置页可以在运行中启停；
+                # Web 配置优先于 --redact-proxy。
+                self._redact = RedactController(
+                    self.state_dir,
+                    cli_proxy=self.config.redact_proxy,
+                    cli_port=self.config.redact_proxy_port,
+                    writable=dashboard_writable(self.config.dashboard_host),
+                    logger=self.logger,
+                )
+                self._redact.start()
                 if self.config.dashboard:
                     usage_aggregator = UsageAggregator(
                         cache_path=self.state_dir / "usage-index.sqlite3",
@@ -698,6 +714,7 @@ class MultiAccountMonitor:
                         retention=self.retention_controller,
                         # 中文注释：版本更新检查与 CLI 共用状态目录缓存。
                         state_dir=self.state_dir,
+                        redact=self._redact,
                     )
                     self._dashboard.start()
                     host, port = self._dashboard.address

@@ -562,6 +562,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="按已保存配置在前台运行（供 systemd / launchd 调用）",
     )
 
+    from .redact import add_redact_parser
+
+    add_redact_parser(subparsers, shared_options, _port)
+
     return parser
 
 
@@ -611,6 +615,17 @@ def _add_daemon_options(parser: argparse.ArgumentParser) -> None:
         "--alert-context-content",
         action="store_true",
         help="显示脱敏后的告警内容摘要（仅允许本机监听地址）",
+    )
+    parser.add_argument(
+        "--redact-proxy",
+        action="store_true",
+        help="同时运行脱敏代理（默认 127.0.0.1:8790，见 redact install）",
+    )
+    parser.add_argument(
+        "--redact-proxy-port",
+        type=_port,
+        default=8790,
+        help="脱敏代理端口（默认: 8790）",
     )
     parser.add_argument(
         "--no-package-cleanup",
