@@ -1485,6 +1485,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(_session_usage_note({}), "")
         self.assertEqual(_session_usage_note(None), "")
 
+    def test_session_context_warn_default_is_compact(self) -> None:
+        """帮助里的 token 默认值也按 K/M/B 显示，不写六位整数。"""
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit):
+                main(["sessions", "--help"])
+        output = buffer.getvalue()
+        self.assertIn("200.0K", output)
+        self.assertNotIn("200000", output)
+
     def test_service_install_config_without_codex(self) -> None:
         """没有 Codex CLI/CODEX_HOME 也能生成后台服务配置。"""
 

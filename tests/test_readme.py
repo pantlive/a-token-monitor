@@ -121,6 +121,13 @@ class ReadmeBilingualTest(unittest.TestCase):
             "中英两版的命令行示例已经不一致：请让英文版逐字保留同一条命令",
         )
 
+    def test_token_default_is_compact(self):
+        """默认的上下文 token 阈值在文档里也用 K/M/B 显示。"""
+
+        for text in (self.chinese, self.english):
+            self.assertIn("| `--session-context-warn-tokens` | 200.0K |", text)
+            self.assertNotIn("| `--session-context-warn-tokens` | 200000 |", text)
+
     def test_tables_stay_in_step(self):
         """表格最容易一边改了另一边忘记：行数要一致，provider 表首列要逐一对齐。"""
 

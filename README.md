@@ -255,7 +255,7 @@ sidebar. Pass `--no-update-check` (or set
 | `--upload-window-warn-mb` / `--upload-window-alert-mb` | 64 / 256 | Warning / alert threshold for MiB accumulated over 5 minutes |
 | `--disk-warn-gb` / `--disk-total-warn-gb` | 5 / 10 | Disk reminder thresholds for a single directory / all directories (GiB) |
 | `--session-turn-warn` | 100 | Suggest a new session once a session reaches this many turns |
-| `--session-context-warn-tokens` | 200000 | Suggest a new session once the latest context reaches this many tokens |
+| `--session-context-warn-tokens` | 200.0K | Suggest a new session once the latest context reaches this many tokens |
 | `--usage-retention-days` / `--session-retention-days` | 90 / 30 | Retention days for the usage index / finished session history (editable in the settings page) |
 | `--alert-retention-days` | 30 | Retention days for traffic alerts |
 | `--lang en` / `--lang zh` | auto | Force the CLI and Dashboard language |
