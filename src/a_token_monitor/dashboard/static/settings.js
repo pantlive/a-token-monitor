@@ -287,6 +287,37 @@
   const redactSourceLabel = (source) => ({ web: 'Web 配置', cli: '命令行' })[source] || source || '未知';
   const redactLines = (value) => (Array.isArray(value) ? value : []).join('\n');
   const redactSplit = (value) => String(value || '').split('\n').map((item) => item.trim()).filter(Boolean);
+  const formatCount = (value) => Number(value || 0).toLocaleString();
+  const redactChannelLabel = { prompt: '提示词', tool_output: '工具输出', request: '代理请求' };
+  const redactActionLabel = { block: '已阻断', warn: '仅提醒', redact: '已脱敏' };
+  const redactActionClass = { block: 'danger', warn: 'warn', redact: 'ok' };
+  const redactTimeline = (events) => {
+    // 中文注释：按本地日期分组，表格本身就是时间轴；同一天只显示一次日期。
+    let lastDay = '';
+    return events.map((event) => {
+      const at = Number(event.at || 0);
+      const moment = at > 0 ? new Date(at * 1000) : null;
+      const day = moment ? moment.toLocaleDateString() : '未知';
+      const time = moment ? moment.toLocaleTimeString() : '—';
+      const dayRow = day === lastDay ? '' : `<tr class="redact-day"><td colspan="7">${escapeHtml(day)}</td></tr>`;
+      lastDay = day;
+      const action = String(event.action || '');
+      const channel = String(event.channel || '');
+      const kinds = Object.entries(event.kinds || {})
+        .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))
+        .map(([kind, count]) => `${kind}×${count}`)
+        .join(', ');
+      return `${dayRow}<tr>
+        <td class="mono">${escapeHtml(time)}</td>
+        <td>${escapeHtml(event.agent || '未知')}<div class="cell-sub">${escapeHtml(redactChannelLabel[channel] || channel || '未知')}</div></td>
+        <td><span class="pill ${redactActionClass[action] || 'other'}">${escapeHtml(redactActionLabel[action] || action || '未知')}</span></td>
+        <td class="mono">${formatCount(event.findings)}</td>
+        <td class="mono">${escapeHtml(formatDataSize(event.secret_bytes || 0))}</td>
+        <td class="mono">${escapeHtml(formatDataSize(event.payload_bytes || 0))}</td>
+        <td class="mono">${escapeHtml(kinds || '—')}</td>
+      </tr>`;
+    }).join('');
+  };
   const renderRedactMessages = (messages, error) => {
     const box = document.getElementById('redact-messages');
     if (!box) return;
@@ -314,7 +345,9 @@
     const agents = Array.isArray(payload.agents) ? payload.agents : [];
     const config = payload.config || {};
     const active = agents.filter((agent) => agent.mode !== 'off').length;
-    if (countLabel) countLabel.textContent = `${active} / ${agents.length} ${'个 agent 已启用'} · ${proxy.running ? '代理运行中' : '代理未运行'}`;
+    const stats = payload.stats || {};
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    if (countLabel) countLabel.textContent = `${active} / ${agents.length} ${'个 agent 已启用'} · ${proxy.running ? '代理运行中' : '代理未运行'} · ${'已拦截'} ${formatCount(stats.events)} ${'次'}`;
     const proxyPill = proxy.running
       ? '<span class="pill ok">运行中</span>'
       : proxy.enabled ? '<span class="pill danger">启动失败</span>' : '<span class="pill other">未运行</span>';
@@ -346,8 +379,21 @@
     }).join('');
     const extra = (config.extra_patterns || []).map((item) => `${item.name}=${item.pattern}`).join('\n');
     const configError = payload.config_error ? `<div class="usage-note">${'现有规则配置有误'}: ${escapeHtml(payload.config_error)}</div>` : '';
+    const blockedEvents = Number(stats.blocked_events || 0);
+    const statsHtml = `<div class="redact-stats">
+      <div class="redact-stat"><div class="redact-stat-label">拦下的敏感数据</div><div class="redact-stat-value">${escapeHtml(formatDataSize(stats.secret_bytes || 0))}</div><div class="redact-stat-foot">${formatCount(stats.findings)} 处 · ${formatCount(stats.events)} 次脱敏事件</div></div>
+      <div class="redact-stat"><div class="redact-stat-label">已阻断提示词</div><div class="redact-stat-value ${blockedEvents ? 'danger' : ''}">${formatCount(blockedEvents)} 次</div><div class="redact-stat-foot">${escapeHtml(formatDataSize(stats.blocked_bytes || 0))} 没有发给模型</div></div>
+      <div class="redact-stat"><div class="redact-stat-label">扫描数据</div><div class="redact-stat-value">${escapeHtml(formatDataSize(stats.payload_bytes || 0))}</div><div class="redact-stat-foot">脱敏 ${formatCount(stats.redacted_events)} 次 · 提醒 ${formatCount(stats.warned_events)} 次</div></div>
+    </div>`;
+    const timelineHtml = events.length
+      ? `<div class="table-wrap redact-timeline"><table class="tight"><thead><tr><th>时间</th><th>来源</th><th>动作</th><th>命中</th><th>敏感数据</th><th>扫描数据</th><th>规则</th></tr></thead><tbody>${redactTimeline(events)}</tbody></table></div>`
+      : '<div class="empty-state"><span class="empty-title">还没有拦截记录</span><span class="empty-hint">hook 或代理命中密钥后会写在这里；只记录元数据，不保存原文。</span></div>';
     container.innerHTML = `
       ${readOnlyNote}
+      <div class="account-subtitle"><span>拦截记录</span><span class="pill other">最近 ${formatCount(events.length)} 条</span></div>
+      <div class="usage-note">命中可疑密钥的事件按时间轴列在下方；累计数字来自本地元数据，这里显示最近 100 条。日志只记录元数据，不保存命中的原值或上下文。</div>
+      ${statsHtml}
+      ${timelineHtml}
       <div class="account-subtitle"><span>本地代理</span>${proxyPill}</div>
       <div class="criteria-row">
         <label class="field check"><input type="checkbox" id="redact-proxy-enabled"${proxy.enabled ? ' checked' : ''}${disabled}><span>随 daemon 运行代理</span></label>

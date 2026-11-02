@@ -561,6 +561,9 @@ a-token-monitor redact uninstall
   signed and has to be sent back unchanged.
 - **Local logs still hold the original**: each agent writes its own session log before redaction,
   so the original text stays on this machine.
+- **Interception log**: the Dashboard settings page shows the total sensitive data caught, the
+  number of blocked prompts, and a timeline table of the latest 100 interception events. Only time,
+  source, rule kinds/counts and byte sizes are stored; values and context are never written.
 - **Rules**: built-in rules cover OpenAI / Anthropic / xAI / GitHub / GitLab / AWS / Google / Slack /
   Stripe / npm / Hugging Face keys, private key blocks, JWTs, `Bearer` tokens, passwords in URLs and
   assignments such as `password=...`. Values of environment variables whose names contain `TOKEN`,
@@ -609,7 +612,7 @@ Uninstalling the service never deletes monitoring data. Files in the state direc
 | `scan-dirs.json` | Web scan-directory overrides saved from the settings page |
 | `settings.json` | Web retention overrides saved from the settings page |
 | `archives/` | Session archives: `sessions-*.tar.gz` (legacy `codex-sessions-*` archives still restore) plus `.manifest.json` |
-| `redact/` | Redaction: `config.json` rules, `web.json` proxy settings from the settings page, `key` placeholder key, `vault.json` placeholder table, `backups/` agent config backups |
+| `redact/` | Redaction: `config.json` rules, `web.json` proxy settings from the settings page, `key` placeholder key, `vault.json` placeholder table, `events.jsonl` / `stats.json` interception log and totals, `backups/` agent config backups |
 
 Besides pages and read-only endpoints, the Dashboard accepts only a few write endpoints
 (`POST /api/alerts`, `POST /api/housekeeping`, and the settings page's scan-directory and

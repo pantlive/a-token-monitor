@@ -45,6 +45,8 @@ _CONFIG_FIELDS = (
     "vault_ttl_days",
 )
 _SCAN_LIMIT = 20000
+# 中文注释：设置页时间轴只展示最近 100 条，累计值来自 stats.json。
+_EVENT_LIMIT = 100
 
 
 class RedactControlError(Exception):
@@ -182,6 +184,7 @@ class RedactController:
                     "proxy_url": proxy_url(key, port),
                 }
             )
+        history = self.store.events.snapshot(limit=_EVENT_LIMIT)
         return {
             "available": True,
             "writable": self.writable,
@@ -206,6 +209,9 @@ class RedactController:
             "config_error": config_error,
             "rules": list(RULE_NAMES),
             "default_disabled_rules": list(default_disabled_rules()),
+            # 中文注释：累计拦截量与最近事件用同一份元数据，时间轴按 at 倒序。
+            "stats": history["stats"],
+            "events": history["events"],
         }
 
     # ----- 写操作 -----

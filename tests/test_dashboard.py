@@ -5293,6 +5293,16 @@ class HistoryDashboardTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "invalid_history_action")
 
+    def test_settings_page_contains_redact_interception_timeline(self) -> None:
+        self.assertIn('id="redact-settings"', _SETTINGS_HTML)
+        self.assertIn("拦截记录", _SETTINGS_HTML)
+        self.assertIn("拦下的敏感数据", _SETTINGS_HTML)
+        self.assertIn("redactTimeline", _SETTINGS_HTML)
+        self.assertIn("redact-stats", _SETTINGS_HTML)
+        # 设置页从 /api/redact 的 stats / events 字段取数。
+        self.assertIn("payload.stats", _SETTINGS_HTML)
+        self.assertIn("payload.events", _SETTINGS_HTML)
+
     def test_settings_page_contains_history_section(self) -> None:
         self.assertIn('id="history-settings"', _SETTINGS_HTML)
         self.assertIn('id="history-content"', _SETTINGS_HTML)

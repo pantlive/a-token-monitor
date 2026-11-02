@@ -7,3 +7,12 @@
     .field.check input { min-width: 0; width: 14px; height: 14px; margin: 0; padding: 0; accent-color: var(--cyan); }
     .redact-rules { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; }
     .redact-output { margin: 0; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); white-space: pre-wrap; word-break: break-all; font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+    .redact-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; margin: 0 0 14px; }
+    .redact-stat { padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); }
+    .redact-stat-label { color: var(--muted); font-size: 11px; }
+    .redact-stat-value { margin-top: 3px; color: var(--text); font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
+    .redact-stat-value.danger { color: var(--red); }
+    .redact-stat-foot { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .redact-timeline { margin-bottom: 14px; }
+    .redact-timeline table { min-width: 900px; }
+    .redact-timeline tr.redact-day td { padding: 12px 8px 5px; border-bottom: 0; color: var(--muted); background: transparent; font-size: 11px; font-weight: 700; letter-spacing: .06em; }

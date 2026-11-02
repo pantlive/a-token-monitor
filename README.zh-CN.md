@@ -482,6 +482,8 @@ a-token-monitor redact uninstall
 - **还原**：占位符与原值的对照表保存在 `redact/vault.json`（0600），默认保留 30 天。
   思考过程（thinking / reasoning）不还原，它带签名，必须原样回传。
 - **本地日志仍有原文**：各 agent 自己的会话日志在脱敏之前写入，原文还在本机。
+- **拦截记录**：Dashboard 设置页显示累计拦下的敏感数据量、阻断的提示词次数，以及最近 100 条拦截
+  事件的时间轴表格。日志只记录时间、来源、命中类别/数量和字节数，不保存原值或上下文。
 - **规则**：内置 OpenAI / Anthropic / xAI / GitHub / GitLab / AWS / Google / Slack / Stripe / npm /
   Hugging Face 密钥、私钥块、JWT、`Bearer`、URL 里的密码和 `password=...` 这类赋值；另外会精确匹配
   名字含 `TOKEN`、`SECRET`、`API_KEY`、`PASSWORD` 的环境变量的值。个人信息类规则覆盖邮箱、手机号、
@@ -524,7 +526,7 @@ dsh 没有能改写内容的 hook，只能走代理：用 `redact upstream set <
 | `scan-dirs.json` | 设置页保存的 Web 扫描目录覆盖配置 |
 | `settings.json` | 设置页保存的 Web 保留天数覆盖配置 |
 | `archives/` | 会话归档：`sessions-*.tar.gz`（旧命名 `codex-sessions-*` 仍可恢复）及 `.manifest.json` |
-| `redact/` | 脱敏：`config.json` 规则、`web.json` 设置页保存的代理设置、`key` 占位符密钥、`vault.json` 占位符对照表、`backups/` 改动前的 agent 配置备份 |
+| `redact/` | 脱敏：`config.json` 规则、`web.json` 设置页保存的代理设置、`key` 占位符密钥、`vault.json` 占位符对照表、`events.jsonl` / `stats.json` 拦截记录与累计统计、`backups/` 改动前的 agent 配置备份 |
 
 Dashboard 除页面和只读接口外，只额外接受少数写接口（`POST /api/alerts`、
 `POST /api/housekeeping`、设置页的扫描目录与历史数据接口），都要求
