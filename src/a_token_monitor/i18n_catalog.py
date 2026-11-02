@@ -877,6 +877,7 @@ EN: dict[str, str] = {
     'Dashboard 的在线设置项。当前包含扫描目录、历史数据和密钥脱敏；之后的设置项会以平级子块追加到本页。': 'Online settings for the Dashboard: scan directories, history data and secret redaction. Future settings will be added to this page as sibling blocks.',
     '正在读取脱敏设置…': 'Loading redaction settings…',
     '关闭': 'Off',
+    '默认关闭': 'off by default',
     '代理': 'Proxy',
     'hook + 代理': 'hook + proxy',
     '该运行模式不支持在线管理脱敏': 'Redaction cannot be managed online in this mode',

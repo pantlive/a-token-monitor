@@ -297,11 +297,17 @@ def _suffix_offset(path: Path, start: float | None, parse_ts: _TsFn) -> int:
 
 
 def _excerpt(value: object, limit: int = _EXCERPT_CHARS) -> str:
-    """脱敏常见凭据后生成摘要；先脱敏再截断，避免暴露凭据前缀。"""
+    """脱敏常见凭据与个人信息后生成摘要；先脱敏再截断，避免暴露前缀。"""
+
+    from ..redact.rules import redact_text_plain
 
     text = str(value or "")
-    text = re.sub(r"(?i)\bBearer\s+[\w.~+/=-]+", "Bearer [REDACTED]", text)
-    text = re.sub(r"\bsk-[\w-]{8,}", "[REDACTED]", text)
+    # 中文注释：内置规则（密钥、邮箱、手机号、身份证号、银行卡号、SSN、护照、
+    # 生日、IBAN、MAC、序列号、公网 IP 等）先整体走一遍；告警摘要是本地展示，
+    # 不写密钥表、不还原。
+    text = redact_text_plain(text)
+    # 中文注释：低熵的 key=value（例如 token=private-value）内置规则会放过，
+    # 摘要在规则之外再兜一层赋值脱敏，保持历史行为。
     secret = r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|token|authorization)"
     text = re.sub(
         rf"(?i)(\b{secret}\b[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}}&]+)",
@@ -309,6 +315,9 @@ def _excerpt(value: object, limit: int = _EXCERPT_CHARS) -> str:
         text,
     )
     text = re.sub(rf"(?i)(--{secret}\s+)(\S+)", r"\1[REDACTED]", text)
+    # 中文注释：短 Bearer / sk- 前缀也兜一层（内置规则要求 20 字符以上才替换）。
+    text = re.sub(r"(?i)\bBearer\s+[\w.~+/=-]{6,}", "Bearer [REDACTED]", text)
+    text = re.sub(r"\bsk-[\w-]{6,}", "[REDACTED]", text)
     text = re.sub(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[REDACTED]@", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= limit:
