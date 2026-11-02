@@ -336,7 +336,7 @@
       </tr>`).join('');
     const defaultOff = new Set(payload.default_disabled_rules || []);
     const ruleBoxes = (Array.isArray(payload.rules) ? payload.rules : []).map((rule) => {
-      // 中文注释：默认关闭的规则（公网 IP）复选框默认不勾选；enabled_rules
+      // 中文注释：默认关闭的规则（公网 IP、主目录用户名）复选框默认不勾选；enabled_rules
       // 里显式点名的规则覆盖默认状态。
       const enabled = (config.enabled_rules || []).includes(rule);
       const off = (config.disabled_rules || []).includes(rule);

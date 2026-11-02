@@ -48,9 +48,10 @@ _SECRET_ENV_NAME = re.compile(
 )
 _ENV_VALUE_SKIP = re.compile(r"^(?:true|false|yes|no|on|off|none|null|\d+)$", re.IGNORECASE)
 
-# 中文注释：公网 IP 规则默认关闭（规则命中率高、日志里几乎都有），需要时在
-# redact/config.json 的 enabled_rules 里显式开启，或按 allow_patterns 白名单放行。
-DEFAULT_OFF_RULES: frozenset[str] = frozenset({"public_ipv4", "public_ipv6"})
+# 中文注释：这些规则默认关闭，需要时在 redact/config.json 的 enabled_rules 里显式开启，
+# 或按 allow_patterns 白名单放行：公网 IP 在日志和配置里几乎到处都是；主目录用户名
+# 则因为智能体每次请求都会带上所在目录。
+DEFAULT_OFF_RULES: frozenset[str] = frozenset({"home_username", "public_ipv4", "public_ipv6"})
 
 
 @dataclass(frozen=True)
@@ -146,8 +147,12 @@ def _china_id_valid(value: str) -> bool:
 
 
 def _birthday_valid(value: str) -> bool:
-    """生日值：年月日数字都落在合理范围。"""
+    """生日值：年月日数字都落在合理范围；年份在后时月、日的顺序都接受。"""
 
+    match = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", value)
+    if match is not None:
+        first, second, year_text = match.groups()
+        return _birthday_valid(f"{year_text}-{first}-{second}") or _birthday_valid(f"{year_text}-{second}-{first}")
     match = re.fullmatch(r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})日?", value)
     if match is None:
         return False
@@ -264,7 +269,7 @@ BUILTIN_RULES: tuple[Rule, ...] = (
     # ----- 个人信息 -----
     _rule(
         "ssh_target",
-        r"(?i)\b(?:ssh|scp|sftp|rsync)\s+([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)*)",
+        r"(?i)\b(?:ssh|scp|sftp|rsync)(?:[ \t]+[^\s@]+)*[ \t]+(?!git@)([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)*)",
         1,
     ),
     _rule(
@@ -272,11 +277,12 @@ BUILTIN_RULES: tuple[Rule, ...] = (
         r"(?i)(?<![A-Za-z0-9._\-])(?!git@)([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)+(?![A-Za-z0-9\-]))",
         1,
     ),
-    _rule("phone_number", r"(?<![0-9+])(?:\+?86[\s\-]?)?1[3-9][0-9]{9}(?![0-9])"),
+    _rule("phone_number", r"(?<![0-9+])(?:\+?86[\s\-]?)?1[3-9][0-9](?:[ \-]?[0-9]{4}){2}(?![0-9])"),
     _rule(
         "bank_card",
-        r"(?<!\d)[0-9](?:[0-9 \-]{14,18})[0-9](?!\d)",
+        r"(?<!\d)[0-9](?:[ \-]?[0-9]){15,18}(?!\d)",
         validate=_luhn_valid,
+        trim_ws=True,
     ),
     _rule(
         "china_id",
@@ -290,12 +296,13 @@ BUILTIN_RULES: tuple[Rule, ...] = (
     ),
     _rule(
         "passport",
-        r"(?i)(?:\bpassport\b|护照|パスポ一卜)\s*(?:number|no\.?|番号|号)?\s*[:：]?\s*([A-Za-z]{1,3}[0-9]{5,9}|\d{6,9})",
+        r"(?i)(?:\bpassport\b|护照|パスポート|パスポ一卜)\s*(?:number|no\.?|#|番号|号码|号)?\s*[:：]?\s*([A-Za-z]{1,3}[0-9]{5,9}|\d{6,9})(?![A-Za-z0-9])",
         1,
+        min_length=6,
     ),
     _rule(
         "birthday",
-        r"(?i)(?:生日|出生年月日|出生日期|出生|birthday|DOB|born)\s*(?:日期|年月日)?\s*[:：]?\s*(\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?)",
+        r"(?i)(?:生日|出生年月日|出生日期|出生|\bbirthday\b|\bDOB\b|\bborn\b)\s*(?:日期|年月日|于|on\b)?\s*[:：]?\s*(\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?!\d)",
         1,
         validate=_birthday_valid,
     ),
@@ -308,24 +315,27 @@ BUILTIN_RULES: tuple[Rule, ...] = (
     _rule("mac_address", r"(?i)(?<![0-9A-Fa-f]:)(?<![0-9A-Fa-f-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f](?::|-))"),
     _rule(
         "serial_number",
-        r"(?i)(?:\bS/N\b|\bSN\b|\bSerial\s+(?:No\.?|Number)?\b|\b序列号\b)\s*[:：]?\s*(?=[A-Za-z0-9\-_./]*\d)([A-Za-z0-9][A-Za-z0-9\-_./]{3,31})",
+        r"(?i)(?:\bS/N\b|\bSN\b|\bSerial(?:[\s_\-]*(?:No\.?|Number|#))?(?![A-Za-z])|序列号码?)\s*[:：=]?\s*(?=[A-Za-z0-9\-_./]*\d)([A-Za-z0-9][A-Za-z0-9\-_./]{3,31})",
         1,
+        min_length=4,
     ),
     # ----- 本机身份与公网地址 -----
     _rule(
         "home_username",
-        r"(?i)(?<![A-Za-z0-9_])(?:/home/|/Users/|C:\\Users\\)([A-Za-z0-9][A-Za-z0-9._\-]{1,63})(?=/|\\|\s|$)",
+        r"(?i)(?<![A-Za-z0-9_])(?:/home/|/Users/|C:\\Users\\)([A-Za-z0-9][A-Za-z0-9._\-]{1,63})(?=[/\\\s\x22'`:;,)\]}>]|$)",
         1,
+        min_length=2,
     ),
     _rule(
         "user_at_host",
-        r"(?i)([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)*)(?=:[\w./~\-]*[$#>])",
+        r"(?i)([A-Za-z0-9._\-]{1,64}@[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)*)(?=:[\w./~\-]*[$#>%]|\s+[\w./~\-]+\]?\s*[$#>%](?:\s|$))",
         1,
     ),
     _rule(
         "hostname_line",
         r"(?im)^\s*(?:hostname|user(?:name)?)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._\-]{2,63})",
         1,
+        min_length=3,
     ),
     _rule(
         "public_ipv4",
@@ -345,7 +355,7 @@ RULE_NAMES: tuple[str, ...] = tuple(rule.name for rule in BUILTIN_RULES)
 
 
 def default_disabled_rules() -> tuple[str, ...]:
-    """默认关闭的规则：公网 IP 命中率太高，默认不启用。"""
+    """默认关闭的规则：公网 IP 和主目录用户名命中太频繁，默认不启用。"""
 
     return tuple(name for name in RULE_NAMES if name in DEFAULT_OFF_RULES)
 
@@ -631,8 +641,8 @@ class Redactor:
         self.store = store
         self.config = config if config is not None else store.load_config()
         self._key = store.load_key()
-        # 中文注释：默认关闭的规则（公网 IP）始终先按关闭处理，再由 enabled_rules
-        # 里点名的规则覆盖；否则只启用一条公网 IP 规则时，另一条会被意外打开。
+        # 中文注释：默认关闭的规则始终先按关闭处理，再由 enabled_rules 里点名的规则
+        # 覆盖；否则只启用一条公网 IP 规则时，另一条会被意外打开。
         disabled = set(self.config.disabled_rules) | DEFAULT_OFF_RULES
         disabled -= set(self.config.enabled_rules)
         self._rules: list[Rule] = [rule for rule in BUILTIN_RULES if rule.name not in disabled]
@@ -889,7 +899,7 @@ def redact_text_plain(text: str) -> str:
     """把文本里的敏感值换成 ``[REDACTED]``（不写密钥表、不需要状态目录）。
 
     供告警内容摘要等只展示、不还原的场景使用；规则与 ``Redactor`` 完全一致，
-    但默认关闭的规则（公网 IP）同样默认关闭。
+    默认关闭的规则（公网 IP、主目录用户名）在这里同样关闭。
     """
 
     redactor = Redactor.without_store()

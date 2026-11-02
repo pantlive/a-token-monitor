@@ -29,6 +29,11 @@ from a_token_monitor.redact.streaming import SseRestorer, iter_sse_events, resto
 GITHUB = "ghp_" + "a1B2c3D4e5" * 4
 ANTHROPIC = "sk-ant-api03-" + "Zq9" * 10
 AWS = "AKIA" + "ABCDEFGHIJKLMNOP"
+# 中文注释：合成夹具，集中放在这里并逐行豁免隐私扫描，用例只引用常量。手机号没有官方
+# 保留号段，只能用公开的通用示例号和全 0 尾号；身份证的地区码 999999 不存在，不会撞上真人。
+FAKE_PHONE = "13800138000"  # privacy-allow: 公开的通用示例号码
+FAKE_PHONE_ALT = "18600000000"  # privacy-allow: 合成的全 0 尾号
+FAKE_CHINA_ID = "999999199001010016"  # privacy-allow: 地区码不存在的合成身份证号
 
 
 class _TempState(unittest.TestCase):
@@ -184,16 +189,20 @@ class PersonalInfoRuleTests(_TempState):
         self.assertNotIn("me@example.com", redacted)
         # 中文注释：localhost 不算邮箱域名；URL 里的密码不被 email 抢走。
         self.assertEqual(self.redact("user@localhost"), [])
-        self.assertEqual(self.redact("https://bob:s3cr3t-pass-9@db.example.com/x"), ["url_password"])
+        self.assertEqual(self.redact("https://bob:s3cr3t-pass-9@example.com/x"), ["url_password"])
         # 中文注释：git@github.com 的 SCP 形式不误伤。
         self.assertEqual(self.redact("git clone git@github.com:org/repo.git"), [])
 
     def test_phone_number(self) -> None:
-        text = "tel 13800138000 x"
+        text = f"tel {FAKE_PHONE} x"
         redacted, findings = self.redactor().redact(text)
         self.assertEqual([finding.kind for finding in findings], ["phone_number"])
-        self.assertNotIn("13800138000", redacted)
-        self.assertEqual(self.redact("18612345678"), ["phone_number"])
+        self.assertNotIn(FAKE_PHONE, redacted)
+        self.assertEqual(self.redact(FAKE_PHONE_ALT), ["phone_number"])
+        # 中文注释：3-4-4 分组写法也是手机号。
+        for sep in ("-", " "):
+            grouped = sep.join((FAKE_PHONE[:3], FAKE_PHONE[3:7], FAKE_PHONE[7:]))
+            self.assertEqual(self.redact(f"tel {grouped} x"), ["phone_number"], grouped)
         # 中文注释：非 1[3-9] 开头的 11 位数字不是手机号。
         self.assertEqual(self.redact("126" + "12345678"), [])
 
@@ -205,13 +214,21 @@ class PersonalInfoRuleTests(_TempState):
         # 中文注释：校验位不对的 16 位数字不替换。
         self.assertEqual(self.redact("card " + "4111 1111 1111 1111"[:-1] + "2 ok"), [])
 
+    def test_bank_card_grouped_19_digits_and_trailing_digits(self) -> None:
+        # 中文注释：19 位卡号分组后同样要认。
+        self.assertEqual(self.redact("card 6222 0212 3456 7890 128 ok"), ["bank_card"])
+        # 中文注释：卡号后面跟一组无关数字时只替换卡号，无关数字保留。
+        redacted, findings = self.redactor().redact("card 4111 1111 1111 1111 20 ok")
+        self.assertEqual([finding.kind for finding in findings], ["bank_card"])
+        self.assertTrue(redacted.endswith(" 20 ok"), redacted)
+
     def test_china_id_checksum(self) -> None:
-        idc = "11010519491231002X"
-        redacted, findings = self.redactor().redact(f"id {idc} x")
+        redacted, findings = self.redactor().redact(f"id {FAKE_CHINA_ID} x")
         self.assertEqual([finding.kind for finding in findings], ["china_id"])
-        self.assertNotIn(idc, redacted)
-        # 中文注释：校验码不对不替换。
-        self.assertEqual(self.redact("id " + "11010519491231002X"[:-1] + "Y x"), [])
+        self.assertNotIn(FAKE_CHINA_ID, redacted)
+        # 中文注释：校验码不对不替换（改末位数字，形状仍然合法）。
+        wrong_check = FAKE_CHINA_ID[:-1] + ("1" if FAKE_CHINA_ID[-1] != "1" else "2")
+        self.assertEqual(self.redact(f"id {wrong_check} x"), [])
 
     def test_ssn_only_issued_areas(self) -> None:
         valid = "123-45-6789"
@@ -230,6 +247,10 @@ class PersonalInfoRuleTests(_TempState):
             f"护照：{first}": first,
             f"护照号 {second}": second,
             f"パスポ一卜 {first}": first,
+            f"パスポート {first}": first,
+            f"パスポート番号: {first}": first,
+            f"护照号码：{first}": first,
+            "passport no. 123456": "123456",
         }
         for text, secret in cases.items():
             with self.subTest(text=text):
@@ -238,6 +259,8 @@ class PersonalInfoRuleTests(_TempState):
                 self.assertNotIn(secret, redacted)
         # 中文注释：单独的数字不是护照号。
         self.assertEqual(self.redact(f"my number is {first}"), [])
+        # 中文注释：超长数字不是护照号，不能只替换前面一截。
+        self.assertEqual(self.redact("passport 123456789012"), [])
 
     def test_birthday_only_after_keyword(self) -> None:
         first, second = "1990-01-01", "1985/12/31"
@@ -246,6 +269,10 @@ class PersonalInfoRuleTests(_TempState):
             f"出生日期：{second}": second,
             f"DOB: {first}": first,
             f"born {first}": first,
+            f"born on {first}": first,
+            "出生于1990年1月2日": "1990年1月2日",
+            "DOB: 01/02/1990": "01/02/1990",
+            "DOB 25.12.1990": "25.12.1990",
         }
         for text, secret in cases.items():
             with self.subTest(text=text):
@@ -255,6 +282,8 @@ class PersonalInfoRuleTests(_TempState):
         # 中文注释：单独的日期不动；非法日期不替换。
         self.assertEqual(self.redact("今天是 2024-01-01"), [])
         self.assertEqual(self.redact("生日 1990-13-01"), [])
+        self.assertEqual(self.redact("DOB 13/25/1990"), [])
+        self.assertEqual(self.redact("reborn 1990-01-01"), [])
 
     def test_iban_checksum(self) -> None:
         iban = "DE89 3704 0044 0532 0130 00"
@@ -280,6 +309,12 @@ class PersonalInfoRuleTests(_TempState):
             f"SN: {second}": second,
             f"Serial Number: {first}": first,
             f"序列号：{second}": second,
+            f"Serial: {first}": first,
+            f"Serial No. {first}": first,
+            f"serial_number={first}": first,
+            f"设备序列号 {second}": second,
+            f"序列号{second}": second,
+            "S/N: AB12": "AB12",
         }
         for text, secret in cases.items():
             with self.subTest(text=text):
@@ -289,21 +324,32 @@ class PersonalInfoRuleTests(_TempState):
         # 中文注释：没有 S/N 关键字的编号不替换；纯字母没有数字的也不像序列号。
         self.assertEqual(self.redact(f"order {first}"), [])
         self.assertEqual(self.redact("S/N: ABCDEFGH"), [])
+        self.assertEqual(self.redact("serial port 1234"), [])
+        self.assertEqual(self.redact("serialize 1234"), [])
 
     def test_home_username_in_paths(self) -> None:
-        user = "develuser"
-        cases = {
-            f"/home/{user}/project": user,
-            f"/Users/{user}/app": user,
-            "C:\\Users\\" + user + "\\x": user,
-        }
-        for text, secret in cases.items():
-            with self.subTest(text=text):
-                redacted, findings = self.redactor().redact(text)
-                self.assertEqual([finding.kind for finding in findings], ["home_username"])
-                self.assertNotIn(secret, redacted)
+        red = self.redactor(enabled_rules=("home_username",))
+        for user in ("develuser", "bob"):
+            cases = (
+                f"/home/{user}/project",
+                f"/Users/{user}/app",
+                "C:\\Users\\" + user + "\\x",
+                f'cwd="/home/{user}"',
+            )
+            for text in cases:
+                with self.subTest(text=text):
+                    redacted, findings = red.redact(text)
+                    self.assertEqual([finding.kind for finding in findings], ["home_username"])
+                    self.assertNotIn(user, redacted)
+                    # 中文注释：不足 8 位的用户名也要能从回复里还原。
+                    self.assertEqual(red.restore(redacted), text)
         # 中文注释：/srv/app 不是用户主目录。
-        self.assertEqual(self.redact("/srv/app/data"), [])
+        self.assertEqual([f.kind for f in red.redact("/srv/app/data")[1]], [])
+
+    def test_home_username_is_off_by_default(self) -> None:
+        # 中文注释：智能体每次请求都会带上所在目录，这条规则必须显式开启。
+        text = "/home/develuser/project"
+        self.assertEqual(self.redactor().redact(text), (text, []))
 
     def test_user_at_host_and_ssh(self) -> None:
         login = "develuser" + "@server"
@@ -314,12 +360,33 @@ class PersonalInfoRuleTests(_TempState):
         self.assertEqual([finding.kind for finding in findings], ["ssh_target"])
         self.assertNotIn(login, redacted)
 
+    def test_prompt_variants(self) -> None:
+        login = "alice" + "@box"
+        for text in (f"[{login} ~]$ ls", f"{login} ~ % ls", f"{login}:/srv/app# ls"):
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["user_at_host"])
+                self.assertNotIn(login, redacted)
+
+    def test_ssh_target_after_options(self) -> None:
+        login = "alice" + "@box"
+        for text in (f"ssh -i key.pem {login}", f"ssh -p 22 {login}", f"scp notes.txt {login}:/tmp"):
+            with self.subTest(text=text):
+                redacted, findings = self.redactor().redact(text)
+                self.assertEqual([finding.kind for finding in findings], ["ssh_target"])
+                self.assertNotIn(login, redacted)
+        # 中文注释：git@ 是代码托管地址，不是个人账号。
+        self.assertEqual(self.redact("ssh -T git" + "@github.com"), [])
+
     def test_hostname_and_user_lines(self) -> None:
         user, host = "develuser", "myhost123"
         for text, secret in (
             (f"hostname: {host}", host),
             (f"user = {user}", user),
             (f"  username: {user}", user),
+            # 中文注释：不足 8 位的主机名和用户名同样要替换。
+            ("hostname: myhost", "myhost"),
+            ("user=alice", "alice"),
         ):
             with self.subTest(text=text):
                 redacted, findings = self.redactor().redact(text)
@@ -341,9 +408,7 @@ class PublicIpRuleTests(_TempState):
         self.assertEqual(redacted, text)
 
     def test_enabled_rules_turns_them_on(self) -> None:
-        from a_token_monitor.redact.rules import default_disabled_rules
-
-        ip_rules = tuple(default_disabled_rules())
+        ip_rules = ("public_ipv4", "public_ipv6")
         red = self.redactor(enabled_rules=ip_rules)
         text = "connect 8.8.8.8 and 2606:4700:4700::1111"
         redacted, findings = red.redact(text)
@@ -370,7 +435,7 @@ class PublicIpRuleTests(_TempState):
         red = self.redactor(enabled_rules=tuple(default_disabled_rules()))
         text = (
             "10.0.0.1 127.0.0.1 192.168.1.1 172.16.0.1 169.254.1.1 "
-            "100.64.0.1 203.0.113.5 198.51.100.7 233.252.0.1 "
+            "100.64.0.1 203.0.113.5 198.51.100.7 233.252.0.1 "  # privacy-allow: RFC 5771 文档保留组播地址
             "2001:db8::1 fe80::1 ::1"
         )
         redacted, findings = red.redact(text)
@@ -393,12 +458,13 @@ class PlainRedactTests(unittest.TestCase):
     def test_redacts_without_vault_and_keeps_public_ips_off(self) -> None:
         from a_token_monitor.redact.rules import redact_text_plain
 
-        text = "mail me@example.com tel 13800138000 ip 8.8.8.8"
+        text = f"mail me@example.com tel {FAKE_PHONE} ip 8.8.8.8"
         out = redact_text_plain(text)
         self.assertIn("[REDACTED]", out)
         self.assertNotIn("me@example.com", out)
-        self.assertNotIn("13800138000", out)
-        # 中文注释：公网 IP 默认关闭；不产生任何 vault 占位符。
+        self.assertNotIn(FAKE_PHONE, out)
+        # 中文注释：公网 IP 默认关闭；不产生任何 vault 占位符。主目录用户名同样默认关闭。
+        self.assertIn("/home/develuser/x", redact_text_plain("/home/develuser/x"))
         self.assertIn("8.8.8.8", out)
         self.assertNotIn("[[SECRET:", out)
 

@@ -346,7 +346,7 @@ A separate `/settings` page with three blocks:
   Changing the port also rewrites the proxy URL in the agent configs already using it.
   Changes to agent configs are backed up first and only allowed while the Dashboard listens
   on a loopback address; with `--dashboard-host 0.0.0.0` the block is read-only (rule
-  testing still works). The rules list marks default-off rules (public IPs) and lets you
+  testing still works). The rules list marks default-off rules (public IPs, home-directory usernames) and lets you
   switch them on via `enabled_rules`.
 
 ### Health checks
@@ -569,10 +569,11 @@ a-token-monitor redact uninstall
   (only areas the SSA has actually issued), passport numbers (after the English, Chinese or Japanese
   words for passport), birthdays (after the words for birthday or DOB, or `born`), IBANs (mod-97
   check digits), MAC addresses, serial numbers (after `S/N`, `Serial`, or the Chinese word for serial
-  number), usernames in `/home/`, `/Users/` and `C:\Users\` paths, `user@host` in shell prompts or
-  ssh commands, and `hostname:` / `user:` lines. Public IPs are off by default — nearly every log and
-  config contains IPs, so the hit rate would be too high; enable them explicitly via `enabled_rules`
-  (private, loopback and documentation ranges are never replaced). Tune them in `redact/config.json`:
+  number), `user@host` in shell prompts or ssh commands, and `hostname:` / `user:` lines. Two groups
+  are off by default and can be enabled via `enabled_rules`: usernames in `/home/`, `/Users/` and
+  `C:\Users\` paths (agents send their working directory with every request), and public IPs (nearly
+  every log and config contains them; private, loopback and documentation ranges are never replaced).
+  Tune them in `redact/config.json`:
 
 ```json
 {
@@ -581,7 +582,7 @@ a-token-monitor redact uninstall
   "extra_patterns": [{"name": "corp_id", "pattern": "CORP-[0-9]{8}"}],
   "allow_patterns": ["^AKIAIOSFODNN7EXAMPLE$"],
   "disabled_rules": ["jwt"],
-  "enabled_rules": ["public_ipv4", "public_ipv6"],
+  "enabled_rules": ["home_username", "public_ipv4", "public_ipv6"],
   "prompt_action": "block",
   "restore": true,
   "vault_ttl_days": 30
