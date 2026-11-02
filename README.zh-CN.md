@@ -225,7 +225,7 @@ GitHub API 限流时设置 `GITHUB_TOKEN` 即可提高限额。
 | `--upload-window-warn-mb` / `--upload-window-alert-mb` | 64 / 256 | 5 分钟累计外发 MiB 的黄 / 红告警阈值 |
 | `--disk-warn-gb` / `--disk-total-warn-gb` | 5 / 10 | 单个目录 / 合计占用的磁盘提醒阈值（GiB） |
 | `--session-turn-warn` | 100 | 会话轮数达到该值提示「建议开新会话」 |
-| `--session-context-warn-tokens` | 200000 | 最近一次上下文达到该值提示「建议开新会话」 |
+| `--session-context-warn-tokens` | 200.0K | 最近一次上下文达到该值提示「建议开新会话」 |
 | `--usage-retention-days` / `--session-retention-days` | 90 / 30 | 用量索引 / 已结束会话历史的保留天数（设置页可在线改） |
 | `--alert-retention-days` | 30 | 异常流量告警的保留天数 |
 | `--lang en` / `--lang zh` | 自动 | 显式指定 CLI 与 Dashboard 语言 |

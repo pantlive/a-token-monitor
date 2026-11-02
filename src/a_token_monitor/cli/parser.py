@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ..formatting import format_tokens
 from ..i18n import (
     active_language,
     translate,
@@ -674,8 +675,9 @@ def _add_session_reminder_options(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=DEFAULT_SESSION_CONTEXT_WARN_TOKENS,
         help=(
+            # 中文注释：帮助里的默认值也是 token 数量，和界面一样用 K/M/B 显示。
             "会话最近一次上下文 token 达到该值时提醒切换新会话"
-            f"（默认: {DEFAULT_SESSION_CONTEXT_WARN_TOKENS}）"
+            f"（默认: {format_tokens(DEFAULT_SESSION_CONTEXT_WARN_TOKENS)}）"
         ),
     )
 
