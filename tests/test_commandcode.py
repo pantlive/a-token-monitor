@@ -163,6 +163,13 @@ class CommandCodeHomesTests(unittest.TestCase):
 class CommandCodeAccountTests(unittest.TestCase):
     """验证本地身份读取不会泄露 API Key。"""
 
+    def setUp(self) -> None:
+        # 中文注释：开发机可能为官方 CLI 设置了 COMMAND_CODE_API_KEY；这里先清空，
+        # 让“只读 auth.json”的用例保持隔离，环境变量优先级由单独用例覆盖。
+        self._env = mock.patch.dict(os.environ, {"COMMAND_CODE_API_KEY": ""})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
     def test_reads_identity_without_exposing_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = _make_commandcode_home(Path(temporary_directory))
@@ -192,12 +199,51 @@ class CommandCodeAccountTests(unittest.TestCase):
         self.assertEqual(account.display_name, "command-code")
         self.assertEqual(account.account_key, "profile:command-code")
 
+    def test_environment_key_reports_logged_in_without_auth_file(self) -> None:
+        """官方 CLI 只用 COMMAND_CODE_API_KEY 时，也要认为账号已登录。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = _make_commandcode_home(
+                Path(temporary_directory),
+                api_key=None,
+            )
+            env_key = "user_ENV_KEY_MUST_NOT_LEAK"
+            with mock.patch.dict(
+                os.environ,
+                {"COMMAND_CODE_API_KEY": f"  {env_key}  "},
+            ):
+                account = read_commandcode_account(home)
+
+        self.assertTrue(account.logged_in)
+        self.assertIsNone(account.account_id)
+        self.assertEqual(account.display_name, "command-code")
+        self.assertNotIn(env_key, repr(account))
+
+    def test_blank_environment_key_falls_back_to_auth_file(self) -> None:
+        """环境变量为空或只有空白时按官方 CLI 的行为回退到 auth.json。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = _make_commandcode_home(Path(temporary_directory))
+            with mock.patch.dict(
+                os.environ,
+                {"COMMAND_CODE_API_KEY": "   "},
+            ):
+                account = read_commandcode_account(home)
+
+        self.assertTrue(account.logged_in)
+        self.assertEqual(account.account_id, ACCOUNT_ID)
+        self.assertEqual(account.display_name, "ch1711585919mck1")
+
 
 class CommandCodeQuotaTests(unittest.TestCase):
     """验证官方后台额度接口的请求契约和解析结果。"""
 
     def setUp(self) -> None:
         _clear_quota_cache()
+        # 中文注释：见 CommandCodeAccountTests；额度请求也必须能用环境变量覆盖。
+        self._env = mock.patch.dict(os.environ, {"COMMAND_CODE_API_KEY": ""})
+        self._env.start()
+        self.addCleanup(self._env.stop)
 
     def tearDown(self) -> None:
         _clear_quota_cache()
@@ -372,6 +418,103 @@ class CommandCodeQuotaTests(unittest.TestCase):
         self.assertEqual(snapshot.plan_type, "Teams Pro")
         self.assertIn("orgId=org_123", urls[1])
         self.assertIn("orgId=org_123&since=", urls[3])
+
+    def test_environment_key_takes_precedence_over_auth_file(self) -> None:
+        """cmd 只用环境变量登录时，额度请求也必须带这个 Key。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = _make_commandcode_home(Path(temporary_directory))
+            env_key = "user_ENV_KEY_MUST_NOT_LEAK"
+            authorizations: list[str] = []
+
+            def fake_get(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                authorizations.append(headers["Authorization"])
+                if "whoami" in url:
+                    return 200, {"user": {"userName": "env-user"}}
+                if "/alpha/billing/credits" in url:
+                    return 200, {
+                        "credits": {"monthlyCredits": 10},
+                        "windowLimits": {
+                            "limited": True,
+                            "fiveHour": {
+                                "used": 1,
+                                "cap": 10,
+                                "resetAt": FIVE_HOUR_RESET_MS,
+                            },
+                        },
+                    }
+                if "/alpha/billing/subscriptions" in url:
+                    return 200, {
+                        "data": {
+                            "status": "active",
+                            "planId": "individual-goat",
+                            "currentPeriodEnd": PERIOD_END,
+                        }
+                    }
+                return 200, {"totalCredits": 1, "totalCount": 2}
+
+            with mock.patch.dict(
+                os.environ,
+                {"COMMAND_CODE_API_KEY": f"  {env_key}  "},
+            ):
+                snapshot = read_commandcode_quota(
+                    home,
+                    now=1_789_490_000.0,
+                    http_get_json=fake_get,
+                )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.plan_type, "GOAT")
+        self.assertEqual(
+            authorizations,
+            [f"Bearer {env_key}"] * len(authorizations),
+        )
+        self.assertNotIn(env_key, repr(snapshot))
+        self.assertNotIn(env_key, json.dumps(snapshot.metadata, ensure_ascii=False))
+
+    def test_blank_environment_key_falls_back_to_auth_file(self) -> None:
+        """环境变量只有空白时仍使用 auth.json，避免覆盖已有登录态。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = _make_commandcode_home(Path(temporary_directory))
+            authorizations: list[str] = []
+
+            def fake_get(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                authorizations.append(headers["Authorization"])
+                if "whoami" in url:
+                    return 200, {"user": {"userName": "file-user"}}
+                if "/alpha/billing/credits" in url:
+                    return 200, {"credits": {"monthlyCredits": 10}}
+                if "/alpha/billing/subscriptions" in url:
+                    return 200, {
+                        "data": {"status": "active", "planId": "individual-goat"}
+                    }
+                return 200, {"totalCredits": 1, "totalCount": 2}
+
+            with mock.patch.dict(
+                os.environ,
+                {"COMMAND_CODE_API_KEY": "   "},
+            ):
+                snapshot = read_commandcode_quota(
+                    home,
+                    now=1_789_490_000.0,
+                    http_get_json=fake_get,
+                )
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(
+            authorizations,
+            [f"Bearer {API_KEY}"] * len(authorizations),
+        )
 
     def test_returns_none_on_auth_failure_or_missing_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

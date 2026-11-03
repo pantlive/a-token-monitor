@@ -214,6 +214,11 @@ embedded in the daemon, so no separate front-end service is needed.
 Windows) — the page has no authentication by default, so make sure the network is
 trusted first.
 
+Command Code quotas use the same credential order as the official CLI:
+`COMMAND_CODE_API_KEY` first, then `~/.commandcode/auth.json` when the variable is
+empty. If `cmd` can show the quota but the Dashboard cannot, set the same variable in
+the daemon or service environment; never commit a real key.
+
 ### Update notifications
 
 A newer release is reported on both sides: the Dashboard keeps a small update button in

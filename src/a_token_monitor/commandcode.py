@@ -7,9 +7,10 @@
 - ``GET /alpha/billing/subscriptions``：订阅状态、账期和套餐 ID；
 - ``GET /alpha/usage/summary``：本账期请求数、花费和 token 合计。
 
-接口要求 ``User-Agent`` 等 CLI 头，缺少时服务端返回 403；``auth.json`` 中的
-API Key 只用于鉴权请求，不会出现在返回值、日志或异常消息中，也不会读取会话
-正文或工具输出。活动会话以进程实际打开的 session JSONL 为准。
+接口要求 ``User-Agent`` 等 CLI 头，缺少时服务端返回 403。凭据来源与官方 CLI
+一致：先读环境变量 ``COMMAND_CODE_API_KEY``，为空时才读 ``auth.json`` 中的
+``apiKey``。API Key 只用于鉴权请求，不会出现在返回值、日志或异常消息中，也不会
+读取会话正文或工具输出。活动会话以进程实际打开的 session JSONL 为准。
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ _COMMANDCODE_USER_AGENT = "cli"
 _COMMANDCODE_CLI_VERSION = "1.53.1"
 _COMMANDCODE_CLI_ENVIRONMENT = "prod"
 _COMMANDCODE_PROFILE_NAME = "command-code"
+# 官方 CLI 优先从这个环境变量取 API Key，再回退到 ~/.commandcode/auth.json。
+_COMMANDCODE_API_KEY_ENV = "COMMAND_CODE_API_KEY"
 
 _COMMANDCODE_WHOAMI = "/alpha/whoami"
 _COMMANDCODE_CREDITS = "/alpha/billing/credits"
@@ -173,15 +176,34 @@ def resolve_commandcode_homes(
     return ()
 
 
+def _commandcode_credentials(
+    home: Path,
+) -> tuple[str | None, Mapping[str, Any] | None]:
+    """按官方 CLI 的优先级读取凭据，并返回 auth.json 中的身份字段。
+
+    ``COMMAND_CODE_API_KEY`` 优先于 ``auth.json``；环境变量为空（或只有空白）
+    时继续使用文件里的 Key，与官方 CLI 的空值回退行为一致。第二个返回值只用于
+    读取 ``userId`` / ``userName`` 等身份字段，调用方不得把 Key 写进日志或快照。
+    """
+
+    payload = _read_json_object(home / "auth.json")
+    configured = _text(os.environ.get(_COMMANDCODE_API_KEY_ENV))
+    if configured is not None:
+        return configured, payload
+    if payload is None:
+        return None, None
+    return _text(payload.get("apiKey")), payload
+
+
 def read_commandcode_account(commandcode_home: Path) -> CommandCodeAccount:
     """读取 Command Code 身份，只读取 auth.json 的身份字段。
 
-    ``apiKey`` 仅用于判断登录状态，不会出现在返回值中。
+    API Key 可能来自 ``COMMAND_CODE_API_KEY`` 或 ``auth.json``，仅用于判断登录
+    状态，不会出现在返回值中。
     """
 
     home = _normalize_path(commandcode_home)
-    payload = _read_json_object(home / "auth.json")
-    api_key = _text(payload.get("apiKey")) if payload else None
+    api_key, payload = _commandcode_credentials(home)
     account_id = _text(payload.get("userId")) if payload else None
     user_name = _text(payload.get("userName")) if payload else None
     email = _text(payload.get("email")) if payload else None
@@ -264,8 +286,7 @@ def _fetch_commandcode_quota(
 ) -> QuotaSnapshot | None:
     """发起官方 CLI 相同的额度请求并解析结果。"""
 
-    payload = _read_json_object(home / "auth.json")
-    api_key = _text(payload.get("apiKey")) if payload else None
+    api_key, _ = _commandcode_credentials(home)
     if api_key is None:
         return None
     headers = {

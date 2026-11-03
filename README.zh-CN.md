@@ -188,6 +188,11 @@ Dashboard 默认地址是 `http://127.0.0.1:8765/`，页面与接口由 daemon �
 不需要单独的前端服务。`--dashboard-host 0.0.0.0` 可开放给局域网（例如从
 Windows 访问 WSL）——页面默认没有鉴权，请先确认网络可信。
 
+Command Code 的额度读取与官方 CLI 使用同一套凭据优先级：先读环境变量
+`COMMAND_CODE_API_KEY`，为空时才读 `~/.commandcode/auth.json`。如果 `cmd` 能读到
+额度而 Dashboard 没有，请确认 daemon 或 service 的环境里也有同一个变量；不要把
+真实 Key 写进仓库或可提交的 service 配置。
+
 ### 版本更新提醒
 
 两端都会提醒：Dashboard 顶栏常驻一个更新按钮，CLI 每个命令在 `stderr` 打印一次
