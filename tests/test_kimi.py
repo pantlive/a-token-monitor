@@ -14,6 +14,7 @@ from unittest import mock
 
 from _platform_support import requires_chmod, requires_symlinks
 from a_token_monitor import kimi as kimi_module
+from a_token_monitor.agents import RunningAgent
 from a_token_monitor.kimi import (
     _clear_quota_cache,
     kimi_wire_session_id,
@@ -297,6 +298,64 @@ class KimiUsageTests(unittest.TestCase):
         self.assertEqual(sessions[0].cwd, "/workspace/demo")
         self.assertEqual(sessions[0].pids, (88,))
         self.assertEqual(sessions[0].source, "kimi-cli")
+
+
+class KimiActiveSessionCacheTests(unittest.TestCase):
+    """活动探测没有进程时不应重建全量索引，有进程时索引应跨刷新复用。"""
+
+    def setUp(self) -> None:
+        kimi_module._clear_active_session_cache()
+
+    def tearDown(self) -> None:
+        kimi_module._clear_active_session_cache()
+
+    def test_no_process_skips_session_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            kimi_home = _make_kimi_home(Path(temporary_directory))
+            with (
+                mock.patch.object(
+                    kimi_module, "scan_running_agents", return_value=()
+                ),
+                mock.patch.object(
+                    kimi_module, "load_kimi_session_index"
+                ) as load_index,
+            ):
+                sessions = list_kimi_active_sessions(kimi_home)
+
+        self.assertEqual(sessions, ())
+        load_index.assert_not_called()
+
+    def test_reuses_session_index_between_refreshes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            kimi_home = _make_kimi_home(Path(temporary_directory))
+            state_path = (
+                kimi_home / "sessions" / "wd_demo" / "session_1" / "state.json"
+            )
+            agent = RunningAgent(
+                pid=42,
+                product="kimi",
+                start_token="",
+                cwd=None,
+                command=(),
+                open_paths=(state_path,),
+            )
+            with (
+                mock.patch.object(
+                    kimi_module, "scan_running_agents", return_value=(agent,)
+                ),
+                mock.patch.object(
+                    kimi_module,
+                    "load_kimi_session_index",
+                    wraps=load_kimi_session_index,
+                ) as load_index,
+            ):
+                first = list_kimi_active_sessions(kimi_home)
+                second = list_kimi_active_sessions(kimi_home)
+
+        self.assertEqual(load_index.call_count, 1)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0].session_id, "session_1")
 
 
 class KimiQuotaTests(unittest.TestCase):

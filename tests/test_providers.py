@@ -26,6 +26,9 @@ from a_token_monitor.service import ServiceConfig
 # 功能 -> 不需要接入该功能的产品 ID 及原因。
 EXEMPT = {
     "archive_rules": {"opencode": "会话存在单个 SQLite 库里，没有可单独归档的文件"},
+    "speed_source": {
+        "opencode": "会话存在单个 SQLite 库里，没有可逐行采样的 JSONL 会话文件"
+    },
 }
 
 
@@ -62,6 +65,23 @@ class RegistryCompletenessTests(unittest.TestCase):
                 continue
             with self.subTest(product=spec.product_id):
                 self.assertIn(spec.product_id, housekeeping._SESSION_SPECS)
+
+    def test_every_product_has_a_speed_source(self) -> None:
+        exempt = EXEMPT["speed_source"]
+        for spec in home_providers():
+            if spec.product_id in exempt:
+                continue
+            with self.subTest(product=spec.product_id):
+                self.assertTrue(
+                    spec.speed_files is not None
+                    or spec.product_id in housekeeping._SESSION_SPECS
+                )
+
+    def test_commandcode_speed_source_is_registered_by_product_id(self) -> None:
+        spec = PROVIDER_SPECS["commandcode"]
+        self.assertNotEqual(spec.key, spec.product_id)
+        self.assertEqual(spec.product_id, "command-code")
+        self.assertIsNotNone(spec.speed_files)
 
     def test_exemptions_refer_to_registered_products(self) -> None:
         products = {spec.product_id for spec in PROVIDER_SPECS.values()}

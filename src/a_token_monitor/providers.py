@@ -31,6 +31,7 @@ from .claude import (
 from .commandcode import (
     default_commandcode_home,
     list_commandcode_active_sessions,
+    list_commandcode_transcripts,
     read_commandcode_account,
     read_commandcode_quota,
     resolve_commandcode_homes,
@@ -116,6 +117,10 @@ class ProviderSpec:
     cli_help: str = ""
     # 中文注释：列出某个数据目录下仍在运行的会话；没有活动会话概念的 provider 为 None。
     active_sessions: Callable[[Path], Iterable[Any]] | None = None
+    # 中文注释：Dashboard 实时速度补采要读取的主会话文件（不含 meta / checkpoints
+    # 等 sidecar）。None 表示按 housekeeping 的归档布局（sessions_dir + pattern）
+    # 查找；SQLite 存储的 provider 返回空即可。
+    speed_files: Callable[[Path], Iterable[Path]] | None = None
     # 中文注释：读取登录账号与官方额度。登记了 read_account 的 provider 会在
     # Dashboard 上显示为独立账号卡片；read_quota 返回 None 表示暂无额度数据。
     read_account: Callable[[Path], ProviderAccount] | None = None
@@ -216,6 +221,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
                 "默认在存在时使用 ~/.commandcode 或 COMMANDCODE_HOME"
             ),
             active_sessions=list_commandcode_active_sessions,
+            speed_files=list_commandcode_transcripts,
             read_account=read_commandcode_account,
             read_quota=read_commandcode_quota,
             login_field="logged_in",

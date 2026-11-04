@@ -47,6 +47,8 @@ from a_token_monitor.dashboard import (
     build_multi_dashboard_state,
     favicon_response,
 )
+from a_token_monitor.dashboard import state as dashboard_state
+from a_token_monitor.dashboard.state import _RecentFileCache
 from a_token_monitor.health import HealthTracker
 from a_token_monitor.i18n import substitute
 from a_token_monitor.retention import RetentionController, RetentionError
@@ -2088,6 +2090,82 @@ class SpeedAccountKeyTests(unittest.TestCase):
             set(state["speed"]["accounts"]),
             {"claude-account-id"},
         )
+
+
+class RecentProviderFileTests(unittest.TestCase):
+    """速度补采的文件发现必须使用产品 ID，并缓存重复的全目录扫描。"""
+
+    def test_commandcode_uses_product_id_and_main_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / ".commandcode"
+            project = home / "projects" / "demo"
+            project.mkdir(parents=True)
+            transcript = project / "session-1.jsonl"
+            transcript.write_text('{"type":"session"}\n', encoding="utf-8")
+            meta = project / "session-1.meta.json"
+            meta.write_text("{}", encoding="utf-8")
+            checkpoints = project / "session-1.checkpoints.jsonl"
+            checkpoints.write_text("{}\n", encoding="utf-8")
+            now = time.time()
+            os.utime(transcript, (now - 120, now - 120))
+            os.utime(meta, (now, now))
+            os.utime(checkpoints, (now, now))
+
+            candidates = dashboard_state._recent_provider_files(
+                {"commandcode": (home,)},
+                accounts_by_home={
+                    str(home): {"account_id": "commandcode-account"}
+                },
+                window_seconds=600,
+            )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["product"], "command-code")
+        self.assertEqual(candidates[0]["jsonl_path"], str(transcript))
+        self.assertEqual(candidates[0]["account_id"], "commandcode-account")
+
+    def test_file_discovery_cache_hits_negative_results_and_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / ".claude"
+            home.mkdir()
+            cache = _RecentFileCache(ttl_seconds=30)
+            with mock.patch.object(
+                dashboard_state, "_newest_provider_file", return_value=None
+            ) as discover:
+                first = dashboard_state._recent_provider_files(
+                    {"claude": (home,)}, cache=cache
+                )
+                second = dashboard_state._recent_provider_files(
+                    {"claude": (home,)}, cache=cache
+                )
+                # 没有文件的目录同样要缓存，否则每 5 秒仍会 glob 一次。
+                self.assertEqual(discover.call_count, 1)
+                self.assertEqual(first, [])
+                self.assertEqual(second, [])
+
+                cache.clear()
+                dashboard_state._recent_provider_files(
+                    {"claude": (home,)}, cache=cache
+                )
+                self.assertEqual(discover.call_count, 2)
+
+    def test_file_discovery_cache_expires(self) -> None:
+        home = Path("/nonexistent/example-home")
+        cache = _RecentFileCache(ttl_seconds=30)
+        calls: list[int] = []
+
+        def loader() -> None:
+            calls.append(1)
+            return None
+
+        with mock.patch(
+            "a_token_monitor.dashboard.state.time.monotonic",
+            side_effect=[100.0, 131.0, 131.0],
+        ):
+            self.assertIsNone(cache.get("claude", home, 600, loader))
+            self.assertIsNone(cache.get("claude", home, 600, loader))
+        self.assertEqual(len(calls), 2)
 
 
 class ThemeTests(unittest.TestCase):

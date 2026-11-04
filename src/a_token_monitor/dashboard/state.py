@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any, Mapping, Sequence
@@ -22,7 +23,7 @@ from ..quota import (
     quota_period_label,
     quota_window_duration,
 )
-from ..providers import ProviderSpec, home_providers
+from ..providers import PROVIDER_SPECS, ProviderSpec, home_providers
 from ..registry import MultiSessionRegistry
 from ..traffic import TrafficSnapshot, empty_traffic_snapshot
 from ..usage import (
@@ -34,6 +35,135 @@ from ..usage import (
 
 # 中文注释：结束不超过该时间的会话仍显示在会话表里，方便单独归档。
 _RECENT_FINISHED_SECONDS = 24 * 3600.0
+# 中文注释：页面每 5 秒刷新一次，文件发现缓存 30 秒，避免每个请求都 glob 全部目录。
+_RECENT_FILE_TTL_SECONDS = 30.0
+
+
+class _RecentFileCache:
+    """按 provider 目录缓存最近会话文件的发现结果（含「没有文件」的负缓存）。
+
+    缓存的是「目录 → 文件路径」本身，账号身份在每次返回时重新合并，这样
+    Dashboard 热更新账号后不会继续使用旧的账号键。缓存只存在于一个 Dashboard
+    实例里，测试或一次性状态构建不传缓存时完全保持原行为。
+    """
+
+    def __init__(self, ttl_seconds: float = _RECENT_FILE_TTL_SECONDS) -> None:
+        self._ttl_seconds = max(0.0, float(ttl_seconds))
+        self._lock = Lock()
+        self._entries: dict[tuple[str, str, float], tuple[float, Path | None]] = {}
+
+    def get(
+        self,
+        provider_key: str,
+        home: Path,
+        window_seconds: float,
+        loader: Callable[[], Path | None],
+    ) -> Path | None:
+        """返回缓存中的最新文件；过期或不存在的条目由 ``loader`` 重新发现。"""
+
+        key = (provider_key, str(home), float(window_seconds))
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached is not None and time.monotonic() < cached[0]:
+                return cached[1]
+        value = loader()
+        with self._lock:
+            # 中文注释：TTL 从发现完成时开始算，慢目录不会让缓存刚写入就过期。
+            self._entries[key] = (time.monotonic() + self._ttl_seconds, value)
+        return value
+
+    def clear(self) -> None:
+        """清空缓存；目录热更新后测试或调用方可显式丢弃旧结果。"""
+
+        with self._lock:
+            self._entries.clear()
+
+
+def _provider_session_files(spec: ProviderSpec, home: Path) -> tuple[Path, ...]:
+    """返回一个 provider 目录里可采样速度的会话文件。"""
+
+    if spec.speed_files is not None:
+        return tuple(spec.speed_files(home))
+    archive_spec = _SESSION_SPECS.get(spec.product_id)
+    if archive_spec is None:
+        return ()
+    root = (
+        Path(home) / archive_spec.sessions_dir
+        if archive_spec.sessions_dir
+        else Path(home)
+    )
+    return tuple(item for item in root.glob(archive_spec.pattern) if item.is_file())
+
+
+def _newest_provider_file(
+    spec: ProviderSpec,
+    home: Path,
+    moment: float,
+    window_seconds: float,
+) -> Path | None:
+    """返回目录里窗口内最近修改的会话文件；同一文件只 stat 一次。"""
+
+    try:
+        matches = _provider_session_files(spec, home)
+    except OSError:
+        return None
+    fresh: list[tuple[float, Path]] = []
+    for item in matches:
+        try:
+            modified = item.stat().st_mtime
+        except OSError:
+            continue
+        if moment - modified <= window_seconds:
+            fresh.append((modified, item))
+    if not fresh:
+        return None
+    return max(fresh, key=lambda entry: entry[0])[1]
+
+
+def _recent_provider_files(
+    homes: Mapping[str, Sequence[Path]] | None,
+    *,
+    accounts_by_home: Mapping[str, Mapping[str, str]] | None = None,
+    window_seconds: float = 600.0,
+    cache: _RecentFileCache | None = None,
+) -> list[dict[str, str]]:
+    """返回各 provider 目录里最近改动过的会话文件（只读路径，不解析内容）。
+
+    ``accounts_by_home`` 把数据目录路径映射到账号卡片使用的身份（账号 ID /
+    展示名），让这里采到的速度与会话列表里的账号对上号——否则同一份日志会以
+    「账号 ID」和「产品名」两个键各采一次，概览 KPI 就会把同一个账号算两遍。
+
+    ``homes`` 的键是配置键（如 ``commandcode``），而归档布局、会话记录和速度
+    采样使用产品 ID（如 ``command-code``）；两者必须经 ``ProviderSpec`` 映射，
+    不能把配置键当产品 ID 直接查。``cache`` 由 Dashboard 请求上下文传入，直接
+    调用本函数时不传缓存，行为与以前一致。
+    """
+
+    if not homes:
+        return []
+    moment = time.time()
+    candidates: list[dict[str, str]] = []
+    for key, home_paths in homes.items():
+        spec = PROVIDER_SPECS.get(key)
+        if spec is None:
+            continue
+        product = spec.product_id
+        for home in home_paths:
+            if cache is None:
+                newest = _newest_provider_file(spec, home, moment, window_seconds)
+            else:
+                newest = cache.get(
+                    spec.key,
+                    Path(home),
+                    window_seconds,
+                    lambda: _newest_provider_file(spec, home, moment, window_seconds),
+                )
+            if newest is None:
+                continue
+            candidate = {"product": product, "jsonl_path": str(newest)}
+            candidate.update((accounts_by_home or {}).get(str(home), {}))
+            candidates.append(candidate)
+    return candidates
 
 
 class _AccountSet:
@@ -103,50 +233,6 @@ class _AccountSet:
             self._registries = dict(registries)
             self._account_metadata = dict(account_metadata or {})
             self._revision += 1
-
-
-def _recent_provider_files(
-    homes: Mapping[str, Sequence[Path]] | None,
-    *,
-    accounts_by_home: Mapping[str, Mapping[str, str]] | None = None,
-    window_seconds: float = 600.0,
-) -> list[dict[str, str]]:
-    """返回各 provider 目录里最近改动过的会话文件（只读路径，不解析内容）。
-
-    ``accounts_by_home`` 把数据目录路径映射到账号卡片使用的身份（账号 ID /
-    展示名），让这里采到的速度与会话列表里的账号对上号——否则同一份日志会以
-    「账号 ID」和「产品名」两个键各采一次，概览 KPI 就会把同一个账号算两遍。
-    """
-
-    if not homes:
-        return []
-    moment = time.time()
-    candidates: list[dict[str, str]] = []
-    for key, home_paths in homes.items():
-        spec = _SESSION_SPECS.get(key)
-        if spec is None:
-            continue
-        for home in home_paths:
-            root = Path(home) / spec.sessions_dir if spec.sessions_dir else Path(home)
-            pattern = spec.pattern
-            try:
-                matches = [item for item in root.glob(pattern) if item.is_file()]
-            except OSError:
-                continue
-            fresh = []
-            for item in matches:
-                try:
-                    if moment - item.stat().st_mtime <= window_seconds:
-                        fresh.append(item)
-                except OSError:
-                    continue
-            if not fresh:
-                continue
-            newest = max(fresh, key=lambda item: item.stat().st_mtime)
-            candidate = {"product": key, "jsonl_path": str(newest)}
-            candidate.update((accounts_by_home or {}).get(str(home), {}))
-            candidates.append(candidate)
-    return candidates
 
 
 def _visible_sessions(sessions: Sequence[TrackedSession]) -> list[TrackedSession]:
@@ -268,6 +354,7 @@ def build_multi_dashboard_state(
     traffic: TrafficSnapshot | None = None,
     health: HealthTracker | None = None,
     speed: SpeedTracker | None = None,
+    recent_files: _RecentFileCache | None = None,
 ) -> dict[str, Any]:
     """合并多个账号状态，同时保留每个账号独立的额度快照。"""
 
@@ -432,7 +519,11 @@ def build_multi_dashboard_state(
         # 改动的会话文件补采，否则这些账号永远没有速度。补采必须沿用账号卡片
         # 的归组键，不然同一份日志会被当成两个账号重复计入概览合计。
         speed.sample_sessions(
-            _recent_provider_files(homes, accounts_by_home=account_keys_by_home)
+            _recent_provider_files(
+                homes,
+                accounts_by_home=account_keys_by_home,
+                cache=recent_files,
+            )
         )
         speed_state = speed.snapshot()
         product_counts: dict[str, int] = {}
