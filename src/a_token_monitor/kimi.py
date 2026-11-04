@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .agents import scan_running_agents
+from .activity_cache import ActivityIndexCache
 from .health import sanitize_error
 from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
 from .quota import QuotaSnapshot, QuotaWindow
@@ -166,6 +167,30 @@ def load_kimi_session_index(kimi_home: Path) -> dict[str, KimiSessionInfo]:
     return index
 
 
+_ACTIVITY_INDEX_TTL_SECONDS = 30.0
+_activity_index_cache: ActivityIndexCache[dict[str, KimiSessionInfo]] = (
+    ActivityIndexCache(_ACTIVITY_INDEX_TTL_SECONDS)
+)
+
+
+def _clear_active_session_cache() -> None:
+    """清空活动会话索引缓存（测试用）。"""
+
+    _activity_index_cache.clear()
+
+
+def _kimi_activity_index(
+    kimi_home: Path,
+    sessions_root: Path,
+) -> dict[str, KimiSessionInfo]:
+    """返回 Kimi 活动探测用的会话索引，按目录身份与 30 秒 TTL 缓存。"""
+
+    return _activity_index_cache.get(
+        sessions_root,
+        lambda: load_kimi_session_index(kimi_home),
+    )
+
+
 def list_kimi_active_sessions(
     kimi_home: Path,
     proc_root: Path | None = None,
@@ -175,13 +200,16 @@ def list_kimi_active_sessions(
 
     home = _normalize_path(kimi_home)
     sessions_root = home / "sessions"
-    observed_at = time.time() if now is None else float(now)
     agents = scan_running_agents(
         proc_root=proc_root,
         products=("kimi",),
         session_roots=(sessions_root,),
     )
-    index = load_kimi_session_index(home)
+    # 中文注释：没有活动进程时结果必然为空，不需要重建全量会话索引。
+    if not agents:
+        return ()
+    observed_at = time.time() if now is None else float(now)
+    index = _kimi_activity_index(home, sessions_root)
     grouped: dict[str, list[int]] = {}
     paths_by_session: dict[str, Path] = {}
     for agent in agents:

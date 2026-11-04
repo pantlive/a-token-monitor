@@ -66,6 +66,7 @@ from .payloads import (
 )
 from .state import (
     _AccountSet,
+    _RecentFileCache,
     _attach_session_advice,
     _attach_session_archive,
     _housekeeping_summary,
@@ -98,6 +99,10 @@ class _DashboardContext:
     updates: UpdateChecker | None = None
     # 中文注释：实时速度采样器要跨请求保留，才能对新增字节算增量。
     speed: SpeedTracker = field(default_factory=SpeedTracker)
+    # 中文注释：会话文件发现按 30 秒缓存，避免每 5 秒刷新都 glob 每个 provider 目录。
+    recent_files: _RecentFileCache = field(
+        default_factory=_RecentFileCache, repr=False
+    )
     # 中文注释：版本/安装残留默认只报告；打开后才接受清理请求（见 packages 模块）。
     allow_package_cleanup: bool = False
     thresholds_in_use: SessionSwitchThresholds = field(
@@ -183,6 +188,7 @@ class _DashboardContext:
                 else None,
                 health=self.health,
                 speed=self.speed,
+                recent_files=self.recent_files,
             )
             state["alert_history"] = self.alert_stats()
             _attach_session_advice(state, self.usage_aggregator, self.thresholds_in_use)

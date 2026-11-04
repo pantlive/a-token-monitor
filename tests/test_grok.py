@@ -6,8 +6,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _platform_support import requires_symlinks
+from a_token_monitor import grok as grok_module
+from a_token_monitor.agents import RunningAgent
 from a_token_monitor.grok import (
     decode_grok_project,
     list_grok_active_sessions,
@@ -292,6 +295,12 @@ class GrokUsageTests(unittest.TestCase):
 class GrokActiveSessionTests(unittest.TestCase):
     """验证按进程打开文件识别 Grok 活动会话。"""
 
+    def setUp(self) -> None:
+        grok_module._clear_active_session_cache()
+
+    def tearDown(self) -> None:
+        grok_module._clear_active_session_cache()
+
     def _home(self, root: Path, session_id: str = "session-1") -> Path:
         """构造一个带 summary.json 与会话日志的 Grok 目录。"""
 
@@ -465,6 +474,59 @@ class GrokActiveSessionTests(unittest.TestCase):
         self.assertEqual(sessions[0].session_id, "session-old")
         self.assertEqual(sessions[0].cwd, "/workspace/rotated")
         self.assertEqual(sessions[0].pids, (300,))
+
+    def test_no_process_skips_session_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = self._home(Path(temporary_directory))
+            with (
+                mock.patch.object(
+                    grok_module, "scan_running_agents", return_value=()
+                ),
+                mock.patch.object(
+                    grok_module, "load_session_index"
+                ) as load_index,
+            ):
+                sessions = list_grok_active_sessions(grok_home)
+
+        self.assertEqual(sessions, ())
+        load_index.assert_not_called()
+
+    def test_reuses_session_index_between_refreshes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            grok_home = self._home(root)
+            session_path = (
+                grok_home
+                / "sessions"
+                / "%2Fworkspace%2Fdemo"
+                / "session-1"
+                / "chat_history.jsonl"
+            )
+            agent = RunningAgent(
+                pid=7,
+                product="grok",
+                start_token="",
+                cwd=None,
+                command=(),
+                open_paths=(session_path,),
+            )
+            with (
+                mock.patch.object(
+                    grok_module, "scan_running_agents", return_value=(agent,)
+                ),
+                mock.patch.object(
+                    grok_module,
+                    "load_session_index",
+                    wraps=grok_module.load_session_index,
+                ) as load_index,
+            ):
+                first = list_grok_active_sessions(grok_home)
+                second = list_grok_active_sessions(grok_home)
+
+        self.assertEqual(load_index.call_count, 1)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0].session_id, "session-1")
 
     def test_decode_grok_project(self) -> None:
         self.assertEqual(

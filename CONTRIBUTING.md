@@ -38,7 +38,8 @@ ubuntu / 3.13 跑一次。平台不具备的能力（符号链接、`/proc`、PO
    磁盘统计、活动会话保护、`service.json` 字段、Dashboard 账号卡片都由注册表生成。
 3. 接入各功能的分派表，直到 `tests/test_providers.py` 通过：进程识别
    （`agents._AGENT_BINARIES`、`PRODUCT_LABELS`）、告警上下文（`alert_context/lookup.py` 的
-   `_SOURCES`）、归档规则（`housekeeping._SESSION_SPECS`）。确实不适用的组合写进该测试的
+   `_SOURCES`）、归档规则（`housekeeping._SESSION_SPECS`）、速度补采
+   （`ProviderSpec.speed_files`，缺省按归档布局查找）。确实不适用的组合写进该测试的
    `EXEMPT` 并说明原因。
 
 各层之间传递 `homes` 映射（`{provider key: 目录元组}`），不要再为某个 agent 单独加
