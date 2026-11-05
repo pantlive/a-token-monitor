@@ -697,6 +697,7 @@ EN: dict[str, str] = {
     '将删除': 'Will delete ',
     '小时前': 'h ago',
     '工作台': 'Workspace',
+    '管理': 'Manage',
     '已使用': 'used',
     '已发现': 'Discovered',
     '已同步': 'Synced ',

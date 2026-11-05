@@ -79,6 +79,22 @@ from .state import (
 # 超过硬上限的部分不再读取，避免异常的超大 body 把内存或线程占满。
 _BODY_DRAIN_LIMIT = 8 * 1024 * 1024
 
+# 中文注释：Dashboard 功能页共用同一份 HTML，由前端按路径只显示对应区块。
+# 带别名的路径兼容旧书签（#alert-history）和截图脚本用过的名字。
+_DASHBOARD_PAGE_PATHS: tuple[str, ...] = (
+    "/",
+    "/accounts",
+    "/traffic",
+    "/usage",
+    "/insights",
+    "/alerts",
+    "/search",
+    "/disk",
+    "/alert-history",
+    "/usage-search",
+    "/housekeeping",
+)
+
 
 @dataclass
 class _DashboardContext:
@@ -222,7 +238,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     _request_body: bytes = b""
 
     _GET_ROUTES: ClassVar[dict[str, str]] = {
-        "/": "_get_dashboard_page",
+        **{path: "_get_dashboard_page" for path in _DASHBOARD_PAGE_PATHS},
         "/settings": "_get_settings_page",
         "/healthz": "_get_healthz",
         "/readyz": "_get_readyz",
@@ -240,7 +256,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/redact": "_get_redact",
     }
     _HEAD_ROUTES: ClassVar[dict[str, str]] = {
-        "/": "_head_dashboard_page",
+        **{path: "_head_dashboard_page" for path in _DASHBOARD_PAGE_PATHS},
         "/settings": "_head_settings_page",
         "/healthz": "_head_healthz",
         "/readyz": "_head_readyz",

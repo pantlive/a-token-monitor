@@ -52,6 +52,14 @@ _SETTINGS_CSS = _asset("settings.css")
 _LANGUAGE_COOKIE_NAME = "a-token-monitor-language"
 
 
+# 中文注释：主页与设置页共用侧栏；当前页高亮由 data-page / data-nav-target 决定。
+_SIDEBAR_NAV_HTML = _asset("sidebar-nav.html")
+
+
+# 中文注释：在样式生效前写入 data-page，避免先画出总览再切到 /accounts 这类目标页。
+_PAGE_BOOT_SCRIPT = _asset("page-boot.html")
+
+
 # 中文注释：页面是导入时就固定的常量，英文替换一次要 1 秒以上，按（页面, 语言）
 # 缓存后每次请求只是一次字典查找；页面只有两个、语言只有两种，缓存上限足够。
 @functools.lru_cache(maxsize=8)
@@ -91,12 +99,13 @@ _THEME_SCRIPT = _asset("theme.js")
 
 
 _PAGE_THEME_REPLACEMENTS = (
-    ("__THEME_BOOT__", _THEME_BOOT_SCRIPT + _LANGUAGE_BOOT_SCRIPT),
+    ("__THEME_BOOT__", _THEME_BOOT_SCRIPT + _LANGUAGE_BOOT_SCRIPT + _PAGE_BOOT_SCRIPT),
     ("__THEME_TOGGLE__", _LANGUAGE_TOGGLE_HTML + _THEME_TOGGLE_HTML + _GITHUB_LINK_HTML),
     ("__THEME_SCRIPT__", _THEME_SCRIPT + _LANGUAGE_SCRIPT),
     ("__FAVICON__", _FAVICON_LINK),
     ("__BRAND_MARK__", _brand_mark_svg()),
     ("__UPDATE_PANEL__", _UPDATE_PANEL_HTML),
+    ("__SIDEBAR_NAV__", _SIDEBAR_NAV_HTML),
     ("__VERSION__", __version__),
 )
 

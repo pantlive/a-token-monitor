@@ -1,5 +1,16 @@
 
-    #overview, #accounts, #usage, #insights, #traffic { scroll-margin-top: 88px; }
+    .page-view { display: none; }
+    html:not([data-page]) #overview,
+    html[data-page="overview"] #overview,
+    html[data-page="traffic"] #traffic,
+    html[data-page="accounts"] #accounts,
+    html[data-page="usage"] #usage,
+    html[data-page="insights"] #insights,
+    html[data-page="alert-history"] #alert-history,
+    html[data-page="usage-search"] #usage-search,
+    html[data-page="housekeeping"] #housekeeping { display: block; }
+    .page-view > .section-block { margin-top: 0; }
+    #packages-block, #housekeeping-actions { scroll-margin-top: 88px; }
     .scope-badge { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); font-size: 12px; }
     .scope-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
     .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 13px; margin-bottom: 34px; }

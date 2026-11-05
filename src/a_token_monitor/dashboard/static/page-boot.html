@@ -1,0 +1,48 @@
+  <script>
+    // 分页预置：在首屏绘制前写入 data-page，避免先闪出总览再切到目标页。
+    window.__dashboardPages = {
+      paths: {
+        '/': 'overview',
+        '/traffic': 'traffic',
+        '/accounts': 'accounts',
+        '/usage': 'usage',
+        '/insights': 'insights',
+        '/alerts': 'alert-history',
+        '/alert-history': 'alert-history',
+        '/search': 'usage-search',
+        '/usage-search': 'usage-search',
+        '/disk': 'housekeeping',
+        '/housekeeping': 'housekeeping',
+        '/settings': 'settings'
+      },
+      titles: {
+        overview: '总览',
+        traffic: '异常流量监控',
+        accounts: '账号与额度',
+        usage: '用量与费用',
+        insights: '习惯分析',
+        'alert-history': '告警历史',
+        'usage-search': '用量检索',
+        housekeeping: '磁盘与会话管理',
+        settings: '设置'
+      },
+      canonical: {
+        overview: '/',
+        traffic: '/traffic',
+        accounts: '/accounts',
+        usage: '/usage',
+        insights: '/insights',
+        'alert-history': '/alerts',
+        'usage-search': '/search',
+        housekeeping: '/disk',
+        settings: '/settings'
+      }
+    };
+    (() => {
+      const pages = window.__dashboardPages;
+      const path = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
+      const hash = (window.location.hash || '').replace(/^#/, '');
+      const id = (hash && pages.canonical[hash]) ? hash : pages.paths[path];
+      document.documentElement.dataset.page = id || 'overview';
+    })();
+  </script>

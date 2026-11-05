@@ -431,12 +431,17 @@ class DashboardTests(unittest.TestCase):
                     self.assertIn("用量与成本估算", html)
                     self.assertIn("API 等价金额", html)
                     self.assertIn("Dashboard 导航", html)
-                    self.assertIn('href="#accounts"', html)
-                    self.assertIn('href="#usage"', html)
-                    self.assertIn('href="#traffic"', html)
+                    self.assertIn('href="/accounts"', html)
+                    self.assertIn('href="/usage"', html)
+                    self.assertIn('href="/traffic"', html)
                     self.assertIn("异常流量监控", html)
-                    self.assertLess(html.find('href="#overview"'), html.find('href="#traffic"'))
+                    self.assertLess(
+                        html.find('data-nav-target="overview"'),
+                        html.find('data-nav-target="traffic"'),
+                    )
                     self.assertLess(html.find('id="traffic"'), html.find('id="accounts"'))
+                    self.assertIn('class="page-view"', html)
+                    self.assertIn("__dashboardPages", html)
                     self.assertIn('id="account-list"', html)
                     self.assertIn('id="usage-content"', html)
                     self.assertIn('id="traffic-content"', html)
@@ -471,6 +476,64 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(state["quota"]["windows"][0]["used_percent"], 42)
         self.assertEqual(context.exception.code, 405)
         self.assertNotIn("prompt", json.dumps(state, ensure_ascii=False))
+
+    def test_feature_pages_serve_the_same_dashboard(self) -> None:
+        """账号、流量等功能页共用主页 HTML，刷新 /accounts 不会 404。"""
+
+        paths = (
+            "/accounts",
+            "/traffic",
+            "/usage",
+            "/insights",
+            "/alerts",
+            "/search",
+            "/disk",
+            "/alert-history",
+            "/usage-search",
+            "/housekeeping",
+        )
+        empty_homes = {
+            "grok": (),
+            "kimi": (),
+            "dsh": (),
+            "commandcode": (),
+            "claude": (),
+            "opencode": (),
+            "cursor": (),
+            "gemini": (),
+            "qwen": (),
+            "aider": (),
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = DashboardServer(
+                registry=MultiSessionRegistry(root / "state"),
+                config=DashboardConfig(port=0),
+                homes=empty_homes,
+            )
+            server.start()
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/", timeout=2) as response:
+                    home = response.read().decode("utf-8")
+                self.assertNotIn("__SIDEBAR_NAV__", home)
+                self.assertIn('href="/accounts"', home)
+                self.assertIn('class="page-view"', home)
+                for path in paths:
+                    with urlopen(f"{base_url}{path}", timeout=2) as response:
+                        html = response.read().decode("utf-8")
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(html, home)
+                    head_request = Request(f"{base_url}{path}", method="HEAD")
+                    with urlopen(head_request, timeout=2) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read(), b"")
+                with self.assertRaises(HTTPError) as missing:
+                    urlopen(f"{base_url}/not-a-page", timeout=2)
+            finally:
+                server.close()
+
+        self.assertEqual(missing.exception.code, 404)
 
     def test_state_includes_kimi_account_without_quota(self) -> None:
         """Kimi 配额接口不可用时应只展示账号身份。"""
@@ -1551,7 +1614,7 @@ class AlertHistoryDashboardTests(unittest.TestCase):
 
         self.assertIn("告警历史", html)
         self.assertIn('id="alert-history"', html)
-        self.assertIn('href="#alert-history"', html)
+        self.assertIn('href="/alerts"', html)
         self.assertIn('data-nav-target="alert-history"', html)
         self.assertIn('id="alert-history-content"', html)
         self.assertIn('id="alert-range-filter"', html)
@@ -1559,11 +1622,6 @@ class AlertHistoryDashboardTests(unittest.TestCase):
         self.assertIn('id="alert-clear-button"', html)
         self.assertLess(html.find('id="traffic"'), html.find('id="alert-history"'))
         self.assertLess(html.find('id="insights"'), html.find('id="alert-history"'))
-        self.assertIn(
-            'class="panel section-block is-collapsed"',
-            html,
-        )
-        self.assertIn('data-section-toggle="alert-history"', html)
         self.assertIn('id="alert-history-body"', html)
         self.assertIn("/api/alerts", html)
 
@@ -3585,7 +3643,7 @@ class UsageSearchDashboardTests(unittest.TestCase):
 
         self.assertIn("用量检索", html)
         self.assertIn('id="usage-search"', html)
-        self.assertIn('href="#usage-search"', html)
+        self.assertIn('href="/search"', html)
         self.assertIn('data-nav-target="usage-search"', html)
         self.assertIn('id="usage-search-content"', html)
         self.assertIn('data-usage-search-group="date"', html)
@@ -3595,7 +3653,6 @@ class UsageSearchDashboardTests(unittest.TestCase):
         self.assertIn("/api/usage/search", html)
         self.assertLess(html.find('id="usage"'), html.find('id="usage-search"'))
         self.assertLess(html.find('id="insights"'), html.find('id="usage-search"'))
-        self.assertIn('data-section-toggle="usage-search"', html)
         self.assertIn('id="usage-search-body"', html)
 
     def test_usage_section_supports_account_dimension(self) -> None:
@@ -4270,7 +4327,7 @@ class HousekeepingDashboardTests(unittest.TestCase):
 
         self.assertIn("磁盘与会话管理", html)
         self.assertIn('id="housekeeping"', html)
-        self.assertIn('href="#housekeeping"', html)
+        self.assertIn('href="/disk"', html)
         self.assertIn('id="housekeeping-content"', html)
         self.assertIn('id="housekeeping-project"', html)
         self.assertIn('id="housekeeping-projects"', html)
@@ -4282,9 +4339,8 @@ class HousekeepingDashboardTests(unittest.TestCase):
         self.assertIn("归档此会话", html)
         self.assertIn('id="session-notice"', html)
         self.assertLess(html.find('id="insights"'), html.find('id="housekeeping"'))
-        self.assertIn('data-section-toggle="housekeeping"', html)
         self.assertIn('id="housekeeping-body"', html)
-        self.assertIn("按需查看", html)
+        self.assertIn('<div class="sidebar-label">管理</div>', html)
 
 
 class ScanDirsDashboardTests(unittest.TestCase):
@@ -4600,14 +4656,16 @@ class ScanDirsDashboardTests(unittest.TestCase):
         # 主页：设置入口改为指向独立页面的普通链接，不再内嵌扫描目录区块。
         self.assertIn("设置", html)
         self.assertIn('href="/settings"', html)
-        self.assertNotIn('data-nav-target="settings"', html)
+        self.assertIn('data-nav-target="settings"', html)
         self.assertNotIn('id="settings"', html)
         self.assertNotIn('id="scan-dirs"', html)
         self.assertNotIn("/api/scan-dirs", html)
 
         # 设置页：第一个子块是扫描目录管理，结构与 JS 保持完整。
         self.assertIn("<title>设置 - Token Monitor</title>", settings_html)
-        self.assertIn("返回 Dashboard", settings_html)
+        self.assertNotIn("__SIDEBAR_NAV__", settings_html)
+        self.assertIn("总览", settings_html)
+        self.assertIn('href="/accounts"', settings_html)
         self.assertIn('href="/"', settings_html)
         self.assertIn('id="settings-body"', settings_html)
         self.assertIn('id="scan-dirs"', settings_html)
