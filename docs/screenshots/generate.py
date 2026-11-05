@@ -363,23 +363,25 @@ DEMO_TIMEZONE = timezone(timedelta(hours=8))
 DEMO_TIMEZONE_ID = "Asia/Shanghai"
 
 SHOTS = (
-    # 名称, 区块 id（None = 首屏）
-    ("overview", None),
-    ("accounts", "accounts"),
-    ("usage", "usage"),
-    ("insights", "insights"),
-    ("traffic", "traffic"),
-    ("alerts", "alert-history"),
-    ("disk", "housekeeping"),
+    # 名称, 路径（/ = 总览首屏）
+    ("overview", "/"),
+    ("accounts", "/accounts"),
+    ("usage", "/usage"),
+    ("insights", "/insights"),
+    ("traffic", "/traffic"),
+    ("alerts", "/alerts"),
+    ("disk", "/disk"),
 )
-# 中文注释：用量与习惯分析按需加载，截图前先点开。
+# 中文注释：用量与习惯分析按需加载，截图前先点开。按钮在对应功能页的 DOM 里，
+# 总览截图也要点一次，这样「今日金额」KPI 才有数。
 LOAD_BUTTONS = (
     "#usage-load-button",
     "#insights-load-button",
-    # 中文注释：告警历史与磁盘区块默认折叠，展开后才加载。
-    '[data-section-toggle="alert-history"]',
-    '[data-section-toggle="housekeeping"]',
 )
+PAGE_LOAD_BUTTONS = {
+    "/usage": "#usage-load-button",
+    "/insights": "#insights-load-button",
+}
 
 
 def _browser_env(scratch: Path) -> dict[str, str] | None:
@@ -445,15 +447,17 @@ def capture(base_url: str, scratch: Path) -> None:
             page.screenshot(path=str(OUTPUT / f"overview-{lang}.png"))
             _shrink(OUTPUT / f"overview-{lang}.png")
             print(f"wrote docs/screenshots/overview-{lang}.png")
-            for name, section in SHOTS:
-                target = OUTPUT / f"{name}-{lang}.png"
-                if section is None:
+            for name, path in SHOTS:
+                if path == "/":
                     continue
-                else:
-                    locator = page.locator(f"#{section}")
-                    locator.scroll_into_view_if_needed()
-                    page.wait_for_timeout(800)
-                    locator.screenshot(path=str(target))
+                target = OUTPUT / f"{name}-{lang}.png"
+                page.goto(f"{base_url}{path}?lang={lang}")
+                page.wait_for_timeout(1_200)
+                loader = PAGE_LOAD_BUTTONS.get(path)
+                if loader:
+                    page.evaluate("(selector) => document.querySelector(selector).click()", loader)
+                    page.wait_for_timeout(4_000)
+                page.screenshot(path=str(target))
                 _shrink(target)
                 print(f"wrote {target.relative_to(ROOT)}")
             context.close()

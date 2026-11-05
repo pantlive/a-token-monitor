@@ -331,6 +331,7 @@
     .brand-name span { color: var(--violet-text); }
     .sidebar-brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 400; }
     .sidebar-label { padding: 0 11px 9px; color: var(--muted-dim); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .sidebar nav + .sidebar-label { padding-top: 16px; }
     .sidebar nav { display: grid; gap: 5px; }
     .sidebar-link {
       display: flex;
@@ -346,8 +347,34 @@
     }
     .sidebar-link svg { width: 17px; height: 17px; flex: 0 0 auto; opacity: .82; }
     .sidebar-link:hover { border-color: var(--line); color: var(--muted-strong); background: var(--panel); }
-    .sidebar-link.active { border-color: var(--violet-border-active); color: var(--violet-text-strong); background: var(--violet-soft); box-shadow: inset 2px 0 0 var(--violet); }
-    .sidebar-link.active svg { color: var(--violet-text); opacity: 1; }
+    .sidebar-link.active,
+    html[data-page="overview"] .sidebar-link[data-nav-target="overview"],
+    html[data-page="traffic"] .sidebar-link[data-nav-target="traffic"],
+    html[data-page="accounts"] .sidebar-link[data-nav-target="accounts"],
+    html[data-page="usage"] .sidebar-link[data-nav-target="usage"],
+    html[data-page="insights"] .sidebar-link[data-nav-target="insights"],
+    html[data-page="alert-history"] .sidebar-link[data-nav-target="alert-history"],
+    html[data-page="usage-search"] .sidebar-link[data-nav-target="usage-search"],
+    html[data-page="housekeeping"] .sidebar-link[data-nav-target="housekeeping"],
+    html[data-page="settings"] .sidebar-link[data-nav-target="settings"] {
+      border-color: var(--violet-border-active);
+      color: var(--violet-text-strong);
+      background: var(--violet-soft);
+      box-shadow: inset 2px 0 0 var(--violet);
+    }
+    .sidebar-link.active svg,
+    html[data-page="overview"] .sidebar-link[data-nav-target="overview"] svg,
+    html[data-page="traffic"] .sidebar-link[data-nav-target="traffic"] svg,
+    html[data-page="accounts"] .sidebar-link[data-nav-target="accounts"] svg,
+    html[data-page="usage"] .sidebar-link[data-nav-target="usage"] svg,
+    html[data-page="insights"] .sidebar-link[data-nav-target="insights"] svg,
+    html[data-page="alert-history"] .sidebar-link[data-nav-target="alert-history"] svg,
+    html[data-page="usage-search"] .sidebar-link[data-nav-target="usage-search"] svg,
+    html[data-page="housekeeping"] .sidebar-link[data-nav-target="housekeeping"] svg,
+    html[data-page="settings"] .sidebar-link[data-nav-target="settings"] svg {
+      color: var(--violet-text);
+      opacity: 1;
+    }
     .nav-count { min-width: 22px; margin-left: auto; padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted-strong); font-size: 11px; text-align: center; }
     .sidebar-bottom { display: grid; gap: 8px; margin-top: auto; padding: 14px 11px 0; border-top: 1px solid var(--line-soft); }
     .service-state, .live-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-strong); font-size: 12px; }
@@ -388,6 +415,7 @@
     h2 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
     h3 { margin: 0; }
     .hero-description { margin: 8px 0 0; color: var(--muted); }
+    .page-hero .section-description { margin: 8px 0 0; font-size: 14px; }
     .hero-context { display: flex; align-items: center; gap: 10px; padding-bottom: 3px; }
     .muted { color: var(--muted); }
     .error { display: none; margin: 0 0 20px; padding: 12px 14px; border: 1px solid var(--red-border); border-radius: 9px; color: var(--red-text); background: var(--red-soft); }

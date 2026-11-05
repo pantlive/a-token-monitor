@@ -289,9 +289,11 @@ All of these work on both `daemon` and `service install`.
 - **Alert history / traffic anomalies**: a live process table plus persisted alerts
   searchable by time, severity, rule, read state and keyword, with read-state marking and
   range deletion.
-- **Collapse on demand**: “Alert history”, “Usage search” and “Disk & session management”
-  start collapsed into a single summary line and only fetch details when expanded; the
-  expanded state is remembered in the browser.
+- **One feature per page**: the sidebar opens a dedicated page for each tool
+  (`/accounts` for quotas, `/traffic` for live processes, `/usage` and `/insights` for
+  cost, `/alerts`, `/search`, and `/disk` for history and housekeeping). The overview
+  keeps the live KPI cards. Alert history, usage search and disk management load when
+  you open that page.
 
 Alert details correlate local sessions by working directory and time window, prioritizing
 actions and object types such as initiating an image upload, pushing code, reading code,

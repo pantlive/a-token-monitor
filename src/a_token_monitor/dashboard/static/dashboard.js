@@ -273,70 +273,62 @@
   let insightsPollSuspended = false;
   let insightsPeriodDays = '';
   let mainRefreshTimer = 0;
-  // 低频分区默认折叠：状态记在 localStorage，展开时才加载明细。
-  const COLLAPSED_SECTIONS_KEY = 'a-token-monitor-collapsed-sections';
-  const DEFAULT_COLLAPSED = ['alert-history', 'usage-search', 'housekeeping'];
-  const readCollapsedSections = () => {
-    try {
-      const stored = window.localStorage.getItem(COLLAPSED_SECTIONS_KEY);
-      if (stored === null) return new Set(DEFAULT_COLLAPSED);
-      const parsed = JSON.parse(stored);
-      return new Set(Array.isArray(parsed) ? parsed : DEFAULT_COLLAPSED);
-    } catch (error) {
-      return new Set(DEFAULT_COLLAPSED);
-    }
-  };
-  const collapsedSections = readCollapsedSections();
+  // 功能页：打开对应页面时才拉告警历史 / 用量检索 / 磁盘明细。
   const loadedSections = new Set();
   const sectionLoaders = {
     'alert-history': () => refreshAlertHistory(),
     'usage-search': () => refreshUsageSearch(),
-    'housekeeping': () => refreshHousekeeping()
+    housekeeping: () => refreshHousekeeping()
   };
-  const persistCollapsedSections = () => {
-    try {
-      window.localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsedSections]));
-    } catch (error) {
-      /* 隐私模式下忽略存储失败 */
-    }
+  const dashboardPages = window.__dashboardPages || { paths: {}, titles: {}, canonical: {} };
+  const currentPageId = () => document.documentElement.dataset.page || 'overview';
+  const pageIdFromLocation = (pathname, hash) => {
+    const path = (pathname || '/').replace(/\/+$/, '') || '/';
+    const hashId = String(hash || '').replace(/^#/, '');
+    if (hashId && dashboardPages.canonical[hashId]) return hashId;
+    if (dashboardPages.paths[path]) return dashboardPages.paths[path];
+    return path === '/' ? 'overview' : '';
   };
-  const applySectionState = (id) => {
-    const section = document.getElementById(id);
-    const toggle = document.querySelector(`[data-section-toggle="${id}"]`);
-    if (!section) return;
-    const collapsed = collapsedSections.has(id);
-    section.classList.toggle('is-collapsed', collapsed);
-    if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  };
-  const setSectionCollapsed = (id, collapsed) => {
-    if (collapsed) {
-      collapsedSections.add(id);
-    } else {
-      collapsedSections.delete(id);
-    }
-    applySectionState(id);
-    persistCollapsedSections();
-    if (!collapsed && sectionLoaders[id] && !loadedSections.has(id)) {
-      loadedSections.add(id);
-      sectionLoaders[id]();
-    }
+  const urlForPage = (id, hash) => {
+    const path = dashboardPages.canonical[id] || '/';
+    const search = window.location.search || '';
+    const fragment = hash && hash !== '#' ? (hash.charAt(0) === '#' ? hash : `#${hash}`) : '';
+    return `${path}${search}${fragment}`;
   };
   const ensureSectionLoaded = (id) => {
-    if (!collapsedSections.has(id) && sectionLoaders[id] && !loadedSections.has(id)) {
+    if (sectionLoaders[id] && !loadedSections.has(id)) {
       loadedSections.add(id);
       sectionLoaders[id]();
     }
   };
-  const navLinks = [...document.querySelectorAll('[data-nav-target]')];
-  const updateActiveNav = () => {
-    const current = ['housekeeping', 'usage-search', 'alert-history', 'insights', 'usage', 'accounts', 'traffic', 'overview'].find((id) => {
-      const target = document.getElementById(id);
-      return target && target.getBoundingClientRect().top <= 120;
-    }) || 'overview';
-    navLinks.forEach((link) => link.classList.toggle('active', link.dataset.navTarget === current));
+  const showPage = (id, options) => {
+    const settings = options || {};
+    if (!id || id === 'settings' || !dashboardPages.canonical[id]) return;
+    document.documentElement.dataset.page = id;
+    const breadcrumb = document.getElementById('page-breadcrumb');
+    const title = dashboardPages.titles[id] || '总览';
+    if (breadcrumb) breadcrumb.textContent = title;
+    document.title = `${title} - Token Monitor`;
+    ensureSectionLoaded(id);
+    const nextUrl = urlForPage(id, settings.hash);
+    if (settings.push) {
+      window.history.pushState({ page: id }, '', nextUrl);
+    } else if (settings.replace !== false) {
+      window.history.replaceState({ page: id }, '', nextUrl);
+    }
+    const hashId = String(settings.hash || '').replace(/^#/, '');
+    if (hashId) {
+      const target = document.getElementById(hashId);
+      if (target) target.scrollIntoView();
+      else window.scrollTo(0, 0);
+    } else {
+      window.scrollTo(0, 0);
+    }
   };
-  window.addEventListener('scroll', updateActiveNav, { passive: true });
-  updateActiveNav();
+  const applyLocation = (options) => {
+    const id = pageIdFromLocation(window.location.pathname, window.location.hash) || 'overview';
+    showPage(id, options);
+  };
   const usagePeriodOrder = ['today', 'seven_days', 'month', 'year'];
   const usageTokenFields = [
     'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
@@ -536,7 +528,7 @@
     return value > 0 ? value : null;
   };
   // 配额耗尽 / 超 90% 与预算超 80% 的告警横幅，随 5 秒状态轮询刷新。
-  // 折叠状态下也能看到关键结论，不必展开分区。
+  // 横幅在各功能页顶部共用，点击可跳到对应页面。
   const renderSectionSummaries = (state) => {
     const alertHistory = (state && state.alert_history) || {};
     const alertSummary = document.getElementById('alert-history-summary');
@@ -580,7 +572,7 @@
             level: 'danger',
             title: `${label} 额度已耗尽`,
             detail: `重置时间 ${formatReset(window.resets_at)}`,
-            href: '#accounts',
+            href: '/accounts',
             link: '查看额度'
           });
         } else if (window.used_percent !== null && window.used_percent !== undefined && !Number.isNaN(percent) && percent >= 90) {
@@ -588,7 +580,7 @@
             level: 'warn',
             title: `${label} 已使用 ${percent.toFixed(1)}%`,
             detail: '接近额度上限，注意剩余用量',
-            href: '#accounts',
+            href: '/accounts',
             link: '查看额度'
           });
         }
@@ -601,7 +593,7 @@
         level: alert.level === 'danger' ? 'danger' : 'warn',
         title: alert.message,
         detail: `${alert.kind === 'burst' ? '突发窗口' : '累计窗口'} · 对端 ${alert.remote || '未知'}`,
-        href: '#alert-history',
+        href: '/alerts',
         link: '查看告警历史'
       });
     });
@@ -611,9 +603,9 @@
       if (spent !== null) {
         const ratio = (spent / budget) * 100;
         if (ratio >= 100) {
-          alerts.push({ level: 'danger', title: `本月 API 等价金额 ${formatUsdCompact(spent)} 已超预算`, detail: `月预算 ${formatUsdCompact(budget)}（${ratio.toFixed(0)}%）`, href: '#usage', link: '查看用量' });
+          alerts.push({ level: 'danger', title: `本月 API 等价金额 ${formatUsdCompact(spent)} 已超预算`, detail: `月预算 ${formatUsdCompact(budget)}（${ratio.toFixed(0)}%）`, href: '/usage', link: '查看用量' });
         } else if (ratio >= 80) {
-          alerts.push({ level: 'warn', title: `本月 API 等价金额 ${formatUsdCompact(spent)} 已达预算 ${ratio.toFixed(0)}%`, detail: `月预算 ${formatUsdCompact(budget)}`, href: '#usage', link: '查看用量' });
+          alerts.push({ level: 'warn', title: `本月 API 等价金额 ${formatUsdCompact(spent)} 已达预算 ${ratio.toFixed(0)}%`, detail: `月预算 ${formatUsdCompact(budget)}`, href: '/usage', link: '查看用量' });
         }
       }
     }
@@ -623,7 +615,7 @@
         level: reminder.level === 'danger' ? 'danger' : 'warn',
         title: reminder.title || reminder.message,
         detail: reminder.detail || '',
-        href: '#housekeeping',
+        href: '/disk',
         link: '查看磁盘与会话管理'
       });
     });
@@ -633,7 +625,7 @@
         level: 'warn',
         title: reminder.title || reminder.message,
         detail: reminder.detail || '',
-        href: '#accounts',
+        href: '/accounts',
         link: '查看会话'
       });
     });
@@ -2267,7 +2259,7 @@
       housekeepingNote(action === 'archive' ? `归档该会话失败：${error.message}` : `清理该会话失败：${error.message}`);
     }
   };
-  // 单会话归档的进度显示在页面顶部关注区，折叠的磁盘分区里看不到提示。
+  // 单会话归档的进度显示在各页共用的顶部关注区，并从这里跳到磁盘页。
   const archiveNotice = (text, level) => {
     // 中文注释：单独一个容器，避免被每 5 秒的 renderAlerts 覆盖。
     const container = document.getElementById('session-notice');
@@ -2279,7 +2271,7 @@
       container.append(note);
     }
     note.className = `alert-row ${level === 'danger' ? 'danger' : 'warn'}`;
-    note.innerHTML = `<span class="alert-accent" aria-hidden="true"></span><div class="alert-body"><div class="alert-title">${escapeHtml(text)}</div><div class="alert-detail">来自活动会话表的「归档此会话」，归档文件可在磁盘与会话管理里恢复。</div></div><a class="alert-link" href="#housekeeping">查看磁盘与会话管理</a>`;
+    note.innerHTML = `<span class="alert-accent" aria-hidden="true"></span><div class="alert-body"><div class="alert-title">${escapeHtml(text)}</div><div class="alert-detail">来自活动会话表的「归档此会话」，归档文件可在磁盘与会话管理里恢复。</div></div><a class="alert-link" href="/disk">查看磁盘与会话管理</a>`;
   };
   const archiveSession = async (path) => {
     archiveNotice('正在归档会话…', 'warn');
@@ -2747,23 +2739,32 @@
       refreshInsights();
     });
   });
-  DEFAULT_COLLAPSED.forEach(applySectionState);
-  collapsedSections.forEach((id) => applySectionState(id));
-  document.querySelectorAll('[data-section-toggle]').forEach((toggle) => {
-    toggle.addEventListener('click', () => {
-      const id = toggle.dataset.sectionToggle;
-      setSectionCollapsed(id, !collapsedSections.has(id));
-    });
+  document.addEventListener('click', (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const node = event.target && event.target.nodeType === 1 ? event.target : event.target && event.target.parentElement;
+    const link = node && node.closest ? node.closest('a[href]') : null;
+    if (!link || (link.target && link.target !== '_self')) return;
+    let url;
+    try {
+      url = new URL(link.getAttribute('href'), window.location.href);
+    } catch (error) {
+      return;
+    }
+    if (url.origin !== window.location.origin) return;
+    const id = pageIdFromLocation(url.pathname, url.hash);
+    if (!id || id === 'settings') return;
+    event.preventDefault();
+    if (id === currentPageId() && !url.hash) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    showPage(id, { push: true, hash: url.hash });
   });
-  navLinks.forEach((link) => {
-    link.addEventListener('click', () => {
-      const id = link.dataset.navTarget;
-      if (collapsedSections.has(id)) setSectionCollapsed(id, false);
-    });
-  });
+  window.addEventListener('popstate', () => applyLocation({ replace: false }));
+  applyLocation({ replace: true });
 __THEME_SCRIPT__
   refresh();
-  ['alert-history', 'usage-search', 'housekeeping'].forEach(ensureSectionLoaded);
+  ensureSectionLoaded(currentPageId());
   mainRefreshTimer = window.setInterval(refresh, 5000);
   // 中文注释：标签页隐藏时暂停自动刷新和索引轮询，回到前台立即补一次刷新。
   document.addEventListener('visibilitychange', () => {
