@@ -38,6 +38,7 @@
       .kpi-value { font-size: 24px; }
       .section-block { padding: 16px; }
       .panel-heading { align-items: flex-start; flex-direction: column; gap: 9px; }
+      .account-list { grid-template-columns: minmax(0, 1fr); }
       .account-heading { flex-direction: column; }
       .account-side { justify-items: start; text-align: left; }
       .usage-summary,

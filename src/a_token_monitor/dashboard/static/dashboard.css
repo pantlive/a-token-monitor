@@ -43,9 +43,12 @@
     .section-block.is-collapsed { padding-bottom: 18px; }
     .section-block.is-collapsed .section-body { display: none; }
     .section-body { margin-top: 2px; }
-    /* 中文注释：同一行的卡片等高（默认 stretch），否则高度不一，页脚和行位置都会错开。 */
-    .account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 15px; }
-    .account-block { display: flex; flex-direction: column; padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
+    /* 中文注释：同一行的卡片等高（默认 stretch），否则高度不一，页脚和行位置都会错开。
+       账号页独立后主栏比原先套在 panel 里更宽，minmax(340px) 会在约 1420px 内容宽
+       排出 4 列，卡片被压到下限后标题、速度徽章和额度文案会挤出卡片。
+       用「至少三分之一宽」把列数封顶为 3；1～2 张卡片时 auto-fit 仍会拉满。 */
+    .account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(340px, calc((100% - 30px) / 3))), 1fr)); gap: 15px; }
+    .account-block { display: flex; flex-direction: column; min-width: 0; padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
     /* 中文注释：紧跟在额度行之后的那段小标题（活动会话）吃掉剩余空间，
        卡片等高时页脚自然贴底对齐；注意不能用 :nth-of-type，它按 div 序号算。 */
     .account-block .quota-rows-block + .account-subtitle { margin-top: auto; }
@@ -57,7 +60,7 @@
     /* 中文注释：账号 ID 长短会让 meta 折成 1 行或 2 行，这里固定成两行高度，
        heading 高度才不会跟着变、三行额度窗口才能跨卡片对齐。 */
     .account-meta { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 3.1em; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-    .account-side { display: grid; justify-items: end; gap: 7px; text-align: right; }
+    .account-side { display: grid; justify-items: end; gap: 7px; min-width: 0; text-align: right; }
     .plan-badge { padding: 4px 8px; border: 1px solid var(--cyan-border); border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
     .account-activity { color: var(--muted); font-size: 11px; }
     .account-block .account-subtitle:first-of-type { margin-top: 17px; }
@@ -231,7 +234,7 @@
     .package-block .package-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
 
     /* 中文注释：账号卡片的实时速度——迷你走势条 + 数字，走势条替代圆点，信息更直观。 */
-    .account-speed { display: inline-flex; align-items: center; gap: 8px; color: var(--muted-strong); }
+    .account-speed { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; max-width: 100%; color: var(--muted-strong); }
     .account-speed .speed-spark { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 14px; }
     .account-speed .speed-spark i { display: block; width: 2px; border-radius: 1px; background: var(--cyan); opacity: .9; }
     .account-speed.is-stale .speed-spark i { background: var(--muted-dim); opacity: .55; }
