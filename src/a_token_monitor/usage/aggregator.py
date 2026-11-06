@@ -72,6 +72,9 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
 
     _DAILY_TREND_DAYS = 30
 
+    # 中文注释：热力图按自然周对齐，53 列覆盖最近一年（含当前未走完的一周）。
+    _HEATMAP_WEEKS = 53
+
     # 中文注释：后台索引限速，避免冷 vhdx 被一次读满，同时不再靠手工连点。
     _DEFAULT_INDEX_BYTES_PER_SEC = 1 * 1024 * 1024
 
@@ -402,11 +405,17 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
             if indexing["complete"]
             else []
         )
+        heatmap = (
+            self._build_heatmap(observed_at, file_deltas)
+            if indexing["complete"]
+            else []
+        )
         snapshot = {
             "observed_at": observed_at,
             "pricing": pricing_metadata(),
             "periods": periods,
             "daily": daily,
+            "heatmap": heatmap,
             "cache_seconds": self.refresh_interval,
             "indexing": indexing,
         }
@@ -434,6 +443,7 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
             "pricing": pricing_metadata(),
             "periods": [],
             "daily": [],
+            "heatmap": [],
             "cache_seconds": 300.0,
         }
 
@@ -672,6 +682,69 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
             entry["estimated_cost_usd"] = _round_number(entry["estimated_cost_usd"])
         return days
 
+    def _build_heatmap(
+        self,
+        now: float,
+        file_deltas: Mapping[Path, tuple[UsageDelta, ...]],
+    ) -> list[dict[str, Any]]:
+        """按本地自然日汇总最近 53 周的 token、请求数和 API 等价金额。
+
+        起点对齐到 52 周前的周一，终点是当前周的周日：前端可以固定画
+        53 列 × 7 行，不需要再处理首尾不完整的星期。当前周尚未到来的
+        日期保留为零并标记 ``future``，避免被误认为真实的零用量。
+        """
+
+        today = to_local(now).date()
+        start_offset = today.weekday() + (self._HEATMAP_WEEKS - 1) * 7
+        start_day = today - timedelta(days=start_offset)
+        days: list[dict[str, Any]] = []
+        index: dict[str, dict[str, Any]] = {}
+        for offset in range(self._HEATMAP_WEEKS * 7):
+            day = start_day + timedelta(days=offset)
+            key = day.strftime("%Y-%m-%d")
+            entry: dict[str, Any] = {
+                "date": key,
+                "total_tokens": 0,
+                "requests": 0,
+                "estimated_cost_usd": 0.0,
+                "has_unpriced": False,
+                "future": day > today,
+            }
+            days.append(entry)
+            index[key] = entry
+        first_start = local_day_start(now, days_ago=start_offset)
+        for path, deltas in file_deltas.items():
+            for delta, estimate, requests in self._rollup_entries_with_requests(
+                path, deltas, first_start, now
+            ):
+                key = local_day_key(delta.timestamp)
+                day_entry = index.get(key)
+                if day_entry is None:
+                    continue
+                day_entry["total_tokens"] += delta.usage.total_tokens
+                day_entry["requests"] += requests
+                cost = estimate.get("estimated_cost_usd")
+                if cost is None:
+                    day_entry["has_unpriced"] = True
+                else:
+                    day_entry["estimated_cost_usd"] += float(cost)
+        for entry in days:
+            entry["estimated_cost_usd"] = _round_number(entry["estimated_cost_usd"])
+        return days
+
+    def _rollup_entries_with_requests(
+        self,
+        path: Path,
+        deltas: tuple[UsageDelta, ...],
+        start: float,
+        end: float,
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any], int]]:
+        """更新文件分桶并返回带请求数的汇总。"""
+
+        rollup = self._rollups.setdefault(path, _FileRollup())
+        rollup.update(deltas)
+        yield from rollup.entries_with_requests(start, end)
+
     def _rollup_entries(
         self,
         path: Path,
@@ -681,9 +754,10 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
     ) -> Iterator[tuple[UsageDelta, Mapping[str, Any]]]:
         """按文件更新新尾部，再复用各窗口共用的计价分桶。"""
 
-        rollup = self._rollups.setdefault(path, _FileRollup())
-        rollup.update(deltas)
-        yield from rollup.entries(start, end)
+        for delta, estimate, _requests in self._rollup_entries_with_requests(
+            path, deltas, start, end
+        ):
+            yield delta, estimate
 
 
 def _source_for_account_key(

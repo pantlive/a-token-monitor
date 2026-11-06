@@ -85,7 +85,8 @@ Linux 上按 agent 进程统计外发 TCP 字节（回环不计入，从不读�
 
 ### 用量与 API 等价金额
 
-先看近 30 天的金额趋势，再按账号、模型或项目拆开，支持筛选、Top 5 排行和月度预算。
+先看最近 53 周的每日用量热力图（Token / 请求 / 费用可切换），再看近 30 天的金额趋势，
+并可按账号、模型或项目拆开，支持筛选、Top 5 排行和月度预算。
 账号卡片和概览还会显示**实时输出速度**：Codex 从 rollout 的流式窗口算出精确的首 token
 延迟（TTFT）与 TPS；Claude Code 用 transcript 里的 `api-request` 与 `requestRef` 还原
 每次请求的生成窗口（旧版日志没有这两类记录时退回相邻消息的时间差）；其它 provider 用
@@ -95,7 +96,7 @@ Linux 上按 agent 进程统计外发 TCP 字节（回环不计入，从不读�
 token 数量一律压缩显示（`5.86B`、`23.76M`、`181.2K`），不用再一位位去数；鼠标悬浮看
 精确值，脚本里用 `--json`。
 
-![用量与费用：30 天趋势、筛选、预算和按账号明细](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-zh.png)
+![用量与费用：53 周热力图、30 天趋势、筛选、预算和按账号明细](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-zh.png)
 
 ### 使用习惯与省 token 建议
 
@@ -248,8 +249,9 @@ GitHub API 限流时设置 `GITHUB_TOKEN` 即可提高限额。
   Grok / Command Code 用各自额度接口返回的套餐名，Claude Code 用本地凭据里的
   订阅类型（Pro / Max 等）。读取不到额度窗口的账号（包括本身没有额度概念的
   provider）也保留卡片，继续展示用量与会话。
-- **用量与成本估算**：按账号 / 模型 / 项目三种维度切换，同一口径聚合；筛选
-  条件可叠加，表尾给出合计行与占比，并始终显示账号、项目成本 Top 5。
+- **用量与成本估算**：顶部是最近 53 周的每日用量热力图（Token / 请求 / 费用可切换），
+  下方按账号 / 模型 / 项目三种维度切换，同一口径聚合；筛选条件可叠加，
+  表尾给出合计行与占比，并始终显示账号、项目成本 Top 5。
 - **用量检索**：直接检索用量索引：时间范围、模型、账号、关键词四条件筛选，
   四种汇总视图，支持翻页与会话下钻；`GET /api/usage/search` 提供同样能力。
 - **告警历史 / 异常流量**：实时进程表 + 历史告警按时间、级别、规则、已读状态

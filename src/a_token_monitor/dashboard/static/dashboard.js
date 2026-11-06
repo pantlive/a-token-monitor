@@ -254,6 +254,13 @@
   let selectedUsagePeriod = 'today';
   let selectedUsageModel = '';
   let selectedUsageProject = '';
+  // 中文注释：热力图默认看金额，和页面标题「用量与成本」的主指标一致。
+  let selectedHeatmapMetric = 'cost';
+  const heatmapMetrics = [
+    { key: 'tokens', label: 'Token', value: (day) => Number(day && day.total_tokens || 0) },
+    { key: 'requests', label: '请求', value: (day) => Number(day && day.requests || 0) },
+    { key: 'cost', label: '费用', value: (day) => Number(day && day.estimated_cost_usd || 0) },
+  ];
   // 用量统计维度：账号 / 模型 / 项目共用同一份叶子聚合，只切换分组方式。
   const usageDimensions = [['account', '按账号'], ['model', '按模型'], ['project', '按项目']];
   const usageDimensionLabels = { account: '按账号', model: '按模型', project: '按项目' };
@@ -665,6 +672,84 @@
       renderAlerts();
     });
   };
+  // 中文注释：53 周 × 7 天固定网格，后端已经把起点对齐到周一；这里只负责
+  // 按指标分档着色、月份/星期标签和悬浮明细，缺的日期由后端补零。
+  const parseHeatmapDate = (value) => {
+    const parts = String(value || '').split('-').map(Number);
+    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return null;
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  };
+  const heatmapThresholds = (values) => {
+    const positive = values.filter((value) => value > 0).sort((left, right) => left - right);
+    if (!positive.length) return [0, 0, 0];
+    const pick = (share) => positive[Math.min(positive.length - 1, Math.max(0, Math.ceil(positive.length * share) - 1))];
+    return [pick(0.25), pick(0.5), pick(0.75)];
+  };
+  const heatmapLevel = (value, thresholds) => {
+    if (!(value > 0)) return 0;
+    if (value <= thresholds[0]) return 1;
+    if (value <= thresholds[1]) return 2;
+    if (value <= thresholds[2]) return 3;
+    return 4;
+  };
+  const renderUsageHeatmap = (days) => {
+    if (!Array.isArray(days) || !days.length) return '';
+    const metric = heatmapMetrics.find((item) => item.key === selectedHeatmapMetric) || heatmapMetrics[heatmapMetrics.length - 1];
+    const thresholds = heatmapThresholds(days.map((day) => metric.value(day)));
+    const weeks = Math.ceil(days.length / 7);
+    const locale = document.documentElement.lang === 'en' ? 'en-US' : 'zh-CN';
+    const weekdayFormat = new Intl.DateTimeFormat(locale, { weekday: 'short' });
+    const monthFormat = new Intl.DateTimeFormat(locale, { month: 'short' });
+    const todayKey = new Date().toLocaleDateString('sv-SE');
+    const firstDate = parseHeatmapDate(days[0] && days[0].date);
+    const weekdayRows = ['<span class="heatmap-weekday-spacer"></span>'];
+    for (let index = 0; index < 7; index += 1) {
+      if (index % 2 === 0 && firstDate) {
+        const date = new Date(firstDate);
+        date.setDate(firstDate.getDate() + index);
+        weekdayRows.push(`<span class="heatmap-weekday">${escapeHtml(weekdayFormat.format(date))}</span>`);
+      } else {
+        weekdayRows.push('<span></span>');
+      }
+    }
+    let previousMonth = '';
+    const cells = [];
+    days.forEach((day, index) => {
+      const week = Math.floor(index / 7);
+      const row = index % 7;
+      const date = parseHeatmapDate(day && day.date);
+      if (row === 0 && date) {
+        const monthKey = `${date.getFullYear()}-${date.getMonth()}`;
+        if (monthKey !== previousMonth) {
+          previousMonth = monthKey;
+          cells.push(`<span class="heatmap-month" style="grid-column:${week + 1};grid-row:1">${escapeHtml(monthFormat.format(date))}</span>`);
+        }
+      }
+      const value = metric.value(day);
+      const classes = ['heatmap-cell', `level-${heatmapLevel(value, thresholds)}`];
+      if (day && day.future) classes.push('is-future');
+      if (day && day.date === todayKey) classes.push('is-today');
+      const unpriced = day && day.has_unpriced ? '（含未定价模型）' : '';
+      const title = `${day && day.date || ''} · ${formatNumber(day && day.requests || 0)} 次请求 · ${formatTokens(day && day.total_tokens || 0)} tokens · ${formatUsdCompact(day && day.estimated_cost_usd)}${unpriced}`;
+      cells.push(`<span class="${classes.join(' ')}" style="grid-column:${week + 1};grid-row:${row + 2}" title="${escapeHtml(title)}"></span>`);
+    });
+    const tabs = heatmapMetrics.map((item) => {
+      const selected = item.key === metric.key;
+      return `<button class="usage-heatmap-tab${selected ? ' selected' : ''}" type="button" aria-pressed="${selected ? 'true' : 'false'}" data-heatmap-metric="${escapeHtml(item.key)}">${escapeHtml(item.label)}</button>`;
+    }).join('');
+    const legend = [0, 1, 2, 3, 4].map((level) => `<span class="heatmap-cell level-${level}"></span>`).join('');
+    return `<div class="usage-heatmap">
+      <div class="usage-heatmap-head">
+        <div><div class="usage-heatmap-title">用量热力图</div><div class="usage-heatmap-subtitle">最近 ${weeks} 周的每日用量</div></div>
+        <div class="usage-heatmap-tabs" role="group" aria-label="切换热力图指标">${tabs}</div>
+      </div>
+      <div class="usage-heatmap-body">
+        <div class="heatmap-weekdays" aria-hidden="true">${weekdayRows.join('')}</div>
+        <div class="heatmap-scroll"><div class="heatmap-grid" style="grid-template-columns:repeat(${weeks}, var(--heatmap-cell-size))">${cells.join('')}</div></div>
+      </div>
+      <div class="heatmap-legend" aria-hidden="true"><span>少</span>${legend}<span>多</span></div>
+    </div>`;
+  };
   const renderTrend = (daily) => {
     if (!Array.isArray(daily) || !daily.length) return '';
     const costs = daily.map((day) => Number(day && day.estimated_cost_usd) || 0);
@@ -884,7 +969,7 @@
     const rankings = rankingBlocks.length
       ? `<div class="usage-rankings${rankingBlocks.length === 1 ? ' single' : ''}">${rankingBlocks.join('')}</div>`
       : '';
-    container.innerHTML = `${renderTrend(usage.daily)}
+    container.innerHTML = `${renderUsageHeatmap(usage.heatmap)}${renderTrend(usage.daily)}
       <div class="usage-tabs">${tabs}<span class="usage-tabs-divider" aria-hidden="true"></span>${dimensionTabs}</div>
       ${filterControls}${summary}${rankings}<div class="usage-note">${indexingNote}${escapeHtml(note)} 统计维度：${escapeHtml(usageDimensionLabels[selectedUsageDimension] || '按账号')} · 时间范围：${escapeHtml(formatTime(period.start_at))} 至 ${escapeHtml(formatTime(period.end_at))} · credits：${escapeHtml(formatCredits(totalCredits))}</div>${renderKimiReconciliation(periods)}${renderCommandCodeReconciliation(periods)}
       <div class="table-wrap usage-table"><table>
@@ -906,6 +991,12 @@
         } else {
           expandedUsageModelLists.add(key);
         }
+        renderUsage(state);
+      });
+    });
+    container.querySelectorAll('[data-heatmap-metric]').forEach((button) => {
+      button.addEventListener('click', () => {
+        selectedHeatmapMetric = button.dataset.heatmapMetric || 'cost';
         renderUsage(state);
       });
     });
