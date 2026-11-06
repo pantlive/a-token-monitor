@@ -20,6 +20,7 @@ from a_token_monitor.usage import (
     SessionSwitchThresholds,
     TokenUsage,
     UsageAggregator,
+    UsageDelta,
     _estimate_usage,
     _lookup_pricing,
     _UsageIndexStore,
@@ -1092,6 +1093,60 @@ def _period(state: dict[str, object], key: str) -> dict[str, object]:
         if period["key"] == key:
             return period
     raise AssertionError(f"缺少时间窗口: {key}")
+
+
+class UsageHeatmapTests(unittest.TestCase):
+    """验证 53 周热力图的日期对齐、请求数和每日金额。"""
+
+    def test_builds_aligned_grid_with_requests_and_cost(self) -> None:
+        now = _timestamp("2026-08-27T12:00:00Z")
+        path = Path("/synthetic/heatmap.jsonl")
+        deltas = (
+            UsageDelta(
+                _timestamp("2026-08-26T01:00:00Z"),
+                "gpt-5.6-luna",
+                TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120),
+            ),
+            UsageDelta(
+                _timestamp("2026-08-26T01:10:00Z"),
+                "gpt-5.6-luna",
+                TokenUsage(input_tokens=200, output_tokens=30, total_tokens=230),
+            ),
+            UsageDelta(
+                _timestamp("2026-08-27T01:00:00Z"),
+                "gpt-5.6-luna",
+                TokenUsage(input_tokens=300, output_tokens=40, total_tokens=340),
+            ),
+        )
+        aggregator = UsageAggregator()
+        heatmap = aggregator._build_heatmap(now, {path: deltas})
+        by_date = {day["date"]: day for day in heatmap}
+
+        # 53 列 × 7 行，起点对齐到 52 周前的周一，覆盖到当前周的周日。
+        self.assertEqual(len(heatmap), 53 * 7)
+        self.assertEqual(heatmap[0]["date"], "2025-08-25")
+        self.assertEqual(
+            datetime.strptime(heatmap[0]["date"], "%Y-%m-%d").weekday(),
+            0,
+        )
+        self.assertEqual(heatmap[-1]["date"], "2026-08-30")
+        self.assertTrue(heatmap[-1]["future"])
+        # 同一小时的两次请求应合并成一条汇总，但仍计为 2 次请求。
+        self.assertEqual(by_date["2026-08-26"]["requests"], 2)
+        self.assertEqual(by_date["2026-08-26"]["total_tokens"], 350)
+        self.assertEqual(by_date["2026-08-27"]["requests"], 1)
+        self.assertFalse(by_date["2026-08-27"]["future"])
+        self.assertTrue(by_date["2026-08-28"]["future"])
+        expected_cost = sum(
+            _estimate_usage(delta.usage, delta.model)["estimated_cost_usd"]
+            for delta in deltas
+        )
+        self.assertAlmostEqual(
+            sum(day["estimated_cost_usd"] for day in heatmap),
+            expected_cost,
+        )
+        # 未完成索引时没有可展示的热力图。
+        self.assertEqual(UsageAggregator.empty_snapshot(now)["heatmap"], [])
 
 
 class UsageInsightsTests(unittest.TestCase):

@@ -102,8 +102,9 @@ different meter from your subscription bill.
 
 ### Usage and API-equivalent cost
 
-A 30-day cost trend, then the same numbers by account, model or project, with filters,
-Top 5 rankings and a monthly budget. Account cards and the overview also show **live output
+A 53-week daily heatmap (switch between tokens, requests and cost), then a 30-day cost
+trend and the same numbers by account, model or project, with filters, Top 5 rankings
+and a monthly budget. Account cards and the overview also show **live output
 speed**: Codex gets an exact time-to-first-token (TTFT) and TPS from the streaming windows in
 its rollout, Claude Code derives each request's generation window from the `api-request` and
 `requestRef` records in its transcript (older transcripts without them fall back to the gap
@@ -115,7 +116,7 @@ only, no traffic inspection. Token counts are compact (`5.86B`, `23.76M`, `181.2
 so you never have to count digits; hover a cell for the exact value, or read it from
 `--json`.
 
-![Usage and cost: 30-day trend, filters, budget and per-account breakdown](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-en.png)
+![Usage and cost: 53-week heatmap, 30-day trend, filters, budget and per-account breakdown](https://raw.githubusercontent.com/pantlive/a-token-monitor/main/docs/screenshots/usage-en.png)
 
 ### Habits and token-saving tips
 
@@ -280,9 +281,10 @@ All of these work on both `daemon` and `service install`.
   quota endpoints, and Claude Code uses the subscription type (Pro / Max, …) stored in
   its local credentials. Accounts whose quota windows cannot be read, or whose provider
   has no quota concept, keep their card and still show usage and sessions.
-- **Usage & cost estimation**: switch between the account / model / project dimensions
-  with one set of aggregation rules; filters stack, the table ends with a total row and
-  share percentages, and the Top 5 accounts and projects by cost are always shown.
+- **Usage & cost estimation**: a 53-week daily heatmap with token / request / cost
+  switches, then the account / model / project dimensions with one set of aggregation
+  rules; filters stack, the table ends with a total row and share percentages, and the
+  Top 5 accounts and projects by cost are always shown.
 - **Usage search**: query the usage index directly by time range, model, account and
   keyword, with four summary views, paging and per-session drill-down;
   `GET /api/usage/search` exposes the same capability.

@@ -1201,3 +1201,14 @@ EN.update({
     "检查更新的网络超时秒数（默认: 6）": "Network timeout in seconds for the update check (default: 6)",
     "不检查新版本，也不打印更新提醒（也可用 A_TOKEN_MONITOR_NO_UPDATE_CHECK=1）": "Do not check for new versions and do not print update reminders (you can also set A_TOKEN_MONITOR_NO_UPDATE_CHECK=1)",
 })
+
+EN.update({
+    # 中文注释：用量页的 53 周热力图。
+    "用量热力图": "Usage heatmap",
+    "最近 ${weeks} 周的每日用量": "Daily usage over the last ${weeks} weeks",
+    "切换热力图指标": "Switch heatmap metric",
+    "请求": "Requests",
+    "费用": "Cost",
+    "少": "Less",
+    "多": "More",
+})

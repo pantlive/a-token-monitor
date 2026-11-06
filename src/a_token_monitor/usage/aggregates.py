@@ -153,10 +153,14 @@ class _RollupBin:
         self.usage = self.usage.add(delta.usage)
         self.cost.add(estimate)
 
-    def entries(
+    def entries_with_requests(
         self, start: float, end: float
-    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any]]]:
-        """完整桶直接合并，只有跨越时间窗口边界的桶逐条过滤。"""
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any], int]]:
+        """完整桶直接合并，只有跨越时间窗口边界的桶逐条过滤。
+
+        第三个返回值是该条汇总包含的请求数：完整桶用 ``items`` 的长度，
+        逐条过滤时每条增量代表一次请求。
+        """
 
         if self.last_at < start or self.first_at > end:
             return
@@ -168,13 +172,22 @@ class _RollupBin:
                     "estimated_cost_usd": self.cost.estimated_cost_usd,
                     "cache_savings_usd": self.cost.cache_savings_usd,
                 },
+                len(self.items),
             )
         else:
             yield from (
-                (delta, estimate)
+                (delta, estimate, 1)
                 for delta, estimate in self.items
                 if start <= delta.timestamp <= end
             )
+
+    def entries(
+        self, start: float, end: float
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any]]]:
+        """产出指定时间范围内的预计算汇总，不关心请求数。"""
+
+        for delta, estimate, _requests in self.entries_with_requests(start, end):
+            yield delta, estimate
 
 
 class _FileRollup:
@@ -206,6 +219,14 @@ class _FileRollup:
             bucket = self.bins.setdefault(key, _RollupBin(delta.model, delta.project))
             bucket.add(delta)
         self.sequence = deltas
+
+    def entries_with_requests(
+        self, start: float, end: float
+    ) -> Iterator[tuple[UsageDelta, Mapping[str, Any], int]]:
+        """产出指定时间范围内的预计算汇总及对应的请求数。"""
+
+        for bucket in self.bins.values():
+            yield from bucket.entries_with_requests(start, end)
 
     def entries(
         self, start: float, end: float

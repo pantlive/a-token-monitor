@@ -155,6 +155,32 @@
     .insights-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 14px; }
     .observation-list { margin: 0; padding-left: 18px; color: var(--muted-strong); font-size: 12px; }
     .observation-list li { padding: 2px 0; }
+    .usage-heatmap { --heatmap-cell-size: 16px; --heatmap-gap: 3px; margin: 0 0 14px; padding: 16px 18px 14px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
+    .usage-heatmap-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .usage-heatmap-title { color: var(--text); font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .usage-heatmap-subtitle { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .usage-heatmap-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .usage-heatmap-tab { padding: 5px 12px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 12px; }
+    .usage-heatmap-tab:hover { color: var(--muted-strong); background: var(--surface-hover); }
+    .usage-heatmap-tab.selected { color: var(--violet-text-soft); background: var(--violet-soft); }
+    .usage-heatmap-body { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; }
+    .heatmap-weekdays { display: grid; flex: 0 0 auto; grid-template-rows: 16px repeat(7, var(--heatmap-cell-size)); row-gap: var(--heatmap-gap); color: var(--muted); font-size: 10px; line-height: var(--heatmap-cell-size); }
+    .heatmap-weekday { justify-self: end; padding-right: 2px; white-space: nowrap; }
+    .heatmap-weekday-spacer { height: 16px; }
+    .heatmap-scroll { min-width: 0; overflow-x: auto; padding: 0 28px 2px 0; }
+    .heatmap-grid { display: grid; grid-template-rows: 16px repeat(7, var(--heatmap-cell-size)); row-gap: var(--heatmap-gap); column-gap: var(--heatmap-gap); width: max-content; }
+    .heatmap-month { align-self: end; padding-bottom: 3px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .heatmap-cell { width: var(--heatmap-cell-size); height: var(--heatmap-cell-size); border-radius: 3px; background: var(--heatmap-0); }
+    .heatmap-cell.level-0 { background: var(--heatmap-0); }
+    .heatmap-cell.level-1 { background: var(--heatmap-1); }
+    .heatmap-cell.level-2 { background: var(--heatmap-2); }
+    .heatmap-cell.level-3 { background: var(--heatmap-3); }
+    .heatmap-cell.level-4 { background: var(--heatmap-4); }
+    .heatmap-cell.is-future { background: var(--heatmap-0); opacity: .35; }
+    .heatmap-cell.is-today { box-shadow: inset 0 0 0 1px var(--cyan); }
+    .heatmap-cell:hover { outline: 1px solid var(--violet-text-accent); outline-offset: 1px; }
+    .heatmap-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 10px; color: var(--muted); font-size: 10px; }
+    .heatmap-legend .heatmap-cell { width: 10px; height: 10px; border-radius: 2px; }
     .usage-trend, .usage-top-projects { margin: 0 0 14px; padding: 13px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }
     /* 中文注释：账号 / 项目成本排行并排两列；只有一个有数据时占满整行。 */
     .usage-rankings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }

@@ -64,6 +64,11 @@
       --placeholder-text: #6c8098;
       --border-strong: #3d5670;
       --focus-ring: rgba(34, 211, 238, .35);
+      --heatmap-0: #1b2733;
+      --heatmap-1: #2a224d;
+      --heatmap-2: #3f2f78;
+      --heatmap-3: #5d41b8;
+      --heatmap-4: #8b5cf6;
     }
 
     /* 中文注释：白天模式复用同一组语义变量，只覆盖取值；JS 在 <html> 上切换
@@ -132,6 +137,11 @@
       --placeholder-text: #9aa6b4;
       --border-strong: #b9c6d4;
       --focus-ring: rgba(14, 116, 144, .28);
+      --heatmap-0: #edf0f4;
+      --heatmap-1: #e4dcff;
+      --heatmap-2: #cbbdff;
+      --heatmap-3: #a98bff;
+      --heatmap-4: #7c5cff;
       --shadow: 0 12px 28px rgba(15, 32, 56, .10);
     }
     * { box-sizing: border-box; }
