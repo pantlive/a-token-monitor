@@ -289,11 +289,11 @@ All of these work on both `daemon` and `service install`.
 - **Alert history / traffic anomalies**: a live process table plus persisted alerts
   searchable by time, severity, rule, read state and keyword, with read-state marking and
   range deletion.
-- **One feature per page**: the sidebar opens a dedicated page for each tool
-  (`/accounts` for quotas, `/traffic` for live processes, `/usage` and `/insights` for
-  cost, `/alerts`, `/search`, and `/disk` for history and housekeeping). The overview
-  keeps the live KPI cards. Alert history, usage search and disk management load when
-  you open that page.
+- **One feature per page**: the overview shows live KPI cards and the account/quota
+  cards beneath them. Other tools each have their own page (`/traffic` for live
+  processes, `/usage` and `/insights` for cost, `/alerts`, `/search`, and `/disk` for
+  history and housekeeping). Alert history, usage search and disk management load when
+  you open that page. `/accounts` still opens the overview so old bookmarks keep working.
 
 Alert details correlate local sessions by working directory and time window, prioritizing
 actions and object types such as initiating an image upload, pushing code, reading code,

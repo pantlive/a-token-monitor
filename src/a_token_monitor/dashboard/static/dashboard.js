@@ -280,14 +280,25 @@
     'usage-search': () => refreshUsageSearch(),
     housekeeping: () => refreshHousekeeping()
   };
-  const dashboardPages = window.__dashboardPages || { paths: {}, titles: {}, canonical: {} };
+  const dashboardPages = window.__dashboardPages || { paths: {}, titles: {}, canonical: {}, aliases: {} };
   const currentPageId = () => document.documentElement.dataset.page || 'overview';
   const pageIdFromLocation = (pathname, hash) => {
     const path = (pathname || '/').replace(/\/+$/, '') || '/';
     const hashId = String(hash || '').replace(/^#/, '');
+    if (hashId && dashboardPages.aliases && dashboardPages.aliases[hashId]) {
+      return dashboardPages.aliases[hashId];
+    }
     if (hashId && dashboardPages.canonical[hashId]) return hashId;
     if (dashboardPages.paths[path]) return dashboardPages.paths[path];
     return path === '/' ? 'overview' : '';
+  };
+  const scrollHashForLocation = (pathname, hash) => {
+    const path = (pathname || '/').replace(/\/+$/, '') || '/';
+    const hashId = String(hash || '').replace(/^#/, '');
+    if (path === '/accounts' || hashId === 'accounts' || hashId === 'account-list') {
+      return '#account-list';
+    }
+    return hash || '';
   };
   const urlForPage = (id, hash) => {
     const path = dashboardPages.canonical[id] || '/';
@@ -318,7 +329,7 @@
     }
     const hashId = String(settings.hash || '').replace(/^#/, '');
     if (hashId) {
-      const target = document.getElementById(hashId);
+      const target = document.getElementById(hashId === 'accounts' ? 'account-list' : hashId);
       if (target) target.scrollIntoView();
       else window.scrollTo(0, 0);
     } else {
@@ -326,8 +337,10 @@
     }
   };
   const applyLocation = (options) => {
+    const settings = options || {};
+    const hash = scrollHashForLocation(window.location.pathname, window.location.hash);
     const id = pageIdFromLocation(window.location.pathname, window.location.hash) || 'overview';
-    showPage(id, options);
+    showPage(id, { ...settings, hash });
   };
   const usagePeriodOrder = ['today', 'seven_days', 'month', 'year'];
   const usageTokenFields = [
@@ -572,7 +585,7 @@
             level: 'danger',
             title: `${label} 额度已耗尽`,
             detail: `重置时间 ${formatReset(window.resets_at)}`,
-            href: '/accounts',
+            href: '/#account-list',
             link: '查看额度'
           });
         } else if (window.used_percent !== null && window.used_percent !== undefined && !Number.isNaN(percent) && percent >= 90) {
@@ -580,7 +593,7 @@
             level: 'warn',
             title: `${label} 已使用 ${percent.toFixed(1)}%`,
             detail: '接近额度上限，注意剩余用量',
-            href: '/accounts',
+            href: '/#account-list',
             link: '查看额度'
           });
         }
@@ -625,7 +638,7 @@
         level: 'warn',
         title: reminder.title || reminder.message,
         detail: reminder.detail || '',
-        href: '/accounts',
+        href: '/#account-list',
         link: '查看会话'
       });
     });
@@ -2305,7 +2318,8 @@
       ...sessions.map((session) => session.account || 'codex')
     ])];
     document.getElementById('quota-source').textContent = names.length ? `${names.length} 个账号` : '暂无账号';
-    document.getElementById('account-section-count').textContent = names.length ? `${names.length} 个账号` : '暂无账号';
+    const accountCount = document.getElementById('account-section-count');
+    if (accountCount) accountCount.textContent = names.length ? `${names.length} 个账号` : '暂无账号';
     if (names.length === 0) {
       container.innerHTML = '<div class="empty-state"><span class="empty-title">暂无账号</span><span class="empty-hint">还没有配置任何 agent 数据目录，可在设置页添加扫描目录。</span></div>';
       return;
@@ -2754,11 +2768,12 @@
     const id = pageIdFromLocation(url.pathname, url.hash);
     if (!id || id === 'settings') return;
     event.preventDefault();
-    if (id === currentPageId() && !url.hash) {
+    const nextHash = scrollHashForLocation(url.pathname, url.hash);
+    if (id === currentPageId() && !nextHash) {
       window.scrollTo(0, 0);
       return;
     }
-    showPage(id, { push: true, hash: url.hash });
+    showPage(id, { push: true, hash: nextHash });
   });
   window.addEventListener('popstate', () => applyLocation({ replace: false }));
   applyLocation({ replace: true });

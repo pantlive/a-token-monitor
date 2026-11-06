@@ -56,7 +56,7 @@ _LANGUAGE_COOKIE_NAME = "a-token-monitor-language"
 _SIDEBAR_NAV_HTML = _asset("sidebar-nav.html")
 
 
-# 中文注释：在样式生效前写入 data-page，避免先画出总览再切到 /accounts 这类目标页。
+# 中文注释：在样式生效前写入 data-page，避免先画出总览再切到 /traffic 这类目标页。
 _PAGE_BOOT_SCRIPT = _asset("page-boot.html")
 
 

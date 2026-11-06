@@ -363,7 +363,7 @@ DEMO_TIMEZONE = timezone(timedelta(hours=8))
 DEMO_TIMEZONE_ID = "Asia/Shanghai"
 
 SHOTS = (
-    # 名称, 路径（/ = 总览首屏）
+    # 名称, 路径（/ = 总览首屏；/accounts 是总览别名，截图时滚到账号卡片）
     ("overview", "/"),
     ("accounts", "/accounts"),
     ("usage", "/usage"),
@@ -372,6 +372,9 @@ SHOTS = (
     ("alerts", "/alerts"),
     ("disk", "/disk"),
 )
+SHOT_SCROLL = {
+    "/accounts": "#account-list",
+}
 # 中文注释：用量与习惯分析按需加载，截图前先点开。按钮在对应功能页的 DOM 里，
 # 总览截图也要点一次，这样「今日金额」KPI 才有数。
 LOAD_BUTTONS = (
@@ -457,6 +460,13 @@ def capture(base_url: str, scratch: Path) -> None:
                 if loader:
                     page.evaluate("(selector) => document.querySelector(selector).click()", loader)
                     page.wait_for_timeout(4_000)
+                scroll = SHOT_SCROLL.get(path)
+                if scroll:
+                    page.evaluate(
+                        "(selector) => document.querySelector(selector)?.scrollIntoView()",
+                        scroll,
+                    )
+                    page.wait_for_timeout(400)
                 page.screenshot(path=str(target))
                 _shrink(target)
                 print(f"wrote {target.relative_to(ROOT)}")
