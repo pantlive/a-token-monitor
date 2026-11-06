@@ -80,7 +80,8 @@ from .state import (
 _BODY_DRAIN_LIMIT = 8 * 1024 * 1024
 
 # 中文注释：Dashboard 功能页共用同一份 HTML，由前端按路径只显示对应区块。
-# 带别名的路径兼容旧书签（#alert-history）和截图脚本用过的名字。
+# 带别名的路径兼容旧书签（#alert-history、/accounts）和截图脚本用过的名字。
+# /accounts 仍 200，前端把它当成总览（账号卡片挂在 KPI 下方）。
 _DASHBOARD_PAGE_PATHS: tuple[str, ...] = (
     "/",
     "/accounts",

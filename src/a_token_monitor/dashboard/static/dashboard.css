@@ -3,14 +3,13 @@
     html:not([data-page]) #overview,
     html[data-page="overview"] #overview,
     html[data-page="traffic"] #traffic,
-    html[data-page="accounts"] #accounts,
     html[data-page="usage"] #usage,
     html[data-page="insights"] #insights,
     html[data-page="alert-history"] #alert-history,
     html[data-page="usage-search"] #usage-search,
     html[data-page="housekeeping"] #housekeeping { display: block; }
     .page-view > .section-block { margin-top: 0; }
-    #packages-block, #housekeeping-actions { scroll-margin-top: 88px; }
+    #account-list, #packages-block, #housekeeping-actions { scroll-margin-top: 88px; }
     .scope-badge { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--panel); font-size: 12px; }
     .scope-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
     .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 13px; margin-bottom: 34px; }
@@ -44,9 +43,9 @@
     .section-block.is-collapsed .section-body { display: none; }
     .section-body { margin-top: 2px; }
     /* 中文注释：同一行的卡片等高（默认 stretch），否则高度不一，页脚和行位置都会错开。
-       账号页独立后主栏比原先套在 panel 里更宽，minmax(340px) 会在约 1420px 内容宽
-       排出 4 列，卡片被压到下限后标题、速度徽章和额度文案会挤出卡片。
-       用「至少三分之一宽」把列数封顶为 3；1～2 张卡片时 auto-fit 仍会拉满。 */
+       总览主栏约 1420px 时 minmax(340px) 会排出 4 列，卡片被压到下限后标题、
+       速度徽章和额度文案会挤出卡片。用「至少三分之一宽」把列数封顶为 3；
+       1～2 张卡片时 auto-fit 仍会拉满。 */
     .account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(340px, calc((100% - 30px) / 3))), 1fr)); gap: 15px; }
     .account-block { display: flex; flex-direction: column; min-width: 0; padding: 20px 21px 21px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-raised); }
     /* 中文注释：紧跟在额度行之后的那段小标题（活动会话）吃掉剩余空间，

@@ -4,7 +4,7 @@
       paths: {
         '/': 'overview',
         '/traffic': 'traffic',
-        '/accounts': 'accounts',
+        '/accounts': 'overview',
         '/usage': 'usage',
         '/insights': 'insights',
         '/alerts': 'alert-history',
@@ -18,7 +18,6 @@
       titles: {
         overview: '总览',
         traffic: '异常流量监控',
-        accounts: '账号与额度',
         usage: '用量与费用',
         insights: '习惯分析',
         'alert-history': '告警历史',
@@ -29,20 +28,25 @@
       canonical: {
         overview: '/',
         traffic: '/traffic',
-        accounts: '/accounts',
         usage: '/usage',
         insights: '/insights',
         'alert-history': '/alerts',
         'usage-search': '/search',
         housekeeping: '/disk',
         settings: '/settings'
+      },
+      // /accounts 与 #accounts 是总览别名：卡片挂在 KPI 下方，旧书签仍打开总览。
+      aliases: {
+        accounts: 'overview',
+        'account-list': 'overview'
       }
     };
     (() => {
       const pages = window.__dashboardPages;
       const path = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
       const hash = (window.location.hash || '').replace(/^#/, '');
-      const id = (hash && pages.canonical[hash]) ? hash : pages.paths[path];
+      const aliased = hash && pages.aliases && pages.aliases[hash];
+      const id = aliased || ((hash && pages.canonical[hash]) ? hash : pages.paths[path]);
       document.documentElement.dataset.page = id || 'overview';
     })();
   </script>

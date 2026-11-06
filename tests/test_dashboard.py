@@ -431,7 +431,9 @@ class DashboardTests(unittest.TestCase):
                     self.assertIn("用量与成本估算", html)
                     self.assertIn("API 等价金额", html)
                     self.assertIn("Dashboard 导航", html)
-                    self.assertIn('href="/accounts"', html)
+                    self.assertNotIn('data-nav-target="accounts"', html)
+                    self.assertNotIn("<h1>账号与额度</h1>", html)
+                    self.assertIn("'/accounts': 'overview'", html)
                     self.assertIn('href="/usage"', html)
                     self.assertIn('href="/traffic"', html)
                     self.assertIn("异常流量监控", html)
@@ -439,7 +441,12 @@ class DashboardTests(unittest.TestCase):
                         html.find('data-nav-target="overview"'),
                         html.find('data-nav-target="traffic"'),
                     )
-                    self.assertLess(html.find('id="traffic"'), html.find('id="accounts"'))
+                    self.assertLess(
+                        html.find('id="overview"'), html.find('id="account-list"')
+                    )
+                    self.assertLess(
+                        html.find('id="account-list"'), html.find('id="traffic"')
+                    )
                     self.assertIn('class="page-view"', html)
                     self.assertIn("__dashboardPages", html)
                     self.assertIn('id="account-list"', html)
@@ -478,7 +485,7 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("prompt", json.dumps(state, ensure_ascii=False))
 
     def test_feature_pages_serve_the_same_dashboard(self) -> None:
-        """账号、流量等功能页共用主页 HTML，刷新 /accounts 不会 404。"""
+        """流量等功能页共用主页 HTML；/accounts 仍是总览别名，刷新不会 404。"""
 
         paths = (
             "/accounts",
@@ -517,7 +524,8 @@ class DashboardTests(unittest.TestCase):
                 with urlopen(f"{base_url}/", timeout=2) as response:
                     home = response.read().decode("utf-8")
                 self.assertNotIn("__SIDEBAR_NAV__", home)
-                self.assertIn('href="/accounts"', home)
+                self.assertIn("'/accounts': 'overview'", home)
+                self.assertNotIn('data-nav-target="accounts"', home)
                 self.assertIn('class="page-view"', home)
                 for path in paths:
                     with urlopen(f"{base_url}{path}", timeout=2) as response:
@@ -534,6 +542,26 @@ class DashboardTests(unittest.TestCase):
                 server.close()
 
         self.assertEqual(missing.exception.code, 404)
+
+    def test_accounts_live_on_the_overview(self) -> None:
+        """账号卡片挂在总览 KPI 下方，侧栏不再单独设「账号与额度」页。"""
+
+        page = _DASHBOARD_HTML
+        overview = page.find('id="overview"')
+        account_list = page.find('id="account-list"')
+        traffic = page.find('id="traffic"')
+        self.assertNotEqual(overview, -1)
+        self.assertNotEqual(account_list, -1)
+        self.assertLess(overview, account_list)
+        self.assertLess(account_list, traffic)
+        self.assertNotIn('data-nav-target="accounts"', page)
+        self.assertNotIn("<h1>账号与额度</h1>", page)
+        self.assertNotIn('html[data-page="accounts"]', page)
+        self.assertIn("'/accounts': 'overview'", page)
+        self.assertIn("accounts: 'overview'", page)
+        self.assertIn("'account-list': 'overview'", page)
+        self.assertIn("const scrollHashForLocation = (pathname, hash) => {", page)
+        self.assertIn("href: '/#account-list'", page)
 
     def test_state_includes_kimi_account_without_quota(self) -> None:
         """Kimi 配额接口不可用时应只展示账号身份。"""
@@ -2362,7 +2390,7 @@ class StylesheetIntegrityTests(unittest.TestCase):
         实测过的坑：`.account-list` 用 align-items:start 时卡片按内容高度收缩
         （533px vs 485px）；账号 ID 长短让 meta 折成 1/2 行、表头高度 102/83px；
         百分比列用 auto 时进度条一行一个长度（259 / 274 / 294 / 314px）；
-        账号页独立后 minmax(340px) 会在约 1420px 排出 4 列，标题和速度徽章被挤出卡片。
+        总览主栏约 1420px 时 minmax(340px) 会排出 4 列，标题和速度徽章被挤出卡片。
         """
 
         css = _BASE_CSS + _DASHBOARD_CSS
@@ -2373,7 +2401,7 @@ class StylesheetIntegrityTests(unittest.TestCase):
         list_rules = rules(".account-list")
         self.assertTrue(list_rules)
         self.assertTrue(all("align-items: start" not in rule for rule in list_rules))
-        # 独立账号页主栏约 1420px 宽；封顶 3 列，避免 auto-fit + 340px 排出 4 列把卡片压爆。
+        # 总览主栏约 1420px 宽；封顶 3 列，避免 auto-fit + 340px 排出 4 列把卡片压爆。
         self.assertTrue(
             any(
                 "minmax(min(100%, max(340px, calc((100% - 30px) / 3)))" in rule
@@ -3269,7 +3297,7 @@ class FaviconTests(unittest.TestCase):
 
         page = _DASHBOARD_HTML
         # 账号卡片不再按「有没有额度窗口」过滤；额度接口失败或 provider 没有额度
-        # 概念的账号仍然要出现在「账号与额度」区。
+        # 概念的账号仍然要出现在总览的账号卡片区。
         self.assertNotIn("accountsWithQuota", page)
         self.assertNotIn("不在本区显示", page)
         self.assertIn("const names = [...new Set([", page)
@@ -3277,8 +3305,12 @@ class FaviconTests(unittest.TestCase):
         self.assertIn("暂无账号", page)
         # 计数用全部 names，不随额度读取结果变化。
         self.assertIn(
-            "document.getElementById('account-section-count').textContent = "
+            "document.getElementById('quota-source').textContent = "
             "names.length ? `${names.length} 个账号` : '暂无账号';",
+            page,
+        )
+        self.assertIn(
+            "const accountCount = document.getElementById('account-section-count');",
             page,
         )
 
@@ -4687,7 +4719,7 @@ class ScanDirsDashboardTests(unittest.TestCase):
         self.assertIn("<title>设置 - Token Monitor</title>", settings_html)
         self.assertNotIn("__SIDEBAR_NAV__", settings_html)
         self.assertIn("总览", settings_html)
-        self.assertIn('href="/accounts"', settings_html)
+        self.assertNotIn('data-nav-target="accounts"', settings_html)
         self.assertIn('href="/"', settings_html)
         self.assertIn('id="settings-body"', settings_html)
         self.assertIn('id="scan-dirs"', settings_html)
