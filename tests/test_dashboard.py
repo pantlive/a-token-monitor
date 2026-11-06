@@ -2357,11 +2357,12 @@ class StylesheetIntegrityTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_account_cards_stay_aligned(self) -> None:
-        """跨卡片对齐的三条前提：卡片等高、表头等高、额度行固定列。
+        """跨卡片对齐的前提：卡片等高、表头等高、额度行固定列、宽屏最多 3 列。
 
         实测过的坑：`.account-list` 用 align-items:start 时卡片按内容高度收缩
         （533px vs 485px）；账号 ID 长短让 meta 折成 1/2 行、表头高度 102/83px；
-        百分比列用 auto 时进度条一行一个长度（259 / 274 / 294 / 314px）。
+        百分比列用 auto 时进度条一行一个长度（259 / 274 / 294 / 314px）；
+        账号页独立后 minmax(340px) 会在约 1420px 排出 4 列，标题和速度徽章被挤出卡片。
         """
 
         css = _BASE_CSS + _DASHBOARD_CSS
@@ -2372,6 +2373,18 @@ class StylesheetIntegrityTests(unittest.TestCase):
         list_rules = rules(".account-list")
         self.assertTrue(list_rules)
         self.assertTrue(all("align-items: start" not in rule for rule in list_rules))
+        # 独立账号页主栏约 1420px 宽；封顶 3 列，避免 auto-fit + 340px 排出 4 列把卡片压爆。
+        self.assertTrue(
+            any(
+                "minmax(min(100%, max(340px, calc((100% - 30px) / 3)))" in rule
+                for rule in list_rules
+            ),
+            list_rules,
+        )
+        self.assertTrue(
+            all("minmax(340px, 1fr)" not in rule for rule in list_rules),
+            list_rules,
+        )
         row_rules = rules(".quota-row")
         self.assertTrue(row_rules)
         self.assertTrue(
@@ -2390,6 +2403,15 @@ class StylesheetIntegrityTests(unittest.TestCase):
         self.assertIn(
             ".account-block .quota-rows-block + .account-subtitle { margin-top: auto; }",
             css,
+        )
+        block_rules = rules(".account-block")
+        self.assertTrue(
+            any("min-width: 0" in rule for rule in block_rules),
+            block_rules,
+        )
+        self.assertIn(
+            ".account-list { grid-template-columns: minmax(0, 1fr); }",
+            _RESPONSIVE_CSS,
         )
 
     def test_usage_filters_and_summary_are_even_grids(self) -> None:
