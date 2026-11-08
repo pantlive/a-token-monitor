@@ -245,6 +245,8 @@ class _ConversationMetrics:
     account: str
     project: str | None
     turns: int
+    # 中文注释：每次请求携带的上下文 token 数，用于推荐上下文长度。
+    context_tokens: tuple[int, ...]
     first_at: float
     last_at: float
     usage: TokenUsage

@@ -1362,6 +1362,181 @@ class UsageInsightsTests(unittest.TestCase):
         self.assertEqual(len(praise), 1)
         self.assertEqual(praise[0]["level"], "info")
 
+    def test_recommends_context_length_from_request_samples(self) -> None:
+        """跨会话汇总每次请求的上下文，取 P90 并向上取整到 1 万 token。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sessions_dir = root / ".codex" / "sessions"
+            sessions_dir.mkdir(parents=True)
+            for index in range(3):
+                _write_session(
+                    sessions_dir / f"context-{index}.jsonl",
+                    "/workspace/alpha",
+                    [
+                        (
+                            f"2026-08-27T09:{turn:02d}:00Z",
+                            (turn + 1) * 12_300,
+                            0,
+                            0,
+                            0,
+                        )
+                        for turn in range(10)
+                    ],
+                )
+            registry = MultiSessionRegistry(root / "state")
+            aggregator = UsageAggregator(discovery_interval=0.01)
+            metadata = {
+                "codex": {
+                    "account_id": "account-personal",
+                    "profile_name": "codex",
+                    "codex_home": str(root / ".codex"),
+                },
+            }
+
+            insights = aggregator.insights(
+                {"codex": registry},
+                account_metadata=metadata,
+                now=_timestamp("2026-08-27T23:00:00Z"),
+            )
+
+        recommendation = insights["context_recommendation"]
+        self.assertIsNotNone(recommendation)
+        assert recommendation is not None
+        self.assertEqual(recommendation["sample_count"], 30)
+        self.assertEqual(recommendation["recommended_tokens"], 20_000)
+        self.assertEqual(recommendation["coverage_percent"], 100.0)
+
+    def test_context_recommendation_follows_time_window(self) -> None:
+        """切换时间窗口后，推荐值只使用窗口内的请求样本。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sessions_dir = root / ".codex" / "sessions"
+            sessions_dir.mkdir(parents=True)
+            for label, start, tokens in (
+                ("old", "2026-08-01T09", 50_000),
+                ("recent", "2026-08-26T09", 12_300),
+            ):
+                for index in range(3):
+                    _write_session(
+                        sessions_dir / f"{label}-{index}.jsonl",
+                        "/workspace/alpha",
+                        [
+                            (
+                                f"{start}:{turn:02d}:00Z",
+                                (turn + 1) * tokens,
+                                0,
+                                0,
+                                0,
+                            )
+                            for turn in range(10)
+                        ],
+                    )
+            registry = MultiSessionRegistry(root / "state")
+            aggregator = UsageAggregator(discovery_interval=0.01)
+            metadata = {
+                "codex": {
+                    "account_id": "account-personal",
+                    "profile_name": "codex",
+                    "codex_home": str(root / ".codex"),
+                },
+            }
+            now = _timestamp("2026-08-27T23:00:00Z")
+
+            full = aggregator.insights(
+                {"codex": registry},
+                account_metadata=metadata,
+                now=now,
+            )
+            week = aggregator.insights(
+                {"codex": registry},
+                account_metadata=metadata,
+                now=now,
+                since_days=7,
+            )
+
+        full_recommendation = full["context_recommendation"]
+        week_recommendation = week["context_recommendation"]
+        self.assertIsNotNone(full_recommendation)
+        self.assertIsNotNone(week_recommendation)
+        assert full_recommendation is not None
+        assert week_recommendation is not None
+        self.assertEqual(full_recommendation["sample_count"], 60)
+        self.assertEqual(full_recommendation["recommended_tokens"], 50_000)
+        self.assertEqual(week_recommendation["sample_count"], 30)
+        self.assertEqual(week_recommendation["recommended_tokens"], 20_000)
+
+    def test_context_recommendation_needs_multiple_conversations(self) -> None:
+        """单个会话即使请求很多，也不足以给出推荐值。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sessions_dir = root / ".codex" / "sessions"
+            sessions_dir.mkdir(parents=True)
+            _write_session(
+                sessions_dir / "single.jsonl",
+                "/workspace/alpha",
+                [
+                    (
+                        f"2026-08-27T09:{turn:02d}:00Z",
+                        (turn + 1) * 12_300,
+                        0,
+                        0,
+                        0,
+                    )
+                    for turn in range(10)
+                ],
+            )
+            registry = MultiSessionRegistry(root / "state")
+            aggregator = UsageAggregator(discovery_interval=0.01)
+            metadata = {
+                "codex": {
+                    "account_id": "account-personal",
+                    "profile_name": "codex",
+                    "codex_home": str(root / ".codex"),
+                },
+            }
+
+            insights = aggregator.insights(
+                {"codex": registry},
+                account_metadata=metadata,
+                now=_timestamp("2026-08-27T23:00:00Z"),
+            )
+
+        self.assertIsNone(insights["context_recommendation"])
+
+    def test_context_recommendation_needs_ten_samples(self) -> None:
+        """三个会话但样本不足 10 次请求时，推荐值保持为空。"""
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sessions_dir = root / ".codex" / "sessions"
+            sessions_dir.mkdir(parents=True)
+            for index in range(3):
+                _write_session(
+                    sessions_dir / f"sparse-{index}.jsonl",
+                    "/workspace/alpha",
+                    [("2026-08-27T09:00:00Z", 12_300, 0, 0, 0)],
+                )
+            registry = MultiSessionRegistry(root / "state")
+            aggregator = UsageAggregator(discovery_interval=0.01)
+            metadata = {
+                "codex": {
+                    "account_id": "account-personal",
+                    "profile_name": "codex",
+                    "codex_home": str(root / ".codex"),
+                },
+            }
+
+            insights = aggregator.insights(
+                {"codex": registry},
+                account_metadata=metadata,
+                now=_timestamp("2026-08-27T23:00:00Z"),
+            )
+
+        self.assertIsNone(insights["context_recommendation"])
+
     def test_insufficient_conversations_skip_suggestions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

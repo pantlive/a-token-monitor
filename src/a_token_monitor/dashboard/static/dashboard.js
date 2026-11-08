@@ -1124,6 +1124,14 @@
       <div class="usage-summary-item"><div class="usage-summary-label">整体缓存命中率</div><div class="usage-summary-value">${hitRate === null || hitRate === undefined ? '未知' : `${Number(hitRate).toFixed(1)}%`}</div></div>
       <div class="usage-summary-item"><div class="usage-summary-label">预计可节省</div><div class="usage-summary-value">${escapeHtml(formatUsdCompact(insights.potential_savings_usd))}</div></div>
     </div>`;
+    const contextRecommendation = insights.context_recommendation || null;
+    const recommendedContext = contextRecommendation && Number(contextRecommendation.recommended_tokens || 0) > 0
+      ? `<div class="usage-trend context-recommendation">
+        <div class="usage-trend-head"><span>推荐上下文长度</span><span class="muted">按请求上下文估算</span></div>
+        <div class="context-recommendation-value" title="${escapeHtml(formatNumber(contextRecommendation.recommended_tokens))}"><span>${escapeHtml(formatTokens(contextRecommendation.recommended_tokens))}</span><span class="context-recommendation-unit">tokens</span></div>
+        <div class="context-recommendation-note">至少 90% 的请求不超过此值；达到后先压缩或开新会话，避免每轮重发全部上下文。</div>
+      </div>`
+      : '';
     const hours = Array.isArray(insights.hour_histogram) ? insights.hour_histogram : [];
     const maxHour = hours.reduce((max, item) => Math.max(max, Number(item.total_tokens || 0)), 0);
     const hourBars = hours.map((item) => {
@@ -1177,7 +1185,7 @@
       `${conversationDetail(item)}${item.has_unpriced ? ' · 含未定价模型' : ''}`,
       `${conversationTitle(item)} · ${conversationDetail(item, true)}`
     )).join('');
-    container.innerHTML = `${summary}${observationsPanel}<div class="insights-grid">${hoursPanel}${modelsPanel}${bucketsPanel}</div><div class="usage-trend"><div class="usage-trend-head"><span>省 token 建议</span><span class="muted">${escapeHtml(windowLabel)} · 按用量规模估算</span></div><div class="alert-list">${suggestionCards}</div></div><div class="usage-trend"><div class="usage-trend-head"><span>最贵对话 Top ${topConversations.length}</span><span class="muted">按 API 等价金额</span></div>${topRows || '<div class="muted">暂无可计价对话</div>'}</div>`;
+    container.innerHTML = `${summary}${observationsPanel}<div class="insights-grid">${recommendedContext}${hoursPanel}${modelsPanel}${bucketsPanel}</div><div class="usage-trend"><div class="usage-trend-head"><span>省 token 建议</span><span class="muted">${escapeHtml(windowLabel)} · 按用量规模估算</span></div><div class="alert-list">${suggestionCards}</div></div><div class="usage-trend"><div class="usage-trend-head"><span>最贵对话 Top ${topConversations.length}</span><span class="muted">按 API 等价金额</span></div>${topRows || '<div class="muted">暂无可计价对话</div>'}</div>`;
   };
   const refreshInsights = async () => {
     const button = document.getElementById('insights-load-button');
