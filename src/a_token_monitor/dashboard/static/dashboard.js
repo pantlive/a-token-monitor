@@ -2412,6 +2412,8 @@
       archiveNotice(`归档该会话失败：${error.message}`, 'danger');
     }
   };
+  // 中文注释：账号卡片上的刷新按钮只放图标，避免把账号名（可能含中文）写进按钮。
+  const accountRefreshButton = () => `<button class="account-refresh" type="button" data-account-refresh aria-label="Refresh" title="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg></button>`;
   const renderAccounts = (state) => {
     const container = document.getElementById('account-list');
     const quotas = Array.isArray(state.quotas) ? state.quotas : [];
@@ -2447,7 +2449,10 @@
       return `<article class="account-block">
         <div class="account-heading">
           <div class="account-identity"><div class="account-avatar" aria-hidden="true" title="${escapeHtml(subscription)}">${escapeHtml(subscriptionInitials(subscription))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
-          <div class="account-side">${speedBadge(account.speed)}<span class="account-activity">${escapeHtml(activeCount)} 个活动</span></div>
+          <div class="account-side">
+            <div class="account-actions">${speedBadge(account.speed)}${accountRefreshButton()}</div>
+            <span class="account-activity">${escapeHtml(activeCount)} 个活动</span>
+          </div>
         </div>
         <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
         <div class="quota-rows-block">${renderQuotaRows(accountQuotas)}</div>
@@ -2477,6 +2482,11 @@
         button.setAttribute('aria-expanded', String(willExpand));
         const rows = wrap ? wrap.querySelectorAll('tbody tr').length : 0;
         button.textContent = willExpand ? '收起会话列表' : `展开 ${rows} 个活动会话`;
+      });
+    });
+    container.querySelectorAll('[data-account-refresh]').forEach((button) => {
+      button.addEventListener('click', () => {
+        loadState('/api/state?refresh=1', button);
       });
     });
   };
@@ -2701,59 +2711,62 @@
   };
 
   let refreshInFlight = false;
-  const refresh = async () => {
+  // 中文注释：状态渲染与请求分离，全局刷新和账号卡片的强制刷新复用同一套更新逻辑。
+  const applyState = (state) => {
+    latestState = state;
+    const counts = state.counts || {};
+    const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+    document.getElementById('active-count').textContent = counts.active ?? 0;
+    document.getElementById('process-count').textContent = counts.process_backed ?? 0;
+    document.getElementById('quota-window-count').textContent = Array.isArray(state.quotas) ? state.quotas.reduce((total, quota) => total + (Array.isArray(quota.windows) ? quota.windows.length : 0), 0) : 0;
+    document.getElementById('accounts-online').textContent = accounts.length;
+    if (!latestUsageState) document.getElementById('spend-count').textContent = '按需加载';
+    const speed = state.speed || {};
+    const speedTotals = speed.totals || {};
+    const speedValue = document.getElementById('speed-count');
+    if (speedValue) {
+      speedValue.innerHTML = Number(speedTotals.tps || 0) > 0
+        ? `${Math.round(Number(speedTotals.tps || 0))}<span class="kpi-unit">tps</span>`
+        : '—';
+    }
+    const speedTtft = document.getElementById('speed-ttft');
+    if (speedTtft) speedTtft.textContent = formatTtft(speedTotals.ttft_ms);
+    const trafficTotals = (state.traffic && state.traffic.totals) || {};
+    const uploadBurst = document.getElementById('upload-burst-count');
+    const uploadAlerts = document.getElementById('upload-alert-count');
+    if (uploadBurst) uploadBurst.textContent = formatDataSize(trafficTotals.burst_bytes || 0);
+    if (uploadAlerts) {
+      const alertHistory = state.alert_history || {};
+      uploadAlerts.textContent = alertHistory.available ? (alertHistory.unread ?? 0) : (trafficTotals.alert_count ?? 0);
+    }
+    document.getElementById('service-sync').textContent = `已同步 ${formatTime(state.updated_at)}`;
+    document.getElementById('service-state').textContent = '监控服务在线';
+    renderHealth(state);
+    document.querySelectorAll('.status-dot').forEach((dot) => dot.classList.remove('error'));
+    renderAccounts(state);
+    renderTraffic(state);
+    renderHousekeeping(state);
+    renderUpdate(state);
+    renderSectionSummaries(state);
+    renderAlerts();
+    if (alertHistoryState) refreshAlertHistory();
+    document.getElementById('error').style.display = 'none';
+  };
+  const loadState = async (url, button) => {
     // 中文注释：慢请求期间不叠加轮询，避免旧响应覆盖新状态。
     if (refreshInFlight) return;
     refreshInFlight = true;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15000);
-    const refreshButton = document.getElementById('refresh-button');
-    if (refreshButton) {
-      refreshButton.disabled = true;
-      refreshButton.classList.add('is-spinning');
+    if (button) {
+      button.disabled = true;
+      button.classList.add('is-spinning');
+      button.setAttribute('aria-busy', 'true');
     }
     try {
-      const response = await fetch('/api/state', { cache: 'no-store', signal: controller.signal });
+      const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const state = await response.json();
-      latestState = state;
-      const counts = state.counts || {};
-      const accounts = Array.isArray(state.accounts) ? state.accounts : [];
-      document.getElementById('active-count').textContent = counts.active ?? 0;
-      document.getElementById('process-count').textContent = counts.process_backed ?? 0;
-      document.getElementById('quota-window-count').textContent = Array.isArray(state.quotas) ? state.quotas.reduce((total, quota) => total + (Array.isArray(quota.windows) ? quota.windows.length : 0), 0) : 0;
-      document.getElementById('accounts-online').textContent = accounts.length;
-      if (!latestUsageState) document.getElementById('spend-count').textContent = '按需加载';
-      const speed = state.speed || {};
-      const speedTotals = speed.totals || {};
-      const speedValue = document.getElementById('speed-count');
-      if (speedValue) {
-        speedValue.innerHTML = Number(speedTotals.tps || 0) > 0
-          ? `${Math.round(Number(speedTotals.tps || 0))}<span class="kpi-unit">tps</span>`
-          : '—';
-      }
-      const speedTtft = document.getElementById('speed-ttft');
-      if (speedTtft) speedTtft.textContent = formatTtft(speedTotals.ttft_ms);
-      const trafficTotals = (state.traffic && state.traffic.totals) || {};
-      const uploadBurst = document.getElementById('upload-burst-count');
-      const uploadAlerts = document.getElementById('upload-alert-count');
-      if (uploadBurst) uploadBurst.textContent = formatDataSize(trafficTotals.burst_bytes || 0);
-      if (uploadAlerts) {
-        const alertHistory = state.alert_history || {};
-        uploadAlerts.textContent = alertHistory.available ? (alertHistory.unread ?? 0) : (trafficTotals.alert_count ?? 0);
-      }
-      document.getElementById('service-sync').textContent = `已同步 ${formatTime(state.updated_at)}`;
-      document.getElementById('service-state').textContent = '监控服务在线';
-      renderHealth(state);
-      document.querySelectorAll('.status-dot').forEach((dot) => dot.classList.remove('error'));
-      renderAccounts(state);
-      renderTraffic(state);
-      renderHousekeeping(state);
-      renderUpdate(state);
-      renderSectionSummaries(state);
-      renderAlerts();
-      if (alertHistoryState) refreshAlertHistory();
-      document.getElementById('error').style.display = 'none';
+      applyState(await response.json());
     } catch (error) {
       const box = document.getElementById('error');
       box.textContent = `读取监控状态失败：${error.message}`;
@@ -2764,12 +2777,14 @@
     } finally {
       window.clearTimeout(timeout);
       refreshInFlight = false;
-      if (refreshButton) {
-        refreshButton.disabled = false;
-        refreshButton.classList.remove('is-spinning');
+      if (button) {
+        button.disabled = false;
+        button.classList.remove('is-spinning');
+        button.removeAttribute('aria-busy');
       }
     }
   };
+  const refresh = () => loadState('/api/state', document.getElementById('refresh-button'));
   document.getElementById('refresh-button')?.addEventListener('click', refresh);
   updateElement('update-indicator')?.addEventListener('click', toggleUpdatePanel);
   updateElement('update-copy')?.addEventListener('click', copyUpdateCommand);
