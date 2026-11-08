@@ -670,6 +670,9 @@ EN: dict[str, str] = {
     '预计释放': 'Expected to free',
     '额度受限': 'Quota limited',
     '额度窗口': 'Quota windows',
+    # 中文注释：额度窗口的速度预测（5 小时 / 周）。
+    '按此速度，能撑到重置': 'At this rate, it lasts until reset',
+    '按此速度，预计 ${eta} 用完': 'At this rate, it runs out around ${eta}',
     '7 天': '7 days',
     '上下文': 'context',
     '不可用': 'Unavailable',

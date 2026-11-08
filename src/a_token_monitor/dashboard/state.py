@@ -19,6 +19,7 @@ from ..multi_models import TrackedSession, session_view
 from ..speed import SpeedTracker
 from ..quota import (
     QuotaSnapshot,
+    project_quota_exhaustion,
     quota_period,
     quota_period_label,
     quota_window_duration,
@@ -699,12 +700,12 @@ def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
 
     if snapshot is None:
         return None
-    return {
-        "observed_at": snapshot.observed_at,
-        "plan_type": snapshot.plan_type,
-        "source": snapshot.source,
-        "metadata": dict(snapshot.metadata),
-        "windows": [
+    windows: list[dict[str, Any]] = []
+    for window in snapshot.windows:
+        # 中文注释：预测固定使用快照的观察时间，页面刷新时不会因为「现在」变化
+        # 而让同一份额度数据反复改口。
+        projection = project_quota_exhaustion(window, snapshot.observed_at)
+        windows.append(
             {
                 "limit_id": window.limit_id,
                 "name": window.name,
@@ -717,9 +718,16 @@ def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
                 "period": quota_period(window),
                 "period_label": quota_period_label(quota_period(window)),
                 "duration_label": quota_window_duration(window),
+                "projection_status": projection.status,
+                "projected_exhausted_at": projection.projected_exhausted_at,
             }
-            for window in snapshot.windows
-        ],
+        )
+    return {
+        "observed_at": snapshot.observed_at,
+        "plan_type": snapshot.plan_type,
+        "source": snapshot.source,
+        "metadata": dict(snapshot.metadata),
+        "windows": windows,
     }
 
 

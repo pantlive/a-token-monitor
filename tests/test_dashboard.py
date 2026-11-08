@@ -127,6 +127,44 @@ class DashboardTests(unittest.TestCase):
             ],
         )
 
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证额度预测文案")
+    def test_quota_forecast_text_only_covers_five_hours_and_week(self) -> None:
+        """只有 5 小时 / 周窗口展示预测，其余周期或状态不显示。"""
+
+        helper = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const quotaForecastText ="): _DASHBOARD_HTML.index(
+                "  const renderQuotaRow ="
+            )
+        ]
+        script = (
+            "const quotaPeriod = (window) => window.period;\n"
+            "const formatTime = (seconds) => `T${seconds}`;\n"
+            f"{helper}\n"
+            "const windows = [\n"
+            "  {period: 'five_hours', projection_status: 'before_reset', projected_exhausted_at: 123},\n"
+            "  {period: 'week', projection_status: 'after_reset'},\n"
+            "  {period: 'month', projection_status: 'before_reset', projected_exhausted_at: 123},\n"
+            "  {period: 'five_hours', projection_status: 'exhausted'},\n"
+            "];\n"
+            "console.log(JSON.stringify(windows.map(quotaForecastText)));\n"
+        )
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                "按此速度，预计 T123 用完",
+                "按此速度，能撑到重置",
+                "",
+                "",
+            ],
+        )
+
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证实际页面渲染")
     def test_alert_context_renders_purpose_instead_of_commands(self) -> None:
         """执行真实渲染函数，展示目的、证据和对象，隐藏工具与命令。"""
@@ -3354,6 +3392,28 @@ class FaviconTests(unittest.TestCase):
         self.assertEqual(windows[1]["period_label"], "月")
         self.assertEqual(windows[1]["duration_label"], "1 个月")
 
+    def test_quota_payload_carries_projection(self) -> None:
+        """窗口带出预测状态与预计耗尽时间，前端据此决定是否展示文案。"""
+
+        summary = _quota_summary(
+            QuotaSnapshot(
+                observed_at=11_000.0,
+                windows=(
+                    QuotaWindow("codex", "primary", 60.0, 300.0, 20_000.0),
+                    QuotaWindow("codex", "secondary", 100.0, 10_080.0, 20_000.0),
+                    QuotaWindow("kimi", "limit_month_total", 17.9, None, None),
+                ),
+            )
+        )
+        self.assertIsNotNone(summary)
+        windows = summary["windows"]
+        self.assertEqual(windows[0]["projection_status"], "before_reset")
+        self.assertEqual(windows[0]["projected_exhausted_at"], 17_000.0)
+        self.assertEqual(windows[1]["projection_status"], "exhausted")
+        self.assertEqual(windows[1]["projected_exhausted_at"], 11_000.0)
+        self.assertEqual(windows[2]["projection_status"], "unknown")
+        self.assertIsNone(windows[2]["projected_exhausted_at"])
+
     def test_quota_rows_are_fixed_and_show_three_states(self) -> None:
         """每个订阅都渲染固定的 5 小时 / 周 / 月三行，缺的周期显示「不适用」。"""
 
@@ -3361,6 +3421,8 @@ class FaviconTests(unittest.TestCase):
         self.assertIn("const QUOTA_FIXED_PERIODS = ['five_hours', 'week', 'month'];", page)
         self.assertIn("const QUOTA_PERIOD_ORDER = ['five_hours', 'day', 'week', 'month', 'other'];", page)
         self.assertIn("const renderQuotaRows = (quotas) => {", page)
+        self.assertIn("const quotaForecastText = (window) => {", page)
+        self.assertIn('class="quota-forecast', page)
         self.assertIn("该订阅没有${escapeHtml(label)}额度", page)
         self.assertIn("暂无额度窗口数据，这里只统计用量", page)
         self.assertIn("待采集", page)
