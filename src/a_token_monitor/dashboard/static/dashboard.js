@@ -709,27 +709,24 @@
     const monthFormat = new Intl.DateTimeFormat(locale, { month: 'short' });
     const todayKey = new Date().toLocaleDateString('sv-SE');
     const firstDate = parseHeatmapDate(days[0] && days[0].date);
-    const weekdayRows = ['<span class="heatmap-weekday-spacer"></span>'];
-    for (let index = 0; index < 7; index += 1) {
-      if (index % 2 === 0 && firstDate) {
-        const date = new Date(firstDate);
-        date.setDate(firstDate.getDate() + index);
-        weekdayRows.push(`<span class="heatmap-weekday">${escapeHtml(weekdayFormat.format(date))}</span>`);
-      } else {
-        weekdayRows.push('<span></span>');
-      }
-    }
     let previousMonth = '';
     const cells = [];
     days.forEach((day, index) => {
       const week = Math.floor(index / 7);
       const row = index % 7;
       const date = parseHeatmapDate(day && day.date);
+      // 中文注释：星期标签和格子放在同一张网格里（第一列），格子随卡片宽度拉伸时
+      // 行高由 aspect-ratio 决定，标签自动逐行对齐；粘在左侧方便窄屏横向滚动。
+      if (index < 7 && index % 2 === 0 && firstDate) {
+        const weekday = new Date(firstDate);
+        weekday.setDate(firstDate.getDate() + index);
+        cells.push(`<span class="heatmap-weekday" style="grid-column:1;grid-row:${index + 2}" aria-hidden="true">${escapeHtml(weekdayFormat.format(weekday))}</span>`);
+      }
       if (row === 0 && date) {
         const monthKey = `${date.getFullYear()}-${date.getMonth()}`;
         if (monthKey !== previousMonth) {
           previousMonth = monthKey;
-          cells.push(`<span class="heatmap-month" style="grid-column:${week + 1};grid-row:1">${escapeHtml(monthFormat.format(date))}</span>`);
+          cells.push(`<span class="heatmap-month" style="grid-column:${week + 2};grid-row:1">${escapeHtml(monthFormat.format(date))}</span>`);
         }
       }
       const value = metric.value(day);
@@ -738,7 +735,7 @@
       if (day && day.date === todayKey) classes.push('is-today');
       const unpriced = day && day.has_unpriced ? '（含未定价模型）' : '';
       const title = `${day && day.date || ''} · ${formatNumber(day && day.requests || 0)} 次请求 · ${formatTokens(day && day.total_tokens || 0)} tokens · ${formatUsdCompact(day && day.estimated_cost_usd)}${unpriced}`;
-      cells.push(`<span class="${classes.join(' ')}" style="grid-column:${week + 1};grid-row:${row + 2}" title="${escapeHtml(title)}"></span>`);
+      cells.push(`<span class="${classes.join(' ')}" style="grid-column:${week + 2};grid-row:${row + 2}" title="${escapeHtml(title)}"></span>`);
     });
     const tabs = heatmapMetrics.map((item) => {
       const selected = item.key === metric.key;
@@ -751,8 +748,7 @@
         <div class="usage-heatmap-tabs" role="group" aria-label="切换热力图指标">${tabs}</div>
       </div>
       <div class="usage-heatmap-body">
-        <div class="heatmap-weekdays" aria-hidden="true">${weekdayRows.join('')}</div>
-        <div class="heatmap-scroll"><div class="heatmap-grid" style="grid-template-columns:repeat(${weeks}, var(--heatmap-cell-size))">${cells.join('')}</div></div>
+        <div class="heatmap-scroll"><div class="heatmap-grid" style="grid-template-columns:max-content repeat(${weeks}, minmax(var(--heatmap-cell-min), 1fr))">${cells.join('')}</div></div>
       </div>
       <div class="heatmap-legend" aria-hidden="true"><span>少</span>${legend}<span>多</span></div>
     </div>`;
