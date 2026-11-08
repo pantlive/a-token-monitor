@@ -6,9 +6,11 @@ import unittest
 
 from a_token_monitor.quota import (
     QUOTA_DISPLAY_PERIODS,
+    QuotaProjection,
     QuotaWindow,
     merge_sparse_update,
     parse_rate_limits_result,
+    project_quota_exhaustion,
     quota_period,
     quota_period_label,
     quota_window_duration,
@@ -197,3 +199,134 @@ class QuotaPeriodTests(unittest.TestCase):
         self.assertEqual(quota_window_duration(with_minutes), "5 小时")
         self.assertEqual(quota_window_duration(month_without_minutes), "1 个月")
         self.assertEqual(quota_window_duration(unknown), "周期未知")
+
+
+class QuotaProjectionTests(unittest.TestCase):
+    """验证按本周期平均速度预测额度耗尽时间。
+
+    固定用 5 小时窗口（18000 秒）、重置时刻 20000、观察时刻 11000：
+    窗口从 2000 开始，已经过 9000 秒，数据足够做线性预测。
+    """
+
+    OBSERVED_AT = 11_000.0
+    RESETS_AT = 20_000.0
+
+    def window(
+        self,
+        used_percent: float | None = 50.0,
+        window_minutes: float | None = 300.0,
+        resets_at: float | None = 20_000.0,
+    ) -> QuotaWindow:
+        return QuotaWindow(
+            limit_id="codex",
+            name="primary",
+            used_percent=used_percent,
+            window_minutes=window_minutes,
+            resets_at=resets_at,
+        )
+
+    def test_predicts_exhaustion_before_reset(self) -> None:
+        # 已用 60%，按当前速度还能用 6000 秒；重置在 9000 秒后，所以会先耗尽。
+        projection = project_quota_exhaustion(
+            self.window(used_percent=60.0),
+            observed_at=self.OBSERVED_AT,
+        )
+
+        self.assertIsInstance(projection, QuotaProjection)
+        self.assertEqual(projection.status, "before_reset")
+        self.assertEqual(projection.projected_exhausted_at, 17_000.0)
+        self.assertEqual(projection.remaining_seconds, 6_000.0)
+
+    def test_predicts_quota_lasts_until_reset(self) -> None:
+        # 已用 40%，按当前速度还能用 13500 秒，超过距离重置的 9000 秒。
+        projection = project_quota_exhaustion(
+            self.window(used_percent=40.0),
+            observed_at=self.OBSERVED_AT,
+        )
+
+        self.assertEqual(projection.status, "after_reset")
+        self.assertEqual(projection.projected_exhausted_at, 24_500.0)
+        self.assertEqual(projection.remaining_seconds, 13_500.0)
+
+    def test_exhaustion_exactly_at_reset_counts_as_after_reset(self) -> None:
+        # 已用 50%、时间过半时，预计耗尽时刻正好等于重置时刻，算能撑到重置。
+        projection = project_quota_exhaustion(
+            self.window(used_percent=50.0),
+            observed_at=self.OBSERVED_AT,
+        )
+
+        self.assertEqual(projection.status, "after_reset")
+        self.assertEqual(projection.projected_exhausted_at, self.RESETS_AT)
+
+    def test_exhausted_window_has_no_forecast(self) -> None:
+        for window in (
+            self.window(used_percent=100.0),
+            self.window(used_percent=120.0),
+            QuotaWindow(
+                limit_id="codex",
+                name="primary",
+                used_percent=80.0,
+                window_minutes=300.0,
+                resets_at=self.RESETS_AT,
+                reached_type="primary",
+            ),
+        ):
+            with self.subTest(window=window):
+                projection = project_quota_exhaustion(
+                    window,
+                    observed_at=self.OBSERVED_AT,
+                )
+                self.assertEqual(projection.status, "exhausted")
+                self.assertEqual(
+                    projection.projected_exhausted_at,
+                    self.OBSERVED_AT,
+                )
+                self.assertEqual(projection.remaining_seconds, 0.0)
+
+    def test_missing_or_invalid_fields_are_unknown(self) -> None:
+        cases = {
+            "缺已用百分比": self.window(used_percent=None),
+            "缺重置时间": self.window(resets_at=None),
+            "缺窗口时长": self.window(window_minutes=None),
+            "窗口时长为零": self.window(window_minutes=0.0),
+            "已用百分比为零": self.window(used_percent=0.0),
+            "已用百分比为负": self.window(used_percent=-1.0),
+            "重置时间已过": self.window(resets_at=self.OBSERVED_AT),
+        }
+        for name, window in cases.items():
+            with self.subTest(name=name):
+                projection = project_quota_exhaustion(
+                    window,
+                    observed_at=self.OBSERVED_AT,
+                )
+                self.assertEqual(projection.status, "unknown")
+                self.assertIsNone(projection.projected_exhausted_at)
+                self.assertIsNone(projection.remaining_seconds)
+
+    def test_window_started_less_than_ten_minutes_ago_is_unknown(self) -> None:
+        # 窗口从 2000 开始，观察时刻 2500 时只过了 500 秒，速率噪声太大。
+        projection = project_quota_exhaustion(
+            self.window(used_percent=10.0),
+            observed_at=2_500.0,
+        )
+
+        self.assertEqual(projection.status, "unknown")
+        self.assertIsNone(projection.projected_exhausted_at)
+
+    def test_uses_observed_at_instead_of_the_system_clock(self) -> None:
+        # 同一份窗口数据换一个观察时刻，预测会随之变化，说明没有偷偷读系统时钟。
+        early = project_quota_exhaustion(
+            self.window(used_percent=60.0),
+            observed_at=self.OBSERVED_AT,
+        )
+        late = project_quota_exhaustion(
+            self.window(used_percent=60.0),
+            observed_at=12_000.0,
+        )
+
+        self.assertEqual(early.projected_exhausted_at, 17_000.0)
+        self.assertIsNotNone(late.projected_exhausted_at)
+        self.assertGreater(
+            late.projected_exhausted_at,
+            early.projected_exhausted_at,
+        )

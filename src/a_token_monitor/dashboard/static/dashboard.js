@@ -162,6 +162,18 @@
     ? '待采集'
     : formatPercent(window.used_percent));
   const quotaWindowTitle = (window) => `${window.limit_id}/${window.name} · ${quotaPercentText(window)} · ${quotaDuration(window)}`;
+  // 中文注释：只有 5 小时 / 周窗口展示速度预测；月/日窗口、已耗尽和数据不足
+  // 都由后端标成 unknown，这里直接不渲染，避免给出误导性的日期。
+  const quotaForecastText = (window) => {
+    const period = quotaPeriod(window);
+    if (period !== 'five_hours' && period !== 'week') return '';
+    if (window.projection_status === 'after_reset') return '按此速度，能撑到重置';
+    if (window.projection_status === 'before_reset') {
+      const eta = formatTime(window.projected_exhausted_at);
+      return `按此速度，预计 ${eta} 用完`;
+    }
+    return '';
+  };
   const renderQuotaRow = (period, label, windows) => {
     if (!windows.length) {
       return `<div class="quota-row absent">
@@ -189,11 +201,13 @@
     const meta = unknown
       ? `${escapeHtml(stateText)} · ${escapeHtml(quotaDuration(main))}`
       : `重置 ${escapeHtml(formatReset(main.resets_at))} · ${escapeHtml(quotaDuration(main))}`;
+    const forecast = quotaForecastText(main);
+    const forecastClass = main.projection_status === 'after_reset' ? 'ok' : 'warn';
     return `<div class="quota-row ${level || 'ok'}">
       <span class="quota-row-label">${escapeHtml(label)}</span>
       <div class="bar quota-bar"><span class="${level}" style="width:${percent}%"></span></div>
       <span class="quota-row-percent ${level}">${escapeHtml(quotaPercentText(main))}</span>
-      <span class="quota-row-meta">${meta}${badge}</span>
+      <span class="quota-row-meta">${meta}${badge}${forecast ? `<span class="quota-forecast ${forecastClass}">${escapeHtml(forecast)}</span>` : ''}</span>
     </div>`;
   };
   const renderQuotaRows = (quotas) => {

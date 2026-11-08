@@ -84,6 +84,10 @@
     .quota-row-percent.danger { color: var(--red-text); }
     .quota-row-percent.absent { color: var(--muted-dim); font-size: 12px; font-weight: 600; }
     .quota-row-meta { grid-area: meta; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    /* 中文注释：速度预测另起一行；能撑到重置用绿色，会提前用完用黄色。 */
+    .quota-forecast { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .quota-forecast.warn { color: var(--yellow-text); }
+    .quota-forecast.ok { color: var(--green-text); }
     .quota-row.absent { border-style: dashed; background: transparent; }
     .quota-row.absent .quota-bar > span { width: 0 !important; }
     .quota-bar { margin: 0; }

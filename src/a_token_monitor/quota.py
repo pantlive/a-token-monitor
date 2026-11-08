@@ -159,6 +159,72 @@ def quota_window_duration(window: QuotaWindow) -> str:
 
 
 @dataclass(frozen=True)
+class QuotaProjection:
+    """按本周期平均消耗速度预测额度窗口是否会在重置前用完。"""
+
+    status: str
+    projected_exhausted_at: float | None = None
+    remaining_seconds: float | None = None
+
+
+# 中文注释：窗口刚开始时已用百分比多半是噪声，至少观察 10 分钟再做线性预测。
+_QUOTA_PROJECTION_MIN_ELAPSED_SECONDS = 600.0
+
+
+def project_quota_exhaustion(
+    window: QuotaWindow,
+    observed_at: float,
+) -> QuotaProjection:
+    """预测窗口按当前速度能否撑到重置。
+
+    只使用快照自带的 ``observed_at``，不读取系统时钟：窗口起点是
+    ``resets_at - window_minutes``，用「已用百分比 / 已经过的秒数」得到本周期平均
+    速率，再用剩余百分比推算耗尽时刻。``remaining_seconds`` 是预计还能使用多久。
+
+    数据不足时返回 ``unknown``，宁可不在面板上展示预测，也不拿猜测误导用户。
+    """
+
+    used_percent = window.used_percent
+    if window.is_exhausted or (
+        used_percent is not None and used_percent >= 100.0
+    ):
+        return QuotaProjection(
+            status="exhausted",
+            projected_exhausted_at=observed_at,
+            remaining_seconds=0.0,
+        )
+
+    resets_at = window.resets_at
+    window_minutes = window.window_minutes
+    if (
+        used_percent is None
+        or used_percent <= 0.0
+        or resets_at is None
+        or window_minutes is None
+        or window_minutes <= 0.0
+    ):
+        return QuotaProjection(status="unknown")
+    if resets_at <= observed_at:
+        return QuotaProjection(status="unknown")
+
+    elapsed_seconds = window_minutes * 60.0 - (resets_at - observed_at)
+    if elapsed_seconds < _QUOTA_PROJECTION_MIN_ELAPSED_SECONDS:
+        return QuotaProjection(status="unknown")
+
+    rate = used_percent / elapsed_seconds
+    remaining_seconds = (100.0 - used_percent) / rate
+    projected_exhausted_at = observed_at + remaining_seconds
+    status = (
+        "after_reset" if projected_exhausted_at >= resets_at else "before_reset"
+    )
+    return QuotaProjection(
+        status=status,
+        projected_exhausted_at=projected_exhausted_at,
+        remaining_seconds=remaining_seconds,
+    )
+
+
+@dataclass(frozen=True)
 class QuotaSnapshot:
     """一次完整的账户额度快照。"""
 
