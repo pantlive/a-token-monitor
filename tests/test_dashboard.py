@@ -2482,6 +2482,43 @@ class StylesheetIntegrityTests(unittest.TestCase):
             _RESPONSIVE_CSS,
         )
 
+    def test_usage_heatmap_fills_the_card_width(self) -> None:
+        """热力图按卡片宽度铺满，不能固定 16px 只占左半边。
+
+        格子用 `minmax(14px, 1fr)` 随宽度拉伸、`aspect-ratio` 保持正方形；
+        星期标签和格子放在同一张网格里，行高才能跟着自动对齐。
+        """
+
+        page = _DASHBOARD_HTML
+        self.assertIn(
+            "grid-template-columns:max-content repeat(${weeks}, "
+            "minmax(var(--heatmap-cell-min), 1fr))",
+            page,
+        )
+        self.assertIn(
+            ".heatmap-grid { display: grid; grid-template-rows: 16px repeat(7, auto); "
+            "row-gap: var(--heatmap-gap); column-gap: var(--heatmap-gap); "
+            "width: min-content; min-width: 100%; }",
+            page,
+        )
+        self.assertIn(
+            ".heatmap-cell { width: 100%; height: auto; aspect-ratio: 1; "
+            "border-radius: 3px;",
+            page,
+        )
+        self.assertIn(
+            'class="heatmap-weekday" style="grid-column:1;grid-row:${index + 2}"',
+            page,
+        )
+        self.assertIn(
+            ".heatmap-weekday { position: sticky; left: 0; z-index: 1;",
+            page,
+        )
+        self.assertNotIn('class="heatmap-weekdays"', page)
+        # 旧实现用固定 16px 列宽，宽屏下格子只铺到卡片左侧，右边留一大片空白。
+        self.assertNotIn("--heatmap-cell-size", page)
+        self.assertNotIn("repeat(${weeks}, var(--heatmap-cell-size))", page)
+
     def test_usage_filters_and_summary_are_even_grids(self) -> None:
         """筛选区等宽排列、汇总卡自适应一行，避免参差换行与孤立的卡片。"""
 
