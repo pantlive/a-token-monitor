@@ -636,6 +636,26 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("const scrollHashForLocation = (pathname, hash) => {", page)
         self.assertIn("href: '/#account-list'", page)
 
+    def test_attention_alerts_are_scoped_to_the_overview(self) -> None:
+        """「需要关注」只属于总览，不应出现在其它功能页顶部。"""
+
+        page = _DASHBOARD_HTML
+        self.assertEqual(page.count('id="alert-list"'), 1)
+        overview = page.find('id="overview"')
+        alert_list = page.find('id="alert-list"')
+        account_list = page.find('id="account-list"')
+        traffic = page.find('id="traffic"')
+        session_notice = page.find('id="session-notice"')
+        self.assertNotEqual(overview, -1)
+        self.assertNotEqual(alert_list, -1)
+        self.assertNotEqual(account_list, -1)
+        self.assertNotEqual(traffic, -1)
+        self.assertNotEqual(session_notice, -1)
+        self.assertLess(overview, alert_list)
+        self.assertLess(alert_list, account_list)
+        self.assertLess(account_list, traffic)
+        self.assertLess(session_notice, overview)
+
     def test_state_includes_kimi_account_without_quota(self) -> None:
         """Kimi 配额接口不可用时应只展示账号身份。"""
 
