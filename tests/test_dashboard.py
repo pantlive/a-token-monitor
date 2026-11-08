@@ -92,6 +92,41 @@ class DashboardTests(unittest.TestCase):
                         )
                         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证额度重置文案")
+    def test_quota_reset_shows_hours_and_minutes(self) -> None:
+        """长额度窗口按「小时 + 分钟」展示，不再只堆成几千分钟。"""
+
+        helper = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const formatReset ="): _DASHBOARD_HTML.index(
+                "  const formatPercent ="
+            )
+        ]
+        script = (
+            "const formatTime = () => 'T';\n"
+            "const now = 1_700_000_000_000;\n"
+            "Date.now = () => now;\n"
+            f"{helper}\n"
+            "const at = (minutes) => formatReset(now / 1000 + minutes * 60);\n"
+            "console.log(JSON.stringify([at(6996), at(204), at(30), at(120), at(-1)]));\n"
+        )
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                "T （116 小时 36 分钟后）",
+                "T （3 小时 24 分钟后）",
+                "T （30 分钟后）",
+                "T （2 小时后）",
+                "T （已到时间）",
+            ],
+        )
+
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证实际页面渲染")
     def test_alert_context_renders_purpose_instead_of_commands(self) -> None:
         """执行真实渲染函数，展示目的、证据和对象，隐藏工具与命令。"""
