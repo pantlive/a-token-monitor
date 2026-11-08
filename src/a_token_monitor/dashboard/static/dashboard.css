@@ -157,6 +157,9 @@
     .alert-ack-button:hover { border-color: var(--violet); color: var(--text); }
     .suggestion-saving { float: right; margin-left: 10px; color: var(--green); font-weight: 700; white-space: nowrap; }
     .insights-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 14px; }
+    .context-recommendation-value { display: flex; align-items: baseline; gap: 6px; margin: 3px 0 10px; color: var(--cyan); font-size: 30px; font-weight: 750; letter-spacing: -.04em; line-height: 1.1; }
+    .context-recommendation-unit { color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .02em; }
+    .context-recommendation-note { color: var(--muted); font-size: 11px; line-height: 1.55; }
     .observation-list { margin: 0; padding-left: 18px; color: var(--muted-strong); font-size: 12px; }
     .observation-list li { padding: 2px 0; }
     .usage-heatmap { --heatmap-cell-min: 14px; --heatmap-gap: 3px; margin: 0 0 14px; padding: 16px 18px 14px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-raised); }

@@ -53,11 +53,16 @@ def _conversation_metrics(
     write_premium = 0.0
     hours: dict[int, int] = {}
     days: dict[str, int] = {}
+    context_samples: list[int] = []
     first_at = math.inf
     last_at = 0.0
     for delta in deltas:
         billing = delta.billing_usage or delta.usage
         totals = totals.add(delta.usage)
+        # 中文注释：一次增量的 input_tokens 就是该轮请求携带的上下文规模；
+        # 窗口过滤后的 deltas 保证这里只会收集当前时间段内的样本。
+        if delta.usage.input_tokens > 0:
+            context_samples.append(delta.usage.input_tokens)
         previous = model_usage.get(delta.model, TokenUsage())
         model_usage[delta.model] = previous.add(delta.usage)
         estimate = _estimate_usage(billing, delta.model, delta.timestamp)
@@ -98,6 +103,7 @@ def _conversation_metrics(
         account=source.account_name if source is not None else "codex",
         project=project,
         turns=len(deltas),
+        context_tokens=tuple(context_samples),
         first_at=first_at,
         last_at=last_at,
         usage=totals,
@@ -111,6 +117,34 @@ def _conversation_metrics(
             for model in sorted(model_usage)
         ),
     )
+
+
+def _context_recommendation(
+    conversations: Sequence[_ConversationMetrics],
+) -> dict[str, Any] | None:
+    """按每次请求的上下文样本给出推荐长度；样本不足时不猜测。"""
+
+    if len(conversations) < 3:
+        return None
+    # 中文注释：汇总每次请求的上下文规模，而不是取单个会话的峰值，避免少数
+    # 超长会话把整体建议抬高；窗口过滤已在 _conversation_metrics 内完成。
+    samples = sorted(
+        tokens
+        for conversation in conversations
+        for tokens in conversation.context_tokens
+        if tokens > 0
+    )
+    if len(samples) < 10:
+        return None
+    # 中文注释：最近秩 P90（ceil(0.9 * n) - 1 对应下标），再向上取整到 1 万 token。
+    rank = min(len(samples) - 1, math.ceil(0.9 * len(samples)) - 1)
+    recommended = math.ceil(samples[rank] / 10_000) * 10_000
+    covered = sum(1 for tokens in samples if tokens <= recommended)
+    return {
+        "recommended_tokens": recommended,
+        "sample_count": len(samples),
+        "coverage_percent": round(covered / len(samples) * 100, 1),
+    }
 
 
 # 中文注释：习惯分析只统计 token 元数据，不读取提示词或工具输出等对话内容。
@@ -257,6 +291,7 @@ def _build_insights(
             if suggestion.get("saving_usd") is not None
         )
     )
+    context_recommendation = _context_recommendation(conversations)
     return {
         "ready": True,
         "observed_at": observed_at,
@@ -270,6 +305,7 @@ def _build_insights(
         "has_unpriced": has_unpriced,
         "cache_hit_rate": cache_hit_rate,
         "cache_write_share": cache_write_share,
+        "context_recommendation": context_recommendation,
         "potential_savings_usd": potential,
         "hour_histogram": [
             {"hour": hour, "total_tokens": tokens}

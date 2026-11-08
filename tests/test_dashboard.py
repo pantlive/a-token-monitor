@@ -874,6 +874,8 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(insights["conversation_count"], 3)
         self.assertEqual(len(insights["hour_histogram"]), 24)
         self.assertIn("suggestions", insights)
+        self.assertIn("context_recommendation", insights)
+        self.assertIsNone(insights["context_recommendation"])
         window_insights = window_payload["insights"]
         self.assertTrue(window_insights["ready"])
         self.assertEqual(window_insights["window_days"], 1)
@@ -901,6 +903,9 @@ class DashboardTests(unittest.TestCase):
             "renderInsights",
             "/api/insights",
             "习惯分析",
+            "推荐上下文长度",
+            "按请求上下文估算",
+            "context-recommendation",
         ):
             self.assertIn(marker, html)
 
