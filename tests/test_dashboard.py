@@ -92,6 +92,42 @@ class DashboardTests(unittest.TestCase):
                         )
                         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证账号刷新按钮")
+    def test_account_refresh_button_is_icon_only(self) -> None:
+        """账号卡片的刷新按钮只含 SVG 和英文标签，不能把账号名/汉字写进按钮。"""
+
+        helper = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index(
+                "  const accountRefreshButton ="
+            ): _DASHBOARD_HTML.index("  const renderAccounts =")
+        ]
+        script = f"{helper}\nconsole.log(accountRefreshButton());\n"
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        button = result.stdout
+        self.assertIn("data-account-refresh", button)
+        self.assertIn("<svg", button)
+        self.assertIn('type="button"', button)
+        self.assertIn('aria-label="Refresh"', button)
+        self.assertIn('title="Refresh"', button)
+        self.assertNotRegex(button, r"[\u4e00-\u9fff]")
+
+    def test_account_cards_render_refresh_button(self) -> None:
+        """每个账号卡片模板都带一个刷新按钮和包裹速度徽标的 .account-actions。"""
+
+        page = _DASHBOARD_HTML
+        start = page.index("  const renderAccounts =")
+        end = page.index("  // 运行健康徽标", start)
+        render_accounts = page[start:end]
+        self.assertIn('class="account-actions"', render_accounts)
+        self.assertEqual(render_accounts.count("${accountRefreshButton()}"), 1)
+        self.assertIn("[data-account-refresh]", render_accounts)
+
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证额度重置文案")
     def test_quota_reset_shows_hours_and_minutes(self) -> None:
         """长额度窗口按「小时 + 分钟」展示，不再只堆成几千分钟。"""
@@ -5119,6 +5155,48 @@ class HealthEndpointTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertIsNone(payload.get("health"))
+
+    def test_state_force_refresh_clears_quota_caches(self) -> None:
+        """GET 的 refresh=1/true 强制清额度缓存；普通 GET 与 HEAD 不触发。"""
+
+        server = self._server()
+        base_url = f"http://{server.address[0]}:{server.address[1]}"
+        try:
+            with mock.patch(
+                "a_token_monitor.dashboard.handler.clear_quota_caches"
+            ) as clear:
+                normal_status, _ = self._get(base_url, "/api/state")
+                head_status, head_body = self._head(
+                    base_url, "/api/state?refresh=1"
+                )
+                self.assertEqual(clear.call_count, 0)
+                first_status, _ = self._get(base_url, "/api/state?refresh=1")
+                second_status, _ = self._get(base_url, "/api/state?refresh=1")
+                self.assertEqual(clear.call_count, 2)
+                true_status, _ = self._get(base_url, "/api/state?refresh=true")
+                self.assertEqual(clear.call_count, 3)
+                after_normal_status, _ = self._get(base_url, "/api/state")
+                after_head_status, after_head_body = self._head(
+                    base_url, "/api/state?refresh=1"
+                )
+                self.assertEqual(clear.call_count, 3)
+        finally:
+            server.close()
+
+        self.assertEqual(
+            (
+                normal_status,
+                head_status,
+                first_status,
+                second_status,
+                true_status,
+                after_normal_status,
+                after_head_status,
+            ),
+            (200,) * 7,
+        )
+        self.assertEqual(head_body, b"")
+        self.assertEqual(after_head_body, b"")
 
     def test_provider_failure_recorded_and_state_still_200(self) -> None:
         """provider 读取抛错时记为 failed，且 /api/state 本身仍返回 200。"""

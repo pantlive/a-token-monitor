@@ -27,7 +27,7 @@ from ..housekeeping import (
 )
 from ..health import HealthTracker, sanitize_error
 from ..packages import clean_release_entries, scan_release_leftovers
-from ..providers import ProviderHomes, home_keys
+from ..providers import ProviderHomes, clear_quota_caches, home_keys
 from ..redact.control import RedactControlError, RedactController
 from ..registry import RegistryError
 from ..retention import HistoryDataManager, RetentionController, RetentionError
@@ -185,16 +185,25 @@ class _DashboardContext:
                 "last_alert_at": None,
             }
 
-    def state_payload(self) -> dict[str, Any]:
-        """合并并发刷新，只构建一次状态；目录热更新立即使缓存失效。"""
+    def state_payload(self, *, force: bool = False) -> dict[str, Any]:
+        """合并并发刷新，只构建一次状态；``force`` 跳过缓存并清额度缓存。
+
+        目录热更新立即使缓存失效；用户手动刷新时还要清掉各 provider 的额度
+        网络缓存，否则会继续返回旧额度。清理和重建都在同一把锁内完成，避免
+        并发请求交错清缓存。
+        """
 
         registries, metadata, homes, revision = self.accounts.configuration()
         with self.state_cache_lock:
             moment = time.monotonic()
-            if self.state_cache.get("revision") == revision and moment < self.state_cache.get(
-                "expires", 0
+            if (
+                not force
+                and self.state_cache.get("revision") == revision
+                and moment < self.state_cache.get("expires", 0)
             ):
                 return self.state_cache["payload"]
+            if force:
+                clear_quota_caches()
             state = build_multi_dashboard_state(
                 registries,
                 account_metadata=metadata,
@@ -404,11 +413,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def _head_readyz(self) -> None:
         self._send_probe(_readyz_payload, include_body=False)
 
-    def _send_state(self, include_body: bool) -> None:
+    def _send_state(self, include_body: bool, *, force: bool = False) -> None:
         """GET / HEAD /api/state：合并后的监控状态快照。"""
 
         try:
-            state = self.context.state_payload()
+            state = self.context.state_payload(force=force)
         except RegistryError:
             self.context.logger.exception("Dashboard 读取状态失败")
             self._send_json(
@@ -420,9 +429,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self._send_json(status=200, payload=state, include_body=include_body)
 
     def _get_state(self) -> None:
-        self._send_state(include_body=True)
+        """GET /api/state；``refresh=1`` / ``refresh=true`` 强制刷新额度。"""
+
+        values = parse_qs(self._query).get("refresh", [""])
+        force = values[0].strip().lower() in {"1", "true"}
+        self._send_state(include_body=True, force=force)
 
     def _head_state(self) -> None:
+        """HEAD /api/state：只返回响应头，不因 refresh 参数触发网络请求。"""
+
         self._send_state(include_body=False)
 
     def _get_alerts(self) -> None:

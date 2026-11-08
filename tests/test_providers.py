@@ -16,6 +16,7 @@ from a_token_monitor import agents, alert_context, claude, commandcode, housekee
 from a_token_monitor.cli import build_parser
 from a_token_monitor.providers import (
     PROVIDER_SPECS,
+    clear_quota_caches,
     home_keys,
     home_providers,
     resolve_provider_homes,
@@ -151,6 +152,22 @@ class ProviderHomesTests(unittest.TestCase):
                 self.assertIn(spec.homes_field, payload)
         self.assertEqual(payload["qwen_homes"], [str(root / ".qwen")])
         self.assertEqual(loaded.provider_homes["qwen"], (root / ".qwen",))
+
+
+class QuotaCacheClearTests(unittest.TestCase):
+    """手动刷新时清空有网络额度缓存的 provider；重复调用也必须生效。"""
+
+    def test_clear_quota_caches_clears_every_cached_provider(self) -> None:
+        with (
+            mock.patch.object(claude, "_clear_quota_cache") as clear_claude,
+            mock.patch.object(commandcode, "_clear_quota_cache") as clear_commandcode,
+            mock.patch.object(kimi, "_clear_quota_cache") as clear_kimi,
+        ):
+            clear_quota_caches()
+            clear_quota_caches()
+
+        for clear in (clear_claude, clear_commandcode, clear_kimi):
+            self.assertEqual(clear.call_count, 2)
 
 
 class QuotaReaderErrorTests(unittest.TestCase):

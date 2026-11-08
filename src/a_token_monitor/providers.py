@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import claude, commandcode, kimi
 from .accounts import default_codex_home
 from .claude import (
     default_claude_home,
@@ -391,3 +392,16 @@ def update_provider_homes(
     for key, value in given.items():
         updated[key] = PROVIDER_SPECS[key].resolver(value)
     return updated
+
+
+def clear_quota_caches() -> None:
+    """清空需要访问官方接口的额度缓存。
+
+    Claude、Kimi、Command Code 的额度读取各有一份网络结果缓存；用户点「立即
+    刷新」时先清掉它们，下一次状态构建才会真正重新请求。Codex、Grok、DSH 的
+    额度来自本地快照/日志，没有对应的网络缓存，无需清理。
+    """
+
+    claude._clear_quota_cache()
+    commandcode._clear_quota_cache()
+    kimi._clear_quota_cache()

@@ -60,6 +60,13 @@
        heading 高度才不会跟着变、三行额度窗口才能跨卡片对齐。 */
     .account-meta { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 3.1em; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
     .account-side { display: grid; justify-items: end; gap: 7px; min-width: 0; text-align: right; }
+    .account-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
+    .account-refresh { display: inline-grid; width: 25px; height: 25px; flex: 0 0 auto; padding: 0; place-items: center; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--panel); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
+    .account-refresh:hover { border-color: var(--violet-border-strong); color: var(--text); background: var(--surface-hover); }
+    .account-refresh:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    .account-refresh:disabled { cursor: wait; opacity: .65; }
+    .account-refresh svg { width: 14px; height: 14px; }
+    .account-refresh.is-spinning svg { animation: spin .8s linear infinite; }
     .plan-badge { padding: 4px 8px; border: 1px solid var(--cyan-border); border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
     .account-activity { color: var(--muted); font-size: 11px; }
     .account-block .account-subtitle:first-of-type { margin-top: 17px; }
