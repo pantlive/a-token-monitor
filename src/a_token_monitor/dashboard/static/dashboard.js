@@ -28,12 +28,12 @@
     if (seconds === null || seconds === undefined) return '未知';
     const remaining = Math.round(Number(seconds) - Date.now() / 1000);
     if (remaining <= 0) return `${formatTime(seconds)} （已到时间）`;
-    // 中文注释：剩余时间超过一小时时用「小时 + 分钟」组合，避免出现 6996 分钟这种长数字。
+    // 中文注释：剩余时间超过一小时时用「h + m」紧凑组合，避免出现 6996 分钟这种长数字。
     const totalMinutes = Math.ceil(remaining / 60);
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
     const suffix = hours
-      ? (minutes ? `（${hours} 小时 ${minutes} 分钟后）` : `（${hours} 小时后）`)
+      ? (minutes ? `（${hours}h ${minutes}m 后）` : `（${hours} 小时后）`)
       : `（${totalMinutes} 分钟后）`;
     return `${formatTime(seconds)} ${suffix}`;
   };

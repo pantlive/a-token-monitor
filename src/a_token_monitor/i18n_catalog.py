@@ -150,7 +150,7 @@ EN: dict[str, str] = {
     '确认立即清理过期历史数据？删除不可撤销，活动会话和额度恢复记录会保留。': 'Clean up expired history now? Deletion cannot be undone; active sessions and quota records are kept.',
     '保持当前用法：在同一项目里延续原会话，避免频繁清空上下文或新开会话。': 'Keep doing what you are doing: continue existing sessions within a project instead of frequently clearing context or starting over.',
     '确认恢复该 provider 的默认扫描目录？Web 配置将被清除。': 'Restore the default scan directories for this provider? The web config will be cleared.',
-    '（${hours} 小时 ${minutes} 分钟后）': '(in ${hours}h ${minutes}m)',
+    '（${hours}h ${minutes}m 后）': '(in ${hours}h ${minutes}m)',
     '（${hours} 小时后）': '(in ${hours}h)',
     '（${totalMinutes} 分钟后）': '(in ${totalMinutes} min)',
     '${Math.round(minutes / 43200)} 个月': '${Math.round(minutes / 43200)} months',
