@@ -8,6 +8,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
+from a_token_monitor.local_time import local_day_key, local_day_start
 from a_token_monitor.multi_models import (
     DetectionConfidence,
     SessionStatus,
@@ -420,6 +421,97 @@ class RetentionCleanupTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         assert restored is not None
         self.assertEqual(restored.thread_id, "thread-new")
+
+
+class QuotaDayBaselineRegistryTests(unittest.TestCase):
+    """验证额度日基线的持久化、跨日覆盖和旧快照保护。"""
+
+    OBSERVED_AT = local_day_start(1_800_000_000.0) + 3600.0
+    RESETS_AT = OBSERVED_AT + 3600.0
+
+    def snapshot(
+        self,
+        observed_at: float,
+        used_percent: float = 22.0,
+        resets_at: float | None = None,
+    ) -> QuotaSnapshot:
+        return QuotaSnapshot(
+            observed_at=observed_at,
+            windows=(
+                QuotaWindow(
+                    limit_id="codex",
+                    name="primary",
+                    used_percent=used_percent,
+                    window_minutes=300.0,
+                    resets_at=self.RESETS_AT if resets_at is None else resets_at,
+                ),
+            ),
+        )
+
+    def test_round_trip_keeps_the_first_baseline_of_the_day(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.OBSERVED_AT, used_percent=10.0))
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 60.0, used_percent=22.0)
+            )
+            baselines = registry.load_quota_day_baseline(
+                local_day_key(self.OBSERVED_AT)
+            )
+
+        baseline = baselines[("codex", "primary")]
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.resets_at, self.RESETS_AT)
+        self.assertEqual(baseline.observed_at, self.OBSERVED_AT + 60.0)
+
+    def test_cross_day_snapshot_overwrites_the_old_row(self) -> None:
+        first_day = self.OBSERVED_AT
+        second_day = self.OBSERVED_AT + 86400.0
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(first_day, used_percent=10.0))
+            registry.save_quota(self.snapshot(second_day, used_percent=5.0))
+            first = registry.load_quota_day_baseline(local_day_key(first_day))
+            second = registry.load_quota_day_baseline(local_day_key(second_day))
+
+        self.assertEqual(first, {})
+        self.assertEqual(second[("codex", "primary")].used_percent, 5.0)
+
+    def test_late_old_snapshot_does_not_downgrade_the_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.OBSERVED_AT, used_percent=10.0))
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 120.0, used_percent=22.0)
+            )
+            # 同一自然日里迟到的旧快照：不能把基线改回 99% 或更早的观察时间。
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 60.0, used_percent=99.0)
+            )
+            baseline = registry.load_quota_day_baseline(
+                local_day_key(self.OBSERVED_AT)
+            )[("codex", "primary")]
+
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.observed_at, self.OBSERVED_AT + 120.0)
+
+    def test_reset_window_sets_the_baseline_to_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.OBSERVED_AT, used_percent=10.0))
+            registry.save_quota(
+                self.snapshot(
+                    self.OBSERVED_AT + 60.0,
+                    used_percent=20.0,
+                    resets_at=self.RESETS_AT + 3600.0,
+                )
+            )
+            baseline = registry.load_quota_day_baseline(
+                local_day_key(self.OBSERVED_AT)
+            )[("codex", "primary")]
+
+        self.assertEqual(baseline.used_percent, 0.0)
+        self.assertEqual(baseline.resets_at, self.RESETS_AT + 3600.0)
 
 
 if __name__ == "__main__":

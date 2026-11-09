@@ -58,7 +58,8 @@ from a_token_monitor.multi_models import (
     SessionStatus,
     TrackedSession,
 )
-from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.quota import QuotaDayBaseline, QuotaSnapshot, QuotaWindow
+from a_token_monitor.local_time import local_day_key, local_day_start
 from a_token_monitor.providers import home_keys
 from _provider_patch import patch_provider
 from a_token_monitor.registry import MultiSessionRegistry
@@ -5772,6 +5773,213 @@ class HistoryDashboardTests(unittest.TestCase):
         # 主页不出现历史数据设置区块。
         self.assertNotIn('id="history-settings"', _DASHBOARD_HTML)
         self.assertNotIn("/api/history", _DASHBOARD_HTML)
+
+
+class QuotaTodaySegmentTests(unittest.TestCase):
+    """验证「今日消耗」额度段的 API 字段、持久化接线和前端渲染。"""
+
+    # 中文注释：让 5 小时窗口起点落在昨天，才能验证历史 10% 与今日 12% 的分段。
+    NOW = local_day_start(1_800_000_000.0) + 3600.0
+    RESETS_AT = NOW + 3600.0
+
+    def snapshot(self, observed_at: float, used_percent: float = 22.0) -> QuotaSnapshot:
+        return QuotaSnapshot(
+            observed_at=observed_at,
+            windows=(
+                QuotaWindow(
+                    limit_id="codex",
+                    name="primary",
+                    used_percent=used_percent,
+                    window_minutes=300.0,
+                    resets_at=self.RESETS_AT,
+                ),
+            ),
+        )
+
+    def baseline(self, used_percent: float = 10.0) -> QuotaDayBaseline:
+        return QuotaDayBaseline(
+            day_key=local_day_key(self.NOW),
+            used_percent=used_percent,
+            resets_at=self.RESETS_AT,
+            observed_at=self.NOW - 600.0,
+        )
+
+    def test_quota_summary_exposes_today_segment(self) -> None:
+        summary = _quota_summary(
+            self.snapshot(self.NOW),
+            {("codex", "primary"): self.baseline()},
+            self.NOW,
+        )
+
+        self.assertIsNotNone(summary)
+        window = summary["windows"][0]
+        self.assertEqual(window["day_start_used_percent"], 10.0)
+        self.assertEqual(window["today_used_percent"], 12.0)
+
+    def test_quota_summary_hides_today_segment_outside_the_local_day(self) -> None:
+        summary = _quota_summary(
+            self.snapshot(self.NOW),
+            {("codex", "primary"): self.baseline()},
+            self.NOW + 86400.0,
+        )
+
+        self.assertIsNotNone(summary)
+        window = summary["windows"][0]
+        self.assertIsNone(window["day_start_used_percent"])
+        self.assertIsNone(window["today_used_percent"])
+
+    def test_quota_summary_hides_today_segment_after_a_reset(self) -> None:
+        baseline = QuotaDayBaseline(
+            day_key=local_day_key(self.NOW),
+            used_percent=10.0,
+            resets_at=self.RESETS_AT - 3600.0,
+            observed_at=self.NOW - 600.0,
+        )
+        summary = _quota_summary(
+            self.snapshot(self.NOW),
+            {("codex", "primary"): baseline},
+            self.NOW,
+        )
+
+        self.assertIsNotNone(summary)
+        window = summary["windows"][0]
+        self.assertIsNone(window["day_start_used_percent"])
+        self.assertIsNone(window["today_used_percent"])
+
+    def test_quota_summary_without_baseline_keeps_the_single_bar(self) -> None:
+        summary = _quota_summary(self.snapshot(self.NOW))
+
+        self.assertIsNotNone(summary)
+        window = summary["windows"][0]
+        self.assertIsNone(window["day_start_used_percent"])
+        self.assertIsNone(window["today_used_percent"])
+
+    def test_quota_summary_clips_today_consumption(self) -> None:
+        for used, baseline, expected in (
+            (120.0, 10.0, 100.0),
+            (22.0, 30.0, 0.0),
+            (22.0, 0.0, 22.0),
+        ):
+            with self.subTest(used=used, baseline=baseline):
+                summary = _quota_summary(
+                    self.snapshot(self.NOW, used_percent=used),
+                    {("codex", "primary"): self.baseline(baseline)},
+                    self.NOW,
+                )
+                self.assertEqual(summary["windows"][0]["today_used_percent"], expected)
+
+    def test_build_dashboard_state_reads_the_persisted_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.NOW - 3600.0, used_percent=10.0))
+            registry.save_quota(self.snapshot(self.NOW, used_percent=22.0))
+            with mock.patch.object(
+                dashboard_state.time,
+                "time",
+                return_value=self.NOW + 60.0,
+            ):
+                state = dashboard_state.build_dashboard_state(registry)
+
+        window = state["quota"]["windows"][0]
+        self.assertEqual(window["day_start_used_percent"], 10.0)
+        self.assertEqual(window["today_used_percent"], 12.0)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证今日额度段")
+    def test_quota_today_segment_js_clips_invalid_ranges(self) -> None:
+        helper = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index(
+                "  const quotaTodaySegment ="
+            ): _DASHBOARD_HTML.index("  const quotaPercentText =")
+        ]
+        script = (
+            f"{helper}\n"
+            "const cases = [\n"
+            "  {used_percent: 22, today_used_percent: 12},\n"
+            "  {used_percent: 22},\n"
+            "  {used_percent: 22, today_used_percent: 0},\n"
+            "  {used_percent: 120, today_used_percent: 130},\n"
+            "  {used_percent: 22, today_used_percent: 30},\n"
+            "  {used_percent: 22, today_used_percent: 0.04},\n"
+            "  {used_percent: null, today_used_percent: 5},\n"
+            "  {used_percent: 22, today_used_percent: 'x'},\n"
+            "  {used_percent: 5, today_used_percent: 5},\n"
+            "  {used_percent: -5, today_used_percent: 5},\n"
+            "  {used_percent: 22, today_used_percent: -5},\n"
+            "  {used_percent: Infinity, today_used_percent: 5},\n"
+            "  {used_percent: 22, today_used_percent: NaN},\n"
+            "];\n"
+            "console.log(JSON.stringify(cases.map(quotaTodaySegment)));\n"
+        )
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                {"used": 22, "today": 12, "start": 10},
+                None,
+                None,
+                {"used": 100, "today": 100, "start": 0},
+                {"used": 22, "today": 22, "start": 0},
+                None,
+                None,
+                None,
+                {"used": 5, "today": 5, "start": 0},
+                None,
+                None,
+                None,
+                None,
+            ],
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证今日额度段渲染")
+    def test_render_quota_row_overlays_the_today_segment(self) -> None:
+        # 中文注释：执行真实格式化函数与渲染器，同时检查中文、英文的今日角标。
+        renderer = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const statusNames ="):
+            _DASHBOARD_HTML.index("  const renderQuotaRows =")
+        ]
+        script = (
+            f"{renderer}\n"
+            "const withToday = renderQuotaRow('five_hours', '5 小时', "
+            "[{used_percent: 22, today_used_percent: 12, resets_at: 1}]);\n"
+            "const withoutToday = renderQuotaRow('five_hours', '5 小时', "
+            "[{used_percent: 22, resets_at: 1}]);\n"
+            "console.log(JSON.stringify([withToday, withoutToday]));\n"
+        )
+        for language, today_label in (("zh", "今日 +"), ("en", "Today +")):
+            with self.subTest(language=language):
+                result = subprocess.run(
+                    [shutil.which("node"), "-e", substitute(script, language)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                with_today, without_today = json.loads(result.stdout)
+                self.assertIn('style="width:22%"', with_today)
+                self.assertIn('class="today" style="left:10%;width:12%"', with_today)
+                self.assertIn(f"{today_label}12.0%", with_today)
+                self.assertLess(
+                    with_today.index("width:22%"), with_today.index('class="today"')
+                )
+                self.assertNotIn('class="today"', without_today)
+                self.assertNotIn(today_label, without_today)
+                self.assertIn('style="width:22%"', without_today)
+
+    def test_quota_today_css_overlays_without_changing_the_base_level(self) -> None:
+        css = _BASE_CSS + _DASHBOARD_CSS
+
+        self.assertIn(".quota-bar { grid-area: bar; position: relative; }", css)
+        self.assertIn(".quota-bar > .today", css)
+        self.assertIn("background: var(--blue);", css)
+        self.assertIn(".quota-today", css)
+        self.assertIn("border: 1px solid var(--blue-border);", css)
+        self.assertIn("color: var(--blue-text);", css)
 
 
 if __name__ == "__main__":

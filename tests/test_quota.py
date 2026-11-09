@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
+from a_token_monitor.local_time import local_day_key, local_day_start
 from a_token_monitor.quota import (
     QUOTA_DISPLAY_PERIODS,
+    QuotaDayBaseline,
     QuotaProjection,
     QuotaWindow,
     merge_sparse_update,
@@ -14,6 +16,7 @@ from a_token_monitor.quota import (
     quota_period,
     quota_period_label,
     quota_window_duration,
+    resolve_quota_day_baseline,
 )
 
 
@@ -329,4 +332,104 @@ class QuotaProjectionTests(unittest.TestCase):
         self.assertGreater(
             late.projected_exhausted_at,
             early.projected_exhausted_at,
+        )
+
+
+class QuotaDayBaselineTests(unittest.TestCase):
+    """验证今日额度基线的七种分支（纯函数，不访问数据库）。"""
+
+    OBSERVED_AT = local_day_start(1_800_000_000.0) + 3600.0
+
+    def window(
+        self,
+        used_percent: float | None = 22.0,
+        resets_at: float | None = None,
+    ) -> QuotaWindow:
+        return QuotaWindow(
+            limit_id="codex",
+            name="primary",
+            used_percent=used_percent,
+            window_minutes=300.0,
+            resets_at=self.OBSERVED_AT + 3600.0 if resets_at is None else resets_at,
+        )
+
+    def baseline(self, used_percent: float = 10.0, **overrides: object) -> QuotaDayBaseline:
+        values: dict[str, object] = {
+            "day_key": local_day_key(self.OBSERVED_AT),
+            "used_percent": used_percent,
+            "resets_at": self.OBSERVED_AT + 3600.0,
+            "observed_at": self.OBSERVED_AT - 600.0,
+        }
+        values.update(overrides)
+        return QuotaDayBaseline(**values)  # type: ignore[arg-type]
+
+    def test_missing_used_percent_has_no_baseline(self) -> None:
+        self.assertIsNone(
+            resolve_quota_day_baseline(
+                self.window(used_percent=None),
+                self.OBSERVED_AT,
+                None,
+            )
+        )
+
+    def test_without_previous_uses_current_used_percent(self) -> None:
+        self.assertEqual(
+            resolve_quota_day_baseline(self.window(), self.OBSERVED_AT, None),
+            22.0,
+        )
+
+    def test_keeps_previous_baseline_within_the_same_day(self) -> None:
+        self.assertEqual(
+            resolve_quota_day_baseline(
+                self.window(),
+                self.OBSERVED_AT,
+                self.baseline(10.0),
+            ),
+            10.0,
+        )
+
+    def test_new_local_day_starts_from_current_used_percent(self) -> None:
+        self.assertEqual(
+            resolve_quota_day_baseline(
+                self.window(),
+                self.OBSERVED_AT,
+                self.baseline(
+                    10.0,
+                    day_key=local_day_key(self.OBSERVED_AT - 86400.0),
+                ),
+            ),
+            22.0,
+        )
+
+    def test_window_started_today_starts_from_zero(self) -> None:
+        # 窗口起点正好是本地零点：今天之前不可能有消耗，基线必须是 0。
+        resets_at = local_day_start(self.OBSERVED_AT) + 300.0 * 60.0
+        self.assertEqual(
+            resolve_quota_day_baseline(
+                self.window(resets_at=resets_at),
+                self.OBSERVED_AT,
+                self.baseline(10.0, resets_at=resets_at),
+            ),
+            0.0,
+        )
+
+    def test_reset_window_starts_from_zero(self) -> None:
+        self.assertEqual(
+            resolve_quota_day_baseline(
+                self.window(resets_at=self.OBSERVED_AT + 2000.0),
+                self.OBSERVED_AT,
+                self.baseline(10.0, resets_at=self.OBSERVED_AT + 1000.0),
+            ),
+            0.0,
+        )
+
+    def test_falling_used_percent_moves_the_baseline_down(self) -> None:
+        # 上游回退时不能沿用旧基线，否则会算出虚假的一大段今日消耗。
+        self.assertEqual(
+            resolve_quota_day_baseline(
+                self.window(used_percent=20.0),
+                self.OBSERVED_AT,
+                self.baseline(30.0),
+            ),
+            20.0,
         )
