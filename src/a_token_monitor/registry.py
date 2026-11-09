@@ -13,8 +13,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from .local_time import local_day_key
 from .multi_models import SessionStatus, TrackedSession
-from .quota import QuotaSnapshot, QuotaWindow
+from .quota import (
+    QuotaDayBaseline,
+    QuotaSnapshot,
+    QuotaWindow,
+    resolve_quota_day_baseline,
+)
 
 
 class RegistryError(RuntimeError):
@@ -114,6 +120,15 @@ class MultiSessionRegistry:
                         window_minutes REAL,
                         resets_at REAL,
                         reached_type TEXT,
+                        PRIMARY KEY (limit_id, name)
+                    );
+                    CREATE TABLE IF NOT EXISTS quota_day_baseline (
+                        limit_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        day_key TEXT NOT NULL,
+                        used_percent REAL NOT NULL,
+                        resets_at REAL,
+                        observed_at REAL NOT NULL,
                         PRIMARY KEY (limit_id, name)
                     );
                     CREATE TABLE IF NOT EXISTS resume_attempts (
@@ -575,6 +590,18 @@ class MultiSessionRegistry:
 
         try:
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                previous_baselines = {
+                    (str(row["limit_id"]), str(row["name"])): QuotaDayBaseline(
+                        day_key=str(row["day_key"]),
+                        used_percent=float(row["used_percent"]),
+                        resets_at=self._optional_float(row["resets_at"]),
+                        observed_at=float(row["observed_at"]),
+                    )
+                    for row in connection.execute(
+                        "SELECT * FROM quota_day_baseline"
+                    ).fetchall()
+                }
                 connection.execute(
                     """
                     INSERT INTO quota_snapshot (
@@ -616,6 +643,44 @@ class MultiSessionRegistry:
                         for window in snapshot.windows
                     ),
                 )
+                for window in snapshot.windows:
+                    previous = previous_baselines.get(
+                        (window.limit_id, window.name)
+                    )
+                    # 中文注释：旧快照可能晚到，不能让它把当天更新的基线降级回去。
+                    if (
+                        previous is not None
+                        and snapshot.observed_at < previous.observed_at - 1.0
+                    ):
+                        continue
+                    baseline = resolve_quota_day_baseline(
+                        window,
+                        snapshot.observed_at,
+                        previous,
+                    )
+                    if baseline is None:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT INTO quota_day_baseline (
+                            limit_id, name, day_key, used_percent,
+                            resets_at, observed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(limit_id, name) DO UPDATE SET
+                            day_key=excluded.day_key,
+                            used_percent=excluded.used_percent,
+                            resets_at=excluded.resets_at,
+                            observed_at=excluded.observed_at
+                        """,
+                        (
+                            window.limit_id,
+                            window.name,
+                            local_day_key(snapshot.observed_at),
+                            baseline,
+                            window.resets_at,
+                            snapshot.observed_at,
+                        ),
+                    )
         except sqlite3.Error as error:
             raise RegistryError(f"无法保存额度快照: {error}") from error
 
@@ -662,6 +727,33 @@ class MultiSessionRegistry:
             ),
             metadata=self._json_string_dict(snapshot_row["metadata_json"]),
         )
+
+    def load_quota_day_baseline(
+        self,
+        day_key: str,
+    ) -> dict[tuple[str, str], QuotaDayBaseline]:
+        """读取某个本地自然日的额度基线，按 ``(limit_id, name)`` 索引。
+
+        只查询指定自然日；跨日后旧行仍留在表里，但不会参与今日段的计算。
+        """
+
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM quota_day_baseline WHERE day_key = ?",
+                    (day_key,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise RegistryError(f"无法读取额度日基线: {error}") from error
+        return {
+            (str(row["limit_id"]), str(row["name"])): QuotaDayBaseline(
+                day_key=str(row["day_key"]),
+                used_percent=float(row["used_percent"]),
+                resets_at=self._optional_float(row["resets_at"]),
+                observed_at=float(row["observed_at"]),
+            )
+            for row in rows
+        }
 
     def claim_due_session(
         self,

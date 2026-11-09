@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from .local_time import local_day_key, local_day_start
+
 
 def _number(value: Any) -> float | None:
     """把服务端数字字段转换为浮点数。"""
@@ -72,6 +74,65 @@ class QuotaWindow:
         if self.reached_type not in {None, "", "none", "null", "false"}:
             return True
         return self.used_percent is not None and self.used_percent >= 100.0
+
+
+@dataclass(frozen=True)
+class QuotaDayBaseline:
+    """本地自然日开始时某个额度窗口的已用百分比基线。
+
+    基线只用于计算「今日消耗」这一段：当日首次看到快照时把当前 ``used_percent``
+    记成基线，之后同一自然日、同一重置周期内的差值就是今天新增的额度消耗。
+    """
+
+    day_key: str
+    used_percent: float
+    resets_at: float | None
+    observed_at: float
+
+
+def resolve_quota_day_baseline(
+    window: QuotaWindow,
+    observed_at: float,
+    previous: QuotaDayBaseline | None,
+) -> float | None:
+    """返回 ``observed_at`` 所在本地日的额度基线。
+
+    - 已用比例缺失：返回 ``None``，不建立基线；
+    - 窗口本身今天才重置（起点不早于本地零点，容差 60 秒）：今天从 0 开始，返回 0；
+    - 没有基线或基线属于别的本地日：以当前已用比例作为新一天的起点；
+    - 重置时间变了（窗口已重置）：返回 0，今日消耗从当前值算起；
+    - 已用比例下降（上游回退或重置早于预期）：以当前值为基线，避免画出假的大段；
+    - 其余情况沿用旧基线，差值即今天新增的消耗。
+
+    本地日只经 :mod:`a_token_monitor.local_time` 判定，确保跨时区、跨夏令时一致。
+    """
+
+    used_percent = window.used_percent
+    if used_percent is None:
+        return None
+
+    resets_at = window.resets_at
+    window_minutes = window.window_minutes
+    if resets_at is not None and window_minutes is not None:
+        window_start = resets_at - window_minutes * 60.0
+        if window_start >= local_day_start(observed_at) - 60.0:
+            # 中文注释：窗口今天才开始，之前的已用不可能发生在今天之前。
+            return 0.0
+
+    day_key = local_day_key(observed_at)
+    if previous is None or previous.day_key != day_key:
+        return used_percent
+
+    previous_resets_at = previous.resets_at
+    if (
+        resets_at is not None
+        and previous_resets_at is not None
+        and abs(resets_at - previous_resets_at) > 1.0
+    ):
+        return 0.0
+    if used_percent < previous.used_percent:
+        return used_percent
+    return previous.used_percent
 
 
 # 中文注释：额度周期统一口径。上游的名字五花八门（primary / secondary / weekly /

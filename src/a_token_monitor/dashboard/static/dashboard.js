@@ -158,6 +158,20 @@
     if (minutes < 14400) return `${Math.round(minutes / 1440)} 天`;
     return `${Math.round(minutes / 43200)} 个月`;
   };
+  // 中文注释：今日段 = 当前已用 - 本地日基线。没有基线、数据不合法或差值太小时
+  // 返回 null，进度条保持原来的单色渲染。
+  const quotaTodaySegment = (window) => {
+    const rawUsed = window ? window.used_percent : null;
+    const rawToday = window ? window.today_used_percent : null;
+    if (rawUsed === null || rawUsed === undefined || rawToday === null || rawToday === undefined) return null;
+    const usedValue = Number(rawUsed);
+    const todayValue = Number(rawToday);
+    if (!Number.isFinite(usedValue) || !Number.isFinite(todayValue)) return null;
+    const used = Math.max(0, Math.min(100, usedValue));
+    const today = Math.max(0, Math.min(used, todayValue));
+    if (!(today > 0.05)) return null;
+    return { used, today, start: used - today };
+  };
   const quotaPercentText = (window) => (window.used_percent === null || window.used_percent === undefined
     ? '待采集'
     : formatPercent(window.used_percent));
@@ -201,13 +215,22 @@
     const meta = unknown
       ? `${escapeHtml(stateText)} · ${escapeHtml(quotaDuration(main))}`
       : `重置 ${escapeHtml(formatReset(main.resets_at))} · ${escapeHtml(quotaDuration(main))}`;
+    // 中文注释：今日新增叠加在原有底色之上，蓝色段从基线画到当前已用；
+    // 原有绿/黄/红底色保留，告警语义不变。
+    const todaySegment = quotaTodaySegment(main);
+    const todayBar = todaySegment
+      ? `<span class="today" style="left:${todaySegment.start}%;width:${todaySegment.today}%"></span>`
+      : '';
+    const todayBadge = todaySegment
+      ? `<span class="quota-today">今日 +${escapeHtml(formatPercent(todaySegment.today))}</span>`
+      : '';
     const forecast = quotaForecastText(main);
     const forecastClass = main.projection_status === 'after_reset' ? 'ok' : 'warn';
     return `<div class="quota-row ${level || 'ok'}">
       <span class="quota-row-label">${escapeHtml(label)}</span>
-      <div class="bar quota-bar"><span class="${level}" style="width:${percent}%"></span></div>
+      <div class="bar quota-bar"><span class="${level}" style="width:${percent}%"></span>${todayBar}</div>
       <span class="quota-row-percent ${level}">${escapeHtml(quotaPercentText(main))}</span>
-      <span class="quota-row-meta">${meta}${badge}${forecast ? `<span class="quota-forecast ${forecastClass}">${escapeHtml(forecast)}</span>` : ''}</span>
+      <span class="quota-row-meta">${meta}${todayBadge}${badge}${forecast ? `<span class="quota-forecast ${forecastClass}">${escapeHtml(forecast)}</span>` : ''}</span>
     </div>`;
   };
   const renderQuotaRows = (quotas) => {

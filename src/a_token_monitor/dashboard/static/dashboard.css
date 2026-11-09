@@ -85,7 +85,7 @@
       background: var(--surface-raised);
     }
     .quota-row-label { grid-area: label; color: var(--muted-strong); font-size: 12px; font-weight: 650; }
-    .quota-bar { grid-area: bar; }
+    .quota-bar { grid-area: bar; position: relative; }
     .quota-row-percent { grid-area: percent; color: var(--text); font-size: 15px; font-weight: 700; letter-spacing: -.02em; white-space: nowrap; }
     .quota-row-percent.warn { color: var(--yellow-text); }
     .quota-row-percent.danger { color: var(--red-text); }
@@ -99,6 +99,10 @@
     .quota-row.absent .quota-bar > span { width: 0 !important; }
     .quota-bar { margin: 0; }
     .quota-badge { padding: 1px 6px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 10px; font-weight: 600; white-space: nowrap; }
+    /* 中文注释：今日新增段叠加在原有绿/黄/红底色上，统一用蓝色区分「今天消耗」；
+       右端保留圆角，左端与基线位置对齐。 */
+    .quota-bar > .today { position: absolute; top: 0; bottom: 0; border-radius: 0 99px 99px 0; background: var(--blue); }
+    .quota-today { display: inline-block; margin-left: 4px; padding: 1px 6px; border: 1px solid var(--blue-border); border-radius: 99px; color: var(--blue-text); font-size: 10px; font-weight: 600; white-space: nowrap; }
     .quota-note { padding: 12px 13px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
     .bar { height: 6px; margin: 13px 0 12px; border-radius: 99px; background: var(--track); overflow: hidden; }
     .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }

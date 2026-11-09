@@ -15,9 +15,11 @@ from ..housekeeping import (
     HousekeepingMonitor,
 )
 from ..health import HealthTracker
+from ..local_time import local_day_key
 from ..multi_models import TrackedSession, session_view
 from ..speed import SpeedTracker
 from ..quota import (
+    QuotaDayBaseline,
     QuotaSnapshot,
     project_quota_exhaustion,
     quota_period,
@@ -262,7 +264,14 @@ def build_dashboard_state(
 ) -> dict[str, Any]:
     """读取 SQLite 并构造不包含提示词的 Dashboard 数据。"""
 
+    now = time.time()
     quota = registry.load_quota()
+    # 中文注释：今日段依赖本地自然日的基线；只读当天，跨日后的旧行不参与计算。
+    quota_day_baselines = (
+        registry.load_quota_day_baseline(local_day_key(now))
+        if quota is not None
+        else {}
+    )
     all_sessions = registry.list_sessions(active_only=False)
     sessions = _visible_sessions(all_sessions)
     status_counts: dict[str, int] = {}
@@ -277,12 +286,12 @@ def build_dashboard_state(
         session.is_process_backed for session in active_sessions
     )
     return {
-        "updated_at": time.time(),
+        "updated_at": now,
         "account": account_name,
         "account_id": account_id,
         "profile_name": profile_name or account_name,
         "codex_home": codex_home,
-        "quota": _quota_summary(quota),
+        "quota": _quota_summary(quota, quota_day_baselines, now),
         "counts": status_counts,
         "sessions": [
             session_view(
@@ -695,16 +704,59 @@ def _record_account_name(record: Mapping[str, Any]) -> str:
     return "codex"
 
 
-def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
-    """把额度快照转换成网页需要的安全字段。"""
+def _quota_resets_match(left: float | None, right: float | None) -> bool:
+    """判断窗口重置时间与基线是否属于同一周期（容差 1 秒）。"""
+
+    if left is None or right is None:
+        return left is None and right is None
+    return abs(left - right) <= 1.0
+
+
+def _quota_summary(
+    snapshot: QuotaSnapshot | None,
+    day_baselines: Mapping[tuple[str, str], QuotaDayBaseline] | None = None,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """把额度快照转换成网页需要的安全字段。
+
+    ``day_baselines`` 与 ``now`` 由 Dashboard 状态构建传入；只有快照属于 ``now``
+    所在的本地自然日、重置周期与基线一致时，才输出今日段。其他调用方（例如
+    provider 额度）不传这两个参数，字段保持 ``None``，前端继续画单色进度条。
+    """
 
     if snapshot is None:
         return None
+    same_local_day = (
+        now is not None
+        and local_day_key(snapshot.observed_at) == local_day_key(now)
+    )
     windows: list[dict[str, Any]] = []
     for window in snapshot.windows:
         # 中文注释：预测固定使用快照的观察时间，页面刷新时不会因为「现在」变化
         # 而让同一份额度数据反复改口。
         projection = project_quota_exhaustion(window, snapshot.observed_at)
+        day_start_used: float | None = None
+        today_used: float | None = None
+        baseline = (
+            day_baselines.get((window.limit_id, window.name))
+            if day_baselines
+            else None
+        )
+        if (
+            baseline is not None
+            and same_local_day
+            and _quota_resets_match(window.resets_at, baseline.resets_at)
+            and window.used_percent is not None
+        ):
+            day_start_used = baseline.used_percent
+            today_used = max(
+                0.0,
+                min(
+                    window.used_percent,
+                    100.0,
+                    window.used_percent - baseline.used_percent,
+                ),
+            )
         windows.append(
             {
                 "limit_id": window.limit_id,
@@ -720,6 +772,9 @@ def _quota_summary(snapshot: QuotaSnapshot | None) -> dict[str, Any] | None:
                 "duration_label": quota_window_duration(window),
                 "projection_status": projection.status,
                 "projected_exhausted_at": projection.projected_exhausted_at,
+                # 中文注释：今日段 = 当前已用 - 本地日基线；缺失时不画第二段。
+                "day_start_used_percent": day_start_used,
+                "today_used_percent": today_used,
             }
         )
     return {

@@ -742,6 +742,7 @@ EN: dict[str, str] = {
     '个月': 'months',
     '中文': '中文',
     '今天': 'Today',
+    '今日 +': 'Today +',
     '会话': 'Session',
     '项目': 'Project',
     '余额': 'Balance',
