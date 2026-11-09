@@ -28,13 +28,22 @@
     if (seconds === null || seconds === undefined) return '未知';
     const remaining = Math.round(Number(seconds) - Date.now() / 1000);
     if (remaining <= 0) return `${formatTime(seconds)} （已到时间）`;
-    // 中文注释：剩余时间超过一小时时用「h + m」紧凑组合，避免出现 6996 分钟这种长数字。
+    // 中文注释：剩余时间超过一天时先写天数，再用「h + m」紧凑组合，避免出现 6996 分钟这种长数字。
     const totalMinutes = Math.ceil(remaining / 60);
-    const hours = Math.floor(totalMinutes / 60);
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
     const minutes = totalMinutes % 60;
-    const suffix = hours
-      ? (minutes ? `（${hours}h ${minutes}m 后）` : `（${hours} 小时后）`)
-      : `（${totalMinutes} 分钟后）`;
+    let suffix;
+    if (days) {
+      if (hours && minutes) suffix = `（${days} 天 ${hours}h ${minutes}m 后）`;
+      else if (hours) suffix = `（${days} 天 ${hours}h 后）`;
+      else if (minutes) suffix = `（${days} 天 ${minutes}m 后）`;
+      else suffix = `（${days} 天后）`;
+    } else if (hours) {
+      suffix = minutes ? `（${hours}h ${minutes}m 后）` : `（${hours} 小时后）`;
+    } else {
+      suffix = `（${totalMinutes} 分钟后）`;
+    }
     return `${formatTime(seconds)} ${suffix}`;
   };
   const formatPercent = (value) => value === null || value === undefined ? '未知' : `${Number(value).toFixed(1)}%`;
