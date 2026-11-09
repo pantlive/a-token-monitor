@@ -1,36 +1,54 @@
 """Grok CLI 本地用量、会话元数据和额度快照。
 
-数据来自 ``GROK_HOME/logs/unified.jsonl`` 的 ``shell.turn.inference_done``
-和 ``billing: fetched credits config``。只读取身份字段和 token 计数，
-不读取 access/refresh token，也不读取会话正文或工具输出。
+用量数据来自 ``GROK_HOME/logs/unified.jsonl`` 的 ``shell.turn.inference_done``。
+额度优先通过官方 ``GET /v1/billing?format=credits`` 接口读取，接口失败或没有
+凭据时再回溯 ``billing: fetched credits config`` 日志。只读取身份字段和 token
+计数，不读取 access/refresh token，也不读取会话正文或工具输出。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import unquote
 
 from .agents import scan_running_agents
 from .activity_cache import ActivityIndexCache
+from .health import sanitize_error
 from .multi_models import DetectionConfidence, SessionStatus, TrackedSession
 from .quota import QuotaSnapshot, QuotaWindow
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _GROK_INFERENCE_DONE = b"shell.turn.inference_done"
 _GROK_BILLING = b"billing: fetched credits config"
+_GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+_GROK_BILLING_TIMEOUT_SECONDS = 8.0
+_GROK_MAX_RESPONSE_BYTES = 1024 * 1024
+_GROK_USER_AGENT = "a-token-monitor"
+_QUOTA_CACHE_SUCCESS_TTL_SECONDS = 60.0
+_QUOTA_CACHE_FAILURE_TTL_SECONDS = 15.0
 # 中文注释：billing 事件只在 Grok 启动/刷新额度时写一次，之后日志会继续追加大量
 # 请求记录；固定只看尾部 256 KiB 会在日志变长后把额度整段漏掉。按块向前回溯，
 # 直到找到最近一次 billing 事件；上限避免异常大日志每次都全量扫描。
 _MAX_BILLING_TAIL_BYTES = 256 * 1024
 _MAX_BILLING_LOOKBACK_BYTES = 16 * 1024 * 1024
 _MAX_LINE_BYTES = 64 * 1024
+
+_HttpJsonCaller = Callable[[str, Mapping[str, str], float], tuple[int, Any]]
+
+_quota_cache: dict[Path, tuple[float, QuotaSnapshot | None]] = {}
+_quota_cache_lock = threading.Lock()
 _TOKEN_FIELDS = (
     "prompt_tokens",
     "cached_prompt_tokens",
@@ -487,6 +505,104 @@ def parse_grok_log_chunk(
 def read_grok_quota(
     grok_home: Path,
     now: float | None = None,
+    *,
+    http_get_json: _HttpJsonCaller | None = None,
+) -> QuotaSnapshot | None:
+    """优先从官方 billing 接口读取 Grok 额度，失败时回溯本地日志。
+
+    任何网络、凭据或解析问题都不会抛出。使用真实 HTTP 时结果带缓存（成功
+    60 秒、失败 15 秒），避免 Dashboard 轮询反复请求接口。token 只用于鉴权，
+    不会出现在返回值、日志或异常消息中。不刷新 access token，以免和 Grok CLI
+    抢着轮换凭据。
+    """
+
+    home = _normalize_path(grok_home)
+    moment = time.time() if now is None else now
+    use_cache = http_get_json is None
+    if use_cache:
+        with _quota_cache_lock:
+            cached = _quota_cache.get(home)
+        if cached is not None:
+            cached_at, cached_value = cached
+            ttl = (
+                _QUOTA_CACHE_SUCCESS_TTL_SECONDS
+                if cached_value is not None
+                else _QUOTA_CACHE_FAILURE_TTL_SECONDS
+            )
+            if moment - cached_at < ttl:
+                return cached_value
+    try:
+        snapshot = _fetch_grok_quota(
+            home,
+            moment,
+            http_get_json=http_get_json or _http_get_json,
+        )
+    except Exception as error:  # noqa: BLE001 - 额度是可选增强，任何意外都不能让监控崩溃
+        # 中文注释：预期内的网络、凭据问题在 _fetch 内部已退回日志；走到这里
+        # 说明是解析或代码缺陷，必须留痕，否则额度会无声消失。正文只记异常类型和
+        # 脱敏后的信息，完整堆栈放在 debug 级别，避免把凭据相关内容写进常规日志。
+        _LOGGER.warning(
+            "Grok 额度读取出现意外错误，本轮改用本地日志: %s: %s",
+            type(error).__name__,
+            sanitize_error(error),
+        )
+        _LOGGER.debug("Grok 额度读取异常堆栈", exc_info=True)
+        snapshot = _quota_from_unified_log(home, now=moment)
+    if use_cache:
+        with _quota_cache_lock:
+            _quota_cache[home] = (moment, snapshot)
+    return snapshot
+
+
+def _clear_quota_cache() -> None:
+    """清空配额缓存（测试与手动刷新用）。"""
+
+    with _quota_cache_lock:
+        _quota_cache.clear()
+
+
+def _fetch_grok_quota(
+    home: Path,
+    now: float,
+    *,
+    http_get_json: _HttpJsonCaller,
+) -> QuotaSnapshot | None:
+    """先请求 billing 接口，失败或没有凭据时再读 unified.jsonl。"""
+
+    snapshot = _quota_from_billing_api(home, now, http_get_json=http_get_json)
+    if snapshot is not None:
+        return snapshot
+    return _quota_from_unified_log(home, now=now)
+
+
+def _quota_from_billing_api(
+    home: Path,
+    now: float,
+    *,
+    http_get_json: _HttpJsonCaller,
+) -> QuotaSnapshot | None:
+    """用 auth.json 里的 key/access_token 请求官方额度接口。"""
+
+    token = _read_grok_access_token(home)
+    if token is None:
+        return None
+    status, payload = http_get_json(
+        _GROK_BILLING_URL,
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": _GROK_USER_AGENT,
+        },
+        _GROK_BILLING_TIMEOUT_SECONDS,
+    )
+    if status != 200 or payload is None:
+        return None
+    return _quota_from_api(payload, now)
+
+
+def _quota_from_unified_log(
+    grok_home: Path,
+    now: float | None = None,
 ) -> QuotaSnapshot | None:
     """从 unified.jsonl 向前回溯最近一次 Grok 额度配置。"""
 
@@ -566,16 +682,62 @@ def _latest_billing_event(
     return latest, latest_ts
 
 
+def _quota_from_api(
+    payload: Any,
+    observed_at: float,
+) -> QuotaSnapshot | None:
+    """把 billing 接口响应转换成额度窗口，兼容 ``{"config": ...}`` 与直接 config。"""
+
+    if not isinstance(payload, Mapping):
+        return None
+    nested = payload.get("config")
+    config = nested if isinstance(nested, Mapping) else payload
+    snapshot = _quota_from_config(
+        config,
+        observed_at=observed_at,
+        subscription_tier=payload.get("subscriptionTier"),
+        source="grok-billing-api",
+        freshness="live billing api",
+    )
+    if snapshot is None:
+        return None
+    window = snapshot.windows[0] if snapshot.windows else None
+    if window is None or window.used_percent is None:
+        return None
+    return snapshot
+
+
 def _quota_from_billing(
     ctx: Mapping[str, Any],
     observed_at: float,
 ) -> QuotaSnapshot | None:
-    """把 Grok credits 配置转换成额度窗口。"""
+    """把 Grok credits 日志配置转换成额度窗口。"""
 
     config = ctx.get("config")
     if not isinstance(config, Mapping):
         return None
+    return _quota_from_config(
+        config,
+        observed_at=observed_at,
+        subscription_tier=ctx.get("subscriptionTier"),
+        source="grok-unified-log",
+        freshness="latest billing: fetched credits config",
+    )
+
+
+def _quota_from_config(
+    config: Mapping[str, Any],
+    *,
+    observed_at: float,
+    subscription_tier: Any,
+    source: str,
+    freshness: str,
+) -> QuotaSnapshot | None:
+    """把一份 credits config 转成额度快照；日志与接口共用。"""
+
     used_percent = _number(config.get("creditUsagePercent"))
+    if used_percent is None:
+        used_percent = _product_usage_percent(config.get("productUsage"))
     period = config.get("currentPeriod")
     period_end = None
     period_type = None
@@ -583,7 +745,7 @@ def _quota_from_billing(
         period_end = _timestamp(period.get("end"))
         period_type = _text(period.get("type"))
     window_minutes = 10_080.0 if period_type and "WEEKLY" in period_type else None
-    plan = _text(ctx.get("subscriptionTier")) or _text(config.get("subscriptionTier"))
+    plan = _text(subscription_tier) or _text(config.get("subscriptionTier"))
     window = QuotaWindow(
         limit_id="grok",
         name="weekly",
@@ -595,10 +757,70 @@ def _quota_from_billing(
         observed_at=observed_at,
         windows=(window,),
         plan_type=plan,
-        source="grok-unified-log",
+        source=source,
         raw_limit_ids=("grok",),
-        metadata={"freshness": "latest billing: fetched credits config"},
+        metadata={"freshness": freshness},
     )
+
+
+def _product_usage_percent(value: Any) -> float | None:
+    """``creditUsagePercent`` 缺失时取 ``productUsage[0].usagePercent``。"""
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if not value:
+            return None
+        first = value[0]
+        if isinstance(first, Mapping):
+            return _number(first.get("usagePercent"))
+    return None
+
+
+def _read_grok_access_token(home: Path) -> str | None:
+    """从 auth.json 读取鉴权 token；只在函数内部使用，不写入日志或返回值。"""
+
+    auth_path = home / "auth.json"
+    try:
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    chosen = _choose_auth_record(payload)
+    if chosen is None:
+        return None
+    return _text(chosen.get("key")) or _text(chosen.get("access_token"))
+
+
+def _http_get_json(
+    url: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> tuple[int, Any]:
+    """发起一次 GET 请求并解析 JSON；错误响应返回状态码与空值。"""
+
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return int(response.status), _read_json_body(response)
+    except urllib.error.HTTPError as error:
+        return int(error.code), None
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, None
+
+
+def _read_json_body(response: Any) -> Any:
+    """读取受限长度的 JSON 响应体。"""
+
+    try:
+        raw = response.read(_GROK_MAX_RESPONSE_BYTES)
+    except (OSError, ValueError):
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return None
 
 
 def _usage_event_from_log(

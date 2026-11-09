@@ -231,6 +231,7 @@ class CliLocalizationTests(unittest.TestCase):
             "配额暂不可读（网络或登录状态问题），可在 command-code CLI 中用 /usage 查看",
             "配额暂不可读（网络、限速或登录状态问题），可在 claude CLI 中用 /usage 查看；"
             "本地用量与成本统计不受影响",
+            "未能读取 Grok 额度（接口与本地日志均无数据）",
         ]
         for line in lines:
             with self.subTest(line=line):

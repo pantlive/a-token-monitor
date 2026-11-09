@@ -79,6 +79,7 @@ EN: dict[str, str] = {
     '配额暂不可读（网络、限速或登录状态问题），可在 claude CLI 中用 /usage 查看；本地用量与成本统计不受影响': 'Quota is temporarily unreadable (network, rate limiting or sign-in problem); run /usage in the claude CLI. Local usage and cost statistics are unaffected.',
     '配额暂不可读（网络或登录状态问题），可在 kimi CLI 中用 /usage 查看；本地用量与成本统计不受影响': 'Quota is temporarily unreadable (network or sign-in problem); run /usage in the kimi CLI. Local usage and cost statistics are unaffected.',
     '配额暂不可读（网络或登录状态问题），可在 command-code CLI 中用 /usage 查看': 'Quota is temporarily unreadable (network or sign-in problem); run /usage in the command-code CLI.',
+    '未能读取 Grok 额度（接口与本地日志均无数据）': 'Could not read Grok quota (no data from the API or local logs)',
     '监控 Codex / Grok / Kimi / Command Code / DeepSeek Harness 等 code agent 的额度、会话、用量和异常流量。': 'Monitor quotas, sessions, usage and traffic anomalies for Codex / Grok / Kimi / Command Code / DeepSeek Harness and other code agents.',
     '${formatNumber(search.matched_rows)} 行 · ${formatNumber(totals.total_tokens)} token': '${formatNumber(search.matched_rows)} rows · ${formatNumber(totals.total_tokens)} tokens',
     '<div class="muted">未定价（未计入金额）：${escapeHtml(stats.unpriced_models.join(\', \'))}</div>': '<div class="muted">Unpriced (excluded from cost): ${escapeHtml(stats.unpriced_models.join(\', \'))}</div>',

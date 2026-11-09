@@ -70,6 +70,17 @@ from a_token_monitor.usage import UsageAggregator
 class DashboardTests(unittest.TestCase):
     """验证网页只展示额度、会话和用量状态。"""
 
+    def setUp(self) -> None:
+        from a_token_monitor import grok as grok_module
+
+        grok_module._clear_quota_cache()
+        patcher = mock.patch.object(
+            grok_module, "_http_get_json", return_value=(0, None)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(grok_module._clear_quota_cache)
+
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证页面脚本")
     def test_localized_javascript_is_valid(self) -> None:
         """两种语言的真实脚本都必须可解析，防止译文引号破坏页面。"""
@@ -1796,6 +1807,17 @@ class AlertHistoryDashboardTests(unittest.TestCase):
 
 class GrokSessionDashboardTests(unittest.TestCase):
     """验证 Grok 活动会话以统一字段进入 Dashboard 状态。"""
+
+    def setUp(self) -> None:
+        from a_token_monitor import grok as grok_module
+
+        grok_module._clear_quota_cache()
+        patcher = mock.patch.object(
+            grok_module, "_http_get_json", return_value=(0, None)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(grok_module._clear_quota_cache)
 
     def test_grok_sessions_use_unified_fields(self) -> None:
         from a_token_monitor.multi_models import DetectionConfidence, SessionStatus

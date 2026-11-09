@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import claude, commandcode, kimi
+from . import claude, commandcode, grok, kimi
 from .accounts import default_codex_home
 from .claude import (
     default_claude_home,
@@ -254,7 +254,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             active_sessions=list_grok_active_sessions,
             read_account=read_grok_account,
             read_quota=read_grok_quota,
-            missing_quota_error="未找到 Grok billing 额度日志",
+            missing_quota_error="未能读取 Grok 额度（接口与本地日志均无数据）",
         ),
         ProviderSpec(
             key="kimi",
@@ -397,11 +397,12 @@ def update_provider_homes(
 def clear_quota_caches() -> None:
     """清空需要访问官方接口的额度缓存。
 
-    Claude、Kimi、Command Code 的额度读取各有一份网络结果缓存；用户点「立即
-    刷新」时先清掉它们，下一次状态构建才会真正重新请求。Codex、Grok、DSH 的
+    Claude、Kimi、Command Code、Grok 的额度读取各有一份网络结果缓存；用户点
+    「立即刷新」时先清掉它们，下一次状态构建才会真正重新请求。Codex、DSH 的
     额度来自本地快照/日志，没有对应的网络缓存，无需清理。
     """
 
     claude._clear_quota_cache()
     commandcode._clear_quota_cache()
+    grok._clear_quota_cache()
     kimi._clear_quota_cache()

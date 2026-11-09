@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from a_token_monitor import agents, alert_context, claude, commandcode, housekeeping, kimi
+from a_token_monitor import agents, alert_context, claude, commandcode, grok, housekeeping, kimi
 from a_token_monitor.cli import build_parser
 from a_token_monitor.providers import (
     PROVIDER_SPECS,
@@ -161,12 +161,13 @@ class QuotaCacheClearTests(unittest.TestCase):
         with (
             mock.patch.object(claude, "_clear_quota_cache") as clear_claude,
             mock.patch.object(commandcode, "_clear_quota_cache") as clear_commandcode,
+            mock.patch.object(grok, "_clear_quota_cache") as clear_grok,
             mock.patch.object(kimi, "_clear_quota_cache") as clear_kimi,
         ):
             clear_quota_caches()
             clear_quota_caches()
 
-        for clear in (clear_claude, clear_commandcode, clear_kimi):
+        for clear in (clear_claude, clear_commandcode, clear_grok, clear_kimi):
             self.assertEqual(clear.call_count, 2)
 
 
@@ -178,6 +179,7 @@ class QuotaReaderErrorTests(unittest.TestCase):
             (claude, "_fetch_claude_quota", claude.read_claude_quota),
             (kimi, "_fetch_kimi_quota", kimi.read_kimi_quota),
             (commandcode, "_fetch_commandcode_quota", commandcode.read_commandcode_quota),
+            (grok, "_fetch_grok_quota", grok.read_grok_quota),
         )
         for module, fetch_name, reader in cases:
             with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as temporary:
