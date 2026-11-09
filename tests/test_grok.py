@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -12,6 +13,7 @@ from _platform_support import requires_symlinks
 from a_token_monitor import grok as grok_module
 from a_token_monitor.agents import RunningAgent
 from a_token_monitor.grok import (
+    _clear_quota_cache,
     decode_grok_project,
     list_grok_active_sessions,
     parse_grok_log_chunk,
@@ -25,6 +27,16 @@ from a_token_monitor.usage import TokenUsage, UsageAggregator, _estimate_usage
 
 class GrokUsageTests(unittest.TestCase):
     """验证 Grok unified.jsonl 请求用量和 SuperGrok 额度读取。"""
+
+    def setUp(self) -> None:
+        _clear_quota_cache()
+        # 中文注释：夹具里的 auth.json 带 key，真实 HTTP 会打外网；默认离线。
+        patcher = mock.patch.object(
+            grok_module, "_http_get_json", return_value=(0, None)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(_clear_quota_cache)
 
     def test_parses_inference_done_and_maps_session_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -165,7 +177,10 @@ class GrokUsageTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            snapshot = read_grok_quota(grok_home)
+            snapshot = read_grok_quota(
+                grok_home,
+                http_get_json=lambda url, headers, timeout: (0, None),
+            )
 
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
@@ -214,7 +229,10 @@ class GrokUsageTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            snapshot = read_grok_quota(grok_home)
+            snapshot = read_grok_quota(
+                grok_home,
+                http_get_json=lambda url, headers, timeout: (0, None),
+            )
 
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
@@ -290,6 +308,274 @@ class GrokUsageTests(unittest.TestCase):
                 (missing.resolve(),),
             )
         self.assertEqual(resolve_grok_homes(()), ())
+
+
+class GrokQuotaTests(unittest.TestCase):
+    """验证 Grok billing 接口读取、失败回退日志、缓存与 token 不外泄。"""
+
+    def setUp(self) -> None:
+        _clear_quota_cache()
+
+    def tearDown(self) -> None:
+        _clear_quota_cache()
+
+    def test_reads_weekly_quota_from_billing_api(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            _write_grok_auth(grok_home)
+            calls: list[tuple[str, dict[str, str], float]] = []
+
+            def fake_get(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                calls.append((url, dict(headers), timeout))
+                return 200, _credits_payload()
+
+            snapshot = read_grok_quota(
+                grok_home,
+                now=1_789_700_000.0,
+                http_get_json=fake_get,
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.source, "grok-billing-api")
+        self.assertEqual(snapshot.plan_type, "SuperGrok")
+        self.assertEqual(
+            snapshot.metadata,
+            {"freshness": "live billing api"},
+        )
+        window = snapshot.window("grok", "weekly")
+        self.assertIsNotNone(window)
+        assert window is not None
+        self.assertEqual(window.used_percent, 12.5)
+        self.assertEqual(window.window_minutes, 10_080.0)
+        self.assertEqual(window.resets_at, _timestamp("2026-08-28T02:14:01+00:00"))
+        self.assertEqual(len(calls), 1)
+        url, headers, timeout = calls[0]
+        self.assertEqual(
+            url,
+            "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+        )
+        self.assertEqual(headers["Authorization"], "Bearer SECRET-TOKEN")
+        self.assertEqual(headers["Accept"], "application/json")
+        self.assertEqual(headers["User-Agent"], "a-token-monitor")
+        self.assertEqual(timeout, 8.0)
+        self.assertNotIn("SECRET-TOKEN", repr(snapshot))
+
+    def test_api_falls_back_to_log_on_unauthorized_or_network_error(self) -> None:
+        cases = ((401, None), (0, None))
+        for status, payload in cases:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                grok_home = Path(temporary) / ".grok"
+                _write_grok_auth(grok_home)
+                _write_billing_log(grok_home, used_percent=42.5)
+                calls: list[int] = []
+
+                def fake_get(
+                    url: str,
+                    headers: dict[str, str],
+                    timeout: float,
+                    *,
+                    _status: int = status,
+                    _payload: object = payload,
+                ) -> tuple[int, object]:
+                    calls.append(_status)
+                    return _status, _payload
+
+                snapshot = read_grok_quota(grok_home, http_get_json=fake_get)
+
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            self.assertEqual(snapshot.source, "grok-unified-log")
+            window = snapshot.window("grok", "weekly")
+            assert window is not None
+            self.assertEqual(window.used_percent, 42.5)
+            self.assertEqual(calls, [status])
+
+    def test_skips_request_without_auth_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            _write_billing_log(grok_home, used_percent=33.0)
+            calls: list[str] = []
+
+            def fake_get(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                calls.append(url)
+                raise AssertionError("没有 token 时不应请求接口")
+
+            missing_auth = read_grok_quota(grok_home, http_get_json=fake_get)
+            _write_grok_auth(grok_home, key=None, access_token=None)
+            blank_token = read_grok_quota(grok_home, http_get_json=fake_get)
+
+        self.assertEqual(calls, [])
+        for snapshot in (missing_auth, blank_token):
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            self.assertEqual(snapshot.source, "grok-unified-log")
+            window = snapshot.window("grok", "weekly")
+            assert window is not None
+            self.assertEqual(window.used_percent, 33.0)
+
+    def test_token_does_not_appear_in_repr_or_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            _write_grok_auth(grok_home)
+            _write_billing_log(grok_home, used_percent=8.0)
+
+            def boom(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                raise RuntimeError("billing lookup failed")
+
+            with self.assertLogs(grok_module.__name__, level="WARNING") as captured:
+                snapshot = read_grok_quota(
+                    grok_home,
+                    http_get_json=boom,
+                )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.source, "grok-unified-log")
+        dumped = "\n".join(captured.output) + repr(snapshot)
+        self.assertNotIn("SECRET-TOKEN", dumped)
+        self.assertIn("RuntimeError", captured.output[0])
+
+    def test_uses_access_token_when_key_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            _write_grok_auth(grok_home, key=None, access_token="SECRET-TOKEN")
+            headers_seen: list[dict[str, str]] = []
+
+            def fake_get(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                headers_seen.append(dict(headers))
+                return 200, _credits_payload(wrapped=False)
+
+            snapshot = read_grok_quota(grok_home, http_get_json=fake_get)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.source, "grok-billing-api")
+        self.assertEqual(headers_seen[0]["Authorization"], "Bearer SECRET-TOKEN")
+        self.assertNotIn("SECRET-TOKEN", repr(snapshot))
+
+    def test_uses_product_usage_percent_when_credit_percent_missing(self) -> None:
+        payload = {
+            "config": {
+                "productUsage": [{"product": "grok-4", "usagePercent": 67.0}],
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-08-28T02:14:01+00:00",
+                },
+            },
+            "subscriptionTier": "SuperGrok",
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            _write_grok_auth(grok_home)
+            snapshot = read_grok_quota(
+                grok_home,
+                http_get_json=lambda url, headers, timeout: (200, payload),
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        window = snapshot.window("grok", "weekly")
+        assert window is not None
+        self.assertEqual(window.used_percent, 67.0)
+        self.assertEqual(snapshot.source, "grok-billing-api")
+
+    def test_real_http_layer_results_are_cached_until_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            grok_home = Path(temporary_directory) / ".grok"
+            _write_grok_auth(grok_home)
+            calls: list[str] = []
+
+            def fake_get(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
+                calls.append(url)
+                return 200, _credits_payload()
+
+            with mock.patch.object(grok_module, "_http_get_json", fake_get):
+                first = read_grok_quota(grok_home, now=1_789_700_000.0)
+                second = read_grok_quota(grok_home, now=1_789_700_030.0)
+                _clear_quota_cache()
+                third = read_grok_quota(grok_home, now=1_789_700_031.0)
+
+        self.assertIsNotNone(first)
+        self.assertIs(second, first)
+        self.assertIsNotNone(third)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(first.source if first is not None else None, "grok-billing-api")
+        self.assertEqual(third.source if third is not None else None, "grok-billing-api")
+
+    def test_http_get_json_stays_offline_and_hides_errors(self) -> None:
+        """真实 urllib 层必须把网络错误收敛成状态码，且不把 token 写进异常。"""
+
+        headers = {
+            "Authorization": "Bearer SECRET-TOKEN",
+            "Accept": "application/json",
+        }
+
+        class _Response:
+            status = 200
+
+            def read(self, _size: int) -> bytes:
+                return b'{"config":{"creditUsagePercent":1}}'
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+        with mock.patch.object(
+            grok_module.urllib.request, "urlopen", return_value=_Response()
+        ):
+            status, body = grok_module._http_get_json(
+                "https://example.com/billing", headers, 8.0
+            )
+        self.assertEqual(status, 200)
+        assert isinstance(body, dict)
+        self.assertEqual(body["config"]["creditUsagePercent"], 1)
+
+        error = urllib.error.HTTPError(
+            "https://example.com/billing",
+            401,
+            "unauthorized",
+            hdrs={},
+            fp=None,
+        )
+        with mock.patch.object(grok_module.urllib.request, "urlopen", side_effect=error):
+            status, body = grok_module._http_get_json(
+                "https://example.com/billing", headers, 8.0
+            )
+        self.assertEqual(status, 401)
+        self.assertIsNone(body)
+
+        with mock.patch.object(
+            grok_module.urllib.request,
+            "urlopen",
+            side_effect=urllib.error.URLError("offline"),
+        ):
+            status, body = grok_module._http_get_json(
+                "https://example.com/billing", headers, 8.0
+            )
+        self.assertEqual((status, body), (0, None))
 
 
 class GrokActiveSessionTests(unittest.TestCase):
@@ -535,6 +821,75 @@ class GrokActiveSessionTests(unittest.TestCase):
         )
         self.assertIsNone(decode_grok_project("not-a-path"))
         self.assertIsNone(decode_grok_project(""))
+
+
+def _write_grok_auth(
+    grok_home: Path,
+    *,
+    key: str | None = "SECRET-TOKEN",
+    access_token: str | None = None,
+) -> None:
+    """写入一份带用户身份的 auth.json；token 字段可按用例省略。"""
+
+    grok_home.mkdir(parents=True, exist_ok=True)
+    record: dict[str, object] = {
+        "user_id": "grok-user-1",
+        "email": "user@example.com",
+        "principal_type": "User",
+    }
+    if key is not None:
+        record["key"] = key
+    if access_token is not None:
+        record["access_token"] = access_token
+    (grok_home / "auth.json").write_text(
+        json.dumps({"https://auth.x.ai::client": record}),
+        encoding="utf-8",
+    )
+
+
+def _write_billing_log(grok_home: Path, *, used_percent: float) -> None:
+    """写入一条 billing: fetched credits config 日志。"""
+
+    log_path = grok_home / "logs" / "unified.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-27T02:00:00Z",
+                "msg": "billing: fetched credits config",
+                "ctx": {
+                    "subscriptionTier": "SuperGrok",
+                    "config": {
+                        "creditUsagePercent": used_percent,
+                        "currentPeriod": {
+                            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                            "start": "2026-08-21T02:14:01+00:00",
+                            "end": "2026-08-28T02:14:01+00:00",
+                        },
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _credits_payload(*, used_percent: float = 12.5, wrapped: bool = True) -> dict[str, object]:
+    """构造一份 billing?format=credits 成功响应。"""
+
+    config: dict[str, object] = {
+        "creditUsagePercent": used_percent,
+        "subscriptionTier": "SuperGrok",
+        "currentPeriod": {
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-08-21T02:14:01+00:00",
+            "end": "2026-08-28T02:14:01+00:00",
+        },
+    }
+    if wrapped:
+        return {"subscriptionTier": "SuperGrok", "config": config}
+    return config
 
 
 def _period(state: dict[str, object], key: str) -> dict[str, object]:
