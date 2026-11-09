@@ -140,8 +140,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("[data-account-refresh]", render_accounts)
 
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证额度重置文案")
-    def test_quota_reset_shows_hours_and_minutes(self) -> None:
-        """长额度窗口按「h + m」紧凑展示，不再只堆成几千分钟。"""
+    def test_quota_reset_shows_days_hours_and_minutes(self) -> None:
+        """长额度窗口先拆出天数，再用「h + m」紧凑展示，不再只堆成几千分钟。"""
 
         helper = _DASHBOARD_HTML[
             _DASHBOARD_HTML.index("  const formatReset ="): _DASHBOARD_HTML.index(
@@ -154,7 +154,7 @@ class DashboardTests(unittest.TestCase):
             "Date.now = () => now;\n"
             f"{helper}\n"
             "const at = (minutes) => formatReset(now / 1000 + minutes * 60);\n"
-            "console.log(JSON.stringify([at(6996), at(204), at(61), at(30), at(120), at(-1)]));\n"
+            "console.log(JSON.stringify([at(6996), at(1440), at(1470), at(3000), at(204), at(61), at(30), at(120), at(-1)]));\n"
         )
         result = subprocess.run(
             [shutil.which("node"), "-e", script],
@@ -166,7 +166,10 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             [
-                "T （116h 36m 后）",
+                "T （4 天 20h 36m 后）",
+                "T （1 天后）",
+                "T （1 天 30m 后）",
+                "T （2 天 2h 后）",
                 "T （3h 24m 后）",
                 "T （1h 1m 后）",
                 "T （30 分钟后）",
