@@ -905,9 +905,17 @@ class ClaudeQuotaTest(unittest.TestCase):
 
     def setUp(self) -> None:
         claude_module._clear_quota_cache()
+        claude_module._clear_quota_backoff()
+        # 中文注释：任何遗留测试也不能触发真实 OAuth 续期请求。
+        post_patch = mock.patch.object(
+            claude_module, "_http_post_json", return_value=(0, None)
+        )
+        self.default_post = post_patch.start()
+        self.addCleanup(post_patch.stop)
 
     def tearDown(self) -> None:
         claude_module._clear_quota_cache()
+        claude_module._clear_quota_backoff()
 
     def _home_with_credentials(self, root: Path) -> Path:
         home = root / ".claude"
@@ -934,7 +942,11 @@ class ClaudeQuotaTest(unittest.TestCase):
             home = self._home_with_credentials(Path(temporary_directory))
             calls: list[tuple[str, dict[str, str]]] = []
 
-            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+            def fake_get(
+                url: str,
+                headers: Mapping[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
                 calls.append((url, dict(headers)))
                 return 200, {
                     "five_hour": {
@@ -980,7 +992,11 @@ class ClaudeQuotaTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = self._home_with_credentials(Path(temporary_directory))
 
-            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+            def fake_get(
+                url: str,
+                headers: Mapping[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
                 return 200, {"five_hour": {"utilization": 55.5}}
 
             snapshot = read_claude_quota(home, now=1000.0, http_get_json=fake_get)
@@ -998,7 +1014,11 @@ class ClaudeQuotaTest(unittest.TestCase):
             home.mkdir()
             called = False
 
-            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+            def fake_get(
+                url: str,
+                headers: Mapping[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
                 nonlocal called
                 called = True
                 return 200, {}
@@ -1014,12 +1034,13 @@ class ClaudeQuotaTest(unittest.TestCase):
         self.assertFalse(called)
 
     def test_http_error_returns_none(self) -> None:
-        """429 / 401 等非 200 状态一律按额度暂不可读处理。"""
+        """没有历史成功值时，请求或续期失败返回 None。"""
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             home = self._home_with_credentials(Path(temporary_directory))
             for status in (401, 403, 429, 500):
                 with self.subTest(status=status):
+                    claude_module._clear_quota_backoff()
                     snapshot = read_claude_quota(
                         home,
                         now=1000.0,
@@ -1045,7 +1066,11 @@ class ClaudeQuotaTest(unittest.TestCase):
                     }
                 }
 
-            def fake_get(url: str, headers: Mapping[str, str], timeout: float):
+            def fake_get(
+                url: str,
+                headers: Mapping[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
                 assert headers["Authorization"] == "Bearer keychain-token"
                 return 200, {"five_hour": {"utilization": 10.0}}
 
@@ -1070,21 +1095,28 @@ class ClaudeQuotaTest(unittest.TestCase):
                 [
                     (200, {"five_hour": {"utilization": 30.0}}),
                     (200, {"five_hour": {"utilization": 99.0}}),
-                    (429, {}),
-                    (429, {}),
+                    (500, {}),
+                    (500, {}),
                 ]
             )
             http_calls = 0
 
-            def fake_http(url: str, headers: Mapping[str, str], timeout: float):
+            def fake_http(
+                url: str,
+                headers: Mapping[str, str],
+                timeout: float,
+            ) -> tuple[int, object]:
                 nonlocal http_calls
                 http_calls += 1
                 return next(responses)
 
-            with mock.patch.object(
-                claude_module, "_http_get_json", side_effect=fake_http
-            ), mock.patch.object(
-                claude_module, "_read_macos_keychain", return_value=None
+            with (
+                mock.patch.object(
+                    claude_module, "_http_get_json", side_effect=fake_http
+                ),
+                mock.patch.object(
+                    claude_module, "_read_macos_keychain", return_value=None
+                ),
             ):
                 first = read_claude_quota(home, now=1000.0)
                 second = read_claude_quota(home, now=1000.0 + 299.0)
@@ -1103,11 +1135,542 @@ class ClaudeQuotaTest(unittest.TestCase):
                 self.assertEqual(http_calls, 2)
 
                 failed = read_claude_quota(home, now=1000.0 + 602.0)
-                self.assertIsNone(failed)
+                assert failed is not None
+                self.assertEqual(failed.observed_at, third.observed_at)
+                self.assertEqual(failed.metadata["stale_reason"], "unavailable")
                 self.assertEqual(http_calls, 3)
                 cached_failure = read_claude_quota(home, now=1000.0 + 661.0)
-                self.assertIsNone(cached_failure)
+                self.assertEqual(cached_failure, failed)
                 self.assertEqual(http_calls, 3)
                 retried = read_claude_quota(home, now=1000.0 + 663.0)
-                self.assertIsNone(retried)
+                self.assertEqual(retried, failed)
                 self.assertEqual(http_calls, 4)
+
+    def _set_oauth(self, home: Path, **changes: object) -> dict[str, object]:
+        """修改合成凭据，返回完整 JSON 以验证未知字段保留。"""
+
+        path = home / ".credentials.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["claudeAiOauth"].update(changes)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def test_valid_token_does_not_refresh(self) -> None:
+        """有效 token 或缺失到期时间时，不能发起续期。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            post = mock.Mock()
+            get = mock.Mock(return_value=(200, {"five_hour": {"utilization": 20}}))
+            for expiry in (1_900_000_000_000, None):
+                self._set_oauth(home, expiresAt=expiry)
+                result = read_claude_quota(
+                    home, now=1000, http_get_json=get, http_post_json=post
+                )
+                self.assertIsNotNone(result)
+            post.assert_not_called()
+
+    def test_refresh_preserves_payload_and_uses_new_token(self) -> None:
+        """提前续期，轮换凭据后原子写回，保留所有非凭据字段。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            original = self._set_oauth(
+                home, expiresAt=1_200_000, scopes=["user:profile"]
+            )
+            original["other"] = {"retained": True}
+            path = home / ".credentials.json"
+            path.write_text(json.dumps(original), encoding="utf-8")
+            post = mock.Mock(
+                return_value=(
+                    200,
+                    {
+                        "access_token": "example-new-access",
+                        "refresh_token": "example-new-refresh",
+                        "expires_in": 3600,
+                    },
+                )
+            )
+            get = mock.Mock(return_value=(200, {"five_hour": {"utilization": 20}}))
+            with self.assertLogs(claude_module.__name__, level="INFO") as captured:
+                result = read_claude_quota(
+                    home, now=1000, http_get_json=get, http_post_json=post
+                )
+            self.assertIsNotNone(result)
+            post.assert_called_once_with(
+                claude_module._CLAUDE_TOKEN_URL,
+                {
+                    "grant_type": "refresh_token",
+                    "refresh_token": "test-refresh",
+                    "client_id": claude_module._CLAUDE_CLIENT_ID,
+                },
+                10.0,
+            )
+            self.assertEqual(
+                get.call_args.args[1]["Authorization"], "Bearer example-new-access"
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            expected = json.loads(json.dumps(original))
+            expected["claudeAiOauth"].update(
+                accessToken="example-new-access",
+                refreshToken="example-new-refresh",
+                expiresAt=4_600_000,
+            )
+            self.assertEqual(saved, expected)
+            if os.name == "posix":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(home.glob("*.tmp")), [])
+            self.assertFalse(home.with_name(home.name + ".lock").exists())
+            for token in (
+                "test-token-abc",
+                "test-refresh",
+                "example-new-access",
+                "example-new-refresh",
+            ):
+                self.assertNotIn(token, repr(result))
+                self.assertNotIn(token, "\n".join(captured.output))
+
+    def test_refresh_without_rotated_refresh_token_keeps_previous(self) -> None:
+        """接口省略 refresh_token 时继续保留旧值。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            self._set_oauth(home, expiresAt=1_000_000)
+            result = read_claude_quota(
+                home,
+                now=1000,
+                http_get_json=mock.Mock(
+                    return_value=(200, {"five_hour": {"utilization": 10}})
+                ),
+                http_post_json=mock.Mock(
+                    return_value=(
+                        200,
+                        {
+                            "access_token": "example-new-access",
+                            "expires_in": 3600,
+                        },
+                    )
+                ),
+            )
+            self.assertIsNotNone(result)
+            saved = json.loads((home / ".credentials.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["claudeAiOauth"]["refreshToken"], "test-refresh")
+
+    def test_rechecks_credentials_after_acquiring_lock(self) -> None:
+        """锁等待期间另一进程已刷新时，直接使用磁盘上的新 token。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            self._set_oauth(home, expiresAt=1_000_000)
+            acquire = claude_module._ClaudeRefreshLock.acquire
+
+            def acquire_and_update(lock: claude_module._ClaudeRefreshLock) -> bool:
+                held = acquire(lock)
+                self._set_oauth(
+                    home, accessToken="example-concurrent-access", expiresAt=9_000_000
+                )
+                return held
+
+            post = mock.Mock()
+            get = mock.Mock(return_value=(200, {"five_hour": {"utilization": 10}}))
+            with mock.patch.object(
+                claude_module._ClaudeRefreshLock, "acquire", acquire_and_update
+            ):
+                result = read_claude_quota(
+                    home, now=1000, http_get_json=get, http_post_json=post
+                )
+            self.assertIsNotNone(result)
+            post.assert_not_called()
+            self.assertEqual(
+                get.call_args.args[1]["Authorization"],
+                "Bearer example-concurrent-access",
+            )
+
+    def test_failed_refresh_keeps_file_and_returns_stale_quota(self) -> None:
+        """明确失败和异常响应均不重试、不改文件，返回带凭据原因的旧额度。"""
+
+        responses = [
+            (400, {}),
+            (401, {}),
+            (429, {}),
+            (500, {}),
+            (200, {}),
+            (200, {"access_token": "example-new-access", "expires_in": -1}),
+        ]
+        for response in responses:
+            with (
+                self.subTest(response=response),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                home = self._home_with_credentials(Path(temporary))
+                get = mock.Mock(return_value=(200, {"five_hour": {"utilization": 30}}))
+                good = read_claude_quota(home, now=1000, http_get_json=get)
+                self._set_oauth(home, expiresAt=1_200_000)
+                path = home / ".credentials.json"
+                original = path.read_bytes()
+                post = mock.Mock(return_value=response)
+                stale = read_claude_quota(
+                    home, now=1100, http_get_json=get, http_post_json=post
+                )
+                assert good is not None and stale is not None
+                self.assertEqual(stale.observed_at, good.observed_at)
+                self.assertEqual(
+                    stale.metadata,
+                    {"stale": "1", "stale_reason": "credentials_expired"},
+                )
+                self.assertEqual(good.metadata, {})
+                self.assertEqual(path.read_bytes(), original)
+                post.assert_called_once()
+                self.assertEqual(get.call_count, 1)
+
+    def test_unavailable_lock_does_not_refresh(self) -> None:
+        """别的进程持有新锁时，放弃本轮且不删除别人的锁。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            self._set_oauth(home, expiresAt=1_000_000)
+            lock_dir = home.with_name(home.name + ".lock")
+            lock_dir.mkdir()
+            post, get = mock.Mock(), mock.Mock()
+            result = read_claude_quota(
+                home,
+                now=1000,
+                http_get_json=get,
+                http_post_json=post,
+                sleep=lambda _: None,
+            )
+            self.assertIsNone(result)
+            post.assert_not_called()
+            get.assert_not_called()
+            self.assertTrue(lock_dir.is_dir())
+
+    def test_keychain_and_disabled_refresh_are_read_only(self) -> None:
+        """Keychain 过期凭据以及显式关闭续期均不触发写入或 POST。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            payload = self._set_oauth(home, expiresAt=1_000_000)
+            post = mock.Mock()
+            get = mock.Mock(return_value=(200, {"five_hour": {"utilization": 10}}))
+            result = read_claude_quota(
+                home,
+                now=1000,
+                http_get_json=get,
+                http_post_json=post,
+                allow_refresh=False,
+            )
+            self.assertIsNotNone(result)
+            path = home / ".credentials.json"
+            path.unlink()
+            result = read_claude_quota(
+                home,
+                now=1100,
+                http_get_json=get,
+                http_post_json=post,
+                keychain_reader=lambda: payload,
+            )
+            self.assertIsNotNone(result)
+            self.assertFalse(path.exists())
+            post.assert_not_called()
+
+    def test_401_forces_only_one_refresh_and_retries_usage_once(self) -> None:
+        """未到期 token 被撤销时仅强制续期一次，重发后仍失败则返回旧额度。"""
+
+        for final_status in (200, 401, 403):
+            with (
+                self.subTest(status=final_status),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                home = self._home_with_credentials(Path(temporary))
+                get = mock.Mock(
+                    side_effect=[
+                        (401, {}),
+                        (final_status, {"five_hour": {"utilization": 10}}),
+                    ]
+                )
+                post = mock.Mock(
+                    return_value=(
+                        200,
+                        {
+                            "access_token": "example-new-access",
+                            "expires_in": 3600,
+                        },
+                    )
+                )
+                result = read_claude_quota(
+                    home, now=1000, http_get_json=get, http_post_json=post
+                )
+                self.assertEqual(get.call_count, 2)
+                post.assert_called_once()
+                self.assertEqual(
+                    get.call_args.args[1]["Authorization"], "Bearer example-new-access"
+                )
+                self.assertEqual(result is not None, final_status == 200)
+
+    def test_preemptive_refresh_is_not_repeated_after_401(self) -> None:
+        """主动续期后收到 401 也不能对轮换凭据再续期。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            self._set_oauth(home, expiresAt=1_000_000)
+            post = mock.Mock(
+                return_value=(
+                    200,
+                    {
+                        "access_token": "example-new-access",
+                        "expires_in": 3600,
+                    },
+                )
+            )
+            get = mock.Mock(return_value=(401, {}))
+            self.assertIsNone(
+                read_claude_quota(
+                    home, now=1000, http_get_json=get, http_post_json=post
+                )
+            )
+            get.assert_called_once()
+            post.assert_called_once()
+
+    def test_stale_quota_expires_and_drops_reset_windows(self) -> None:
+        """旧快照保留原时间，逐个丢弃过期窗口，超过 6 小时不再显示。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            get = mock.Mock(
+                return_value=(
+                    200,
+                    {
+                        "five_hour": {"utilization": 30, "resets_at": 1100},
+                        "seven_day": {"utilization": 40, "resets_at": 50_000},
+                    },
+                )
+            )
+            good = read_claude_quota(home, now=1000, http_get_json=get)
+            get.return_value = (500, {})
+            stale = read_claude_quota(home, now=1100, http_get_json=get)
+            assert good is not None and stale is not None
+            self.assertEqual(stale.observed_at, 1000)
+            self.assertEqual([w.name for w in stale.windows], ["Weekly"])
+            self.assertEqual(len(good.windows), 2)
+            self.assertIsNotNone(read_claude_quota(home, now=22_600, http_get_json=get))
+            self.assertIsNone(read_claude_quota(home, now=22_601, http_get_json=get))
+            self.assertIsNone(
+                claude_module._stale_claude_quota(
+                    home.resolve(),
+                    50_000,
+                    claude_module._QuotaFailure.UNAVAILABLE,
+                )
+            )
+
+    def test_stale_with_all_windows_reset_returns_none(self) -> None:
+        """最后一个窗口已重置时，即使快照未满 6 小时也应移除。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            get = mock.Mock(
+                return_value=(
+                    200,
+                    {"five_hour": {"utilization": 30, "resets_at": 1100}},
+                )
+            )
+            self.assertIsNotNone(read_claude_quota(home, now=1000, http_get_json=get))
+            get.return_value = (500, {})
+            self.assertIsNone(read_claude_quota(home, now=1100, http_get_json=get))
+
+    def test_429_backoff_survives_cache_clear_and_is_per_home(self) -> None:
+        """429 按 10、20、30 分钟退避；手动刷新无效，账号间互不影响。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            get = mock.Mock(return_value=(200, {"five_hour": {"utilization": 30}}))
+            good = read_claude_quota(home, now=900, http_get_json=get)
+            get.return_value = (429, {})
+            for failed_at, delay in (
+                (1000, 600),
+                (1600, 1200),
+                (2800, 1800),
+                (4600, 1800),
+            ):
+                stale = read_claude_quota(home, now=failed_at, http_get_json=get)
+                assert stale is not None and good is not None
+                self.assertEqual(stale.observed_at, good.observed_at)
+                self.assertEqual(stale.metadata["stale_reason"], "rate_limited")
+                calls = get.call_count
+                claude_module._clear_quota_cache()
+                during = read_claude_quota(
+                    home, now=failed_at + delay - 1, http_get_json=get
+                )
+                self.assertEqual(during, stale)
+                self.assertEqual(get.call_count, calls)
+            other = Path(temporary) / "other"
+            other.mkdir()
+            other_home = self._home_with_credentials(other)
+            get.return_value = (200, {"five_hour": {"utilization": 40}})
+            self.assertIsNotNone(
+                read_claude_quota(other_home, now=5000, http_get_json=get)
+            )
+            recovered = read_claude_quota(home, now=6400, http_get_json=get)
+            assert recovered is not None
+            self.assertEqual(recovered.metadata, {})
+            self.assertNotIn(home.resolve(), claude_module._backoff_until)
+
+    def test_errors_do_not_leak_tokens_and_log_only_once(self) -> None:
+        """异常正文可含 token，日志只能保留类型且相同失败只记一次。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._home_with_credentials(Path(temporary))
+            self._set_oauth(home, expiresAt=1_000_000)
+            post = mock.Mock(side_effect=OSError("test-token-abc test-refresh"))
+            with self.assertLogs(claude_module.__name__, level="INFO") as captured:
+                for now in (1000, 1100):
+                    self.assertIsNone(
+                        read_claude_quota(
+                            home,
+                            now=now,
+                            http_get_json=mock.Mock(),
+                            http_post_json=post,
+                        )
+                    )
+            logs = "\n".join(captured.output)
+            self.assertEqual(logs.count("refresh_failed"), 1)
+            self.assertEqual(logs.count("credentials_expired"), 1)
+            self.assertNotIn("test-token-abc", logs)
+            self.assertNotIn("test-refresh", logs)
+
+
+class ClaudeRefreshLockTest(unittest.TestCase):
+    """合成目录验证 proper-lockfile 路径、锁保活和丢失后的失败关闭。"""
+
+    def test_stale_lock_is_reclaimed(self) -> None:
+        """陈旧空目录锁可以清理，新锁释放后不应留下目录。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / ".claude"
+            home.mkdir()
+            lock_dir = home.with_name(home.name + ".lock")
+            lock_dir.mkdir()
+            os.utime(lock_dir, (1, 1))
+            lock = claude_module._ClaudeRefreshLock(home, lambda _: None, retries=2)
+            try:
+                self.assertTrue(lock.acquire())
+                self.assertTrue(lock.touch())
+            finally:
+                lock.release()
+            self.assertFalse(lock_dir.exists())
+
+    def test_peer_with_default_heartbeat_is_not_stale(self) -> None:
+        """proper-lockfile 默认 5 秒心跳有轻微延迟时不能按 Kimi 的阈值抢锁。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / ".claude"
+            home.mkdir()
+            lock_dir = home.with_name(home.name + ".lock")
+            lock_dir.mkdir()
+            now = time.time()
+            os.utime(lock_dir, (now - 6, now - 6))
+            lock = claude_module._ClaudeRefreshLock(home, lambda _: None, retries=2)
+            self.assertFalse(lock.acquire())
+            lock.release()
+            self.assertTrue(lock_dir.is_dir())
+
+    def test_lost_lock_does_not_delete_replacement(self) -> None:
+        """锁被替换后原持有者不能续期或删除新持有者的目录。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / ".claude"
+            home.mkdir()
+            lock = claude_module._ClaudeRefreshLock(home, lambda _: None, retries=1)
+            self.assertTrue(lock.acquire())
+            lock_dir = home.with_name(home.name + ".lock")
+            lock_dir.rename(lock_dir.with_name("old.lock"))
+            lock_dir.mkdir()
+            self.assertFalse(lock.touch())
+            lock.release()
+            self.assertTrue(lock_dir.is_dir())
+
+    def test_heartbeat_renews_until_ownership_is_lost(self) -> None:
+        """保活循环更新锁，发现锁丢失就退出。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / ".claude"
+            lock = claude_module._ClaudeRefreshLock(home, lambda _: None)
+            with (
+                mock.patch.object(lock, "touch", side_effect=[True, False]) as touch,
+                mock.patch.object(
+                    lock._stop,
+                    "wait",
+                    return_value=False,
+                ),
+            ):
+                lock._renew()
+            self.assertEqual(touch.call_count, 2)
+
+
+class ClaudeHttpPostTest(unittest.TestCase):
+    """验证 JSON POST、超时和响应大小上限，不访问真实服务。"""
+
+    def test_json_post_and_response_limit(self) -> None:
+        """续期使用 JSON POST，超大响应不交给解析器。"""
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.read.return_value = b'{"expires_in":3600}'
+        with mock.patch.object(
+            claude_module.urllib.request, "urlopen", return_value=response
+        ) as opened:
+            self.assertEqual(
+                claude_module._http_post_json(
+                    "https://example.com/oauth/token",
+                    {"refresh_token": "example-refresh"},
+                    10,
+                ),
+                (200, {"expires_in": 3600}),
+            )
+            request = opened.call_args.args[0]
+            self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(
+                json.loads(request.data), {"refresh_token": "example-refresh"}
+            )
+            self.assertEqual(request.get_header("Content-type"), "application/json")
+            self.assertEqual(opened.call_args.kwargs["timeout"], 10)
+            response.read.return_value = b"x" * (
+                claude_module._CLAUDE_MAX_RESPONSE_BYTES + 1
+            )
+            self.assertEqual(
+                claude_module._http_post_json(
+                    "https://example.com/oauth/token", {}, 10
+                ),
+                (200, None),
+            )
+
+    def test_atomic_replace_failure_keeps_original_and_cleans_tempfile(self) -> None:
+        """替换失败时保留原凭据字节，临时凭据不能遗留在目录中。"""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            path = home / ".credentials.json"
+            original = b'{"claudeAiOauth":{"accessToken":"example-original"}}'
+            path.write_bytes(original)
+            with mock.patch.object(
+                Path, "replace", side_effect=OSError("example-error")
+            ):
+                with self.assertRaises(OSError):
+                    claude_module._write_claude_credentials(home, {"example": "value"})
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(home.iterdir()), [path])
+
+    def test_network_error_is_unavailable(self) -> None:
+        """网络错误收敛为无响应，不向调用者泄漏异常正文。"""
+
+        with mock.patch.object(
+            claude_module.urllib.request,
+            "urlopen",
+            side_effect=OSError("example-refresh"),
+        ):
+            self.assertEqual(
+                claude_module._http_post_json(
+                    "https://example.com/oauth/token", {}, 10
+                ),
+                (0, None),
+            )

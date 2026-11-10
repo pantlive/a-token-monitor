@@ -678,6 +678,10 @@ EN: dict[str, str] = {
     '预计释放': 'Expected to free',
     '额度受限': 'Quota limited',
     '额度窗口': 'Quota windows',
+    # 中文注释：Claude 额度降级时说明旧值原因，英文页面也必须完整翻译。
+    '凭据已过期或续期失败，显示上次成功读取的额度': 'Credentials expired or refresh failed; showing the last successfully read quota',
+    '额度接口限流，退避期间显示上次成功读取的额度': 'Quota API rate limited; showing the last successfully read quota during backoff',
+    '额度接口暂不可用，显示上次成功读取的额度': 'Quota API temporarily unavailable; showing the last successfully read quota',
     # 中文注释：额度窗口的速度预测（5 小时 / 周）。
     '按此速度，能撑到重置': 'At this rate, it lasts until reset',
     '按此速度，预计 ${eta} 用完': 'At this rate, it runs out around ${eta}',

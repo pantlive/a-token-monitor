@@ -2452,6 +2452,20 @@
       archiveNotice(`归档该会话失败：${error.message}`, 'danger');
     }
   };
+  // 中文注释：旧额度保留真实观测时间，用灰色标签解释刷新失败原因。
+  const quotaStaleBadge = (quotas, now = Date.now() / 1000) => {
+    const stale = quotas.filter((quota) => quota.metadata?.stale === '1');
+    if (!stale.length) return '';
+    const reasons = {
+      credentials_expired: '凭据已过期或续期失败，显示上次成功读取的额度',
+      rate_limited: '额度接口限流，退避期间显示上次成功读取的额度',
+      unavailable: '额度接口暂不可用，显示上次成功读取的额度'
+    };
+    const oldest = stale.reduce((a, b) => Number(a.observed_at) <= Number(b.observed_at) ? a : b);
+    const minutes = Math.max(0, Math.floor((now - Number(oldest.observed_at)) / 60));
+    const reason = reasons[oldest.metadata.stale_reason] || reasons.unavailable;
+    return `<span class="quota-badge" title="${escapeHtml(reason)}">${minutes} 分钟前</span>`;
+  };
   // 中文注释：账号卡片上的刷新按钮只放图标，避免把账号名（可能含中文）写进按钮。
   const accountRefreshButton = () => `<button class="account-refresh" type="button" data-account-refresh aria-label="Refresh" title="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.7 4L20 15"/><path d="M20 20v-5h-5"/></svg></button>`;
   const renderAccounts = (state) => {
@@ -2494,7 +2508,7 @@
             <span class="account-activity">${escapeHtml(activeCount)} 个活动</span>
           </div>
         </div>
-        <div class="account-subtitle"><span>额度窗口</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
+        <div class="account-subtitle"><span>额度窗口 ${quotaStaleBadge(accountQuotas)}</span><span class="muted">${accountQuotas.length} 个窗口</span></div>
         <div class="quota-rows-block">${renderQuotaRows(accountQuotas)}</div>
         <div class="account-subtitle"><span>活动会话</span><span class="muted">${activeCount} 个活动</span></div>
         ${renderSessionTable(accountSessions, name)}
