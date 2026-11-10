@@ -24,6 +24,10 @@ from ..providers import (
 )
 from ..redact.control import RedactController
 from ..registry import MultiSessionRegistry
+from ..provider_quota_baseline import (
+    ProviderQuotaBaselineError,
+    ProviderQuotaBaselineStore,
+)
 from ..retention import HistoryDataManager, RetentionController
 from ..scan_dirs import ScanDirsController
 from ..traffic import TrafficMonitor
@@ -143,6 +147,13 @@ class DashboardServer:
         self.state_dir = (
             Path(state_dir).expanduser() if state_dir is not None else None
         )
+        # 中文注释：非 Codex 额度按面板观察建立每日基线；没有状态目录时保持原行为。
+        self.quota_baselines: ProviderQuotaBaselineStore | None = None
+        if self.state_dir is not None:
+            try:
+                self.quota_baselines = ProviderQuotaBaselineStore(self.state_dir)
+            except ProviderQuotaBaselineError:
+                self.logger.warning("provider 今日额度基线库不可用，已降级")
         self.updates = UpdateChecker(
             state_dir=self.state_dir,
             interval=self.config.update_interval,
@@ -201,6 +212,7 @@ class DashboardServer:
             updates=self.updates,
             allow_package_cleanup=self.config.allow_package_cleanup,
             redact=self.redact,
+            quota_baselines=self.quota_baselines,
         )
         server = _DashboardHTTPServer(
             (self.config.host, self.config.port),
