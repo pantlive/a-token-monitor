@@ -61,6 +61,10 @@ from a_token_monitor.multi_models import (
 from a_token_monitor.quota import QuotaDayBaseline, QuotaSnapshot, QuotaWindow
 from a_token_monitor.local_time import local_day_key, local_day_start
 from a_token_monitor.providers import home_keys
+from a_token_monitor.provider_quota_baseline import (
+    ProviderQuotaBaselineError,
+    ProviderQuotaBaselineStore,
+)
 from _provider_patch import patch_provider
 from a_token_monitor.registry import MultiSessionRegistry
 from a_token_monitor.scan_dirs import ScanDirsController
@@ -6049,6 +6053,180 @@ class QuotaTodaySegmentTests(unittest.TestCase):
         window = state["quota"]["windows"][0]
         self.assertEqual(window["day_start_used_percent"], 10.0)
         self.assertEqual(window["today_used_percent"], 12.0)
+
+    def test_provider_growth_exposes_today_segment(self) -> None:
+        """所有有额度的 provider 都接入同一套每日基线。"""
+
+        for provider in ("claude", "commandcode", "grok", "kimi", "dsh"):
+            with (
+                self.subTest(provider=provider),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                home = root / provider
+                home.mkdir()
+                store = ProviderQuotaBaselineStore(root / "state")
+                account = mock.Mock(
+                    account_key=f"{provider}:test-account",
+                    account_id="test-account",
+                    display_name="Example account",
+                    profile_name=provider,
+                )
+                with (
+                    patch_provider(
+                        provider, "read_account", return_value=account
+                    ),
+                    patch_provider(
+                        provider,
+                        "read_quota",
+                        side_effect=(
+                            self.snapshot(self.NOW - 60.0, 10.0),
+                            self.snapshot(self.NOW, 22.0),
+                        ),
+                    ),
+                    patch_provider(
+                        provider, "active_sessions", return_value=()
+                    ),
+                    mock.patch.object(
+                        dashboard_state.time, "time", return_value=self.NOW
+                    ),
+                ):
+                    first = build_multi_dashboard_state(
+                        {}, homes={provider: (home,)}, quota_baselines=store
+                    )
+                    second = build_multi_dashboard_state(
+                        {}, homes={provider: (home,)}, quota_baselines=store
+                    )
+                self.assertEqual(
+                    first["accounts"][0]["quota"]["windows"][0][
+                        "today_used_percent"
+                    ],
+                    0.0,
+                )
+                window = second["accounts"][0]["quota"]["windows"][0]
+                self.assertEqual(window["day_start_used_percent"], 10.0)
+                self.assertEqual(window["today_used_percent"], 12.0)
+
+    def test_provider_without_baselines_or_with_store_failure_keeps_quota(
+        self,
+    ) -> None:
+        """未启用或存储故障时保留账号和当前额度。"""
+
+        for broken in (False, True):
+            with (
+                self.subTest(broken=broken),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                home = Path(tmp)
+                store = (
+                    mock.Mock(spec=ProviderQuotaBaselineStore)
+                    if broken
+                    else None
+                )
+                if store is not None:
+                    store.observe.side_effect = ProviderQuotaBaselineError(
+                        "模拟不可用"
+                    )
+                account = mock.Mock(
+                    account_key="claude:test-account",
+                    account_id="test-account",
+                    display_name="Example account",
+                    profile_name="claude",
+                )
+                with (
+                    patch_provider(
+                        "claude", "read_account", return_value=account
+                    ),
+                    patch_provider(
+                        "claude",
+                        "read_quota",
+                        return_value=self.snapshot(self.NOW),
+                    ),
+                    patch_provider(
+                        "claude", "active_sessions", return_value=()
+                    ),
+                ):
+                    if broken:
+                        with self.assertLogs(
+                            "a_token_monitor.dashboard.state", "WARNING"
+                        ):
+                            state = build_multi_dashboard_state(
+                                {},
+                                homes={"claude": (home,)},
+                                quota_baselines=store,
+                            )
+                    else:
+                        state = build_multi_dashboard_state(
+                            {}, homes={"claude": (home,)}
+                        )
+                window = state["accounts"][0]["quota"]["windows"][0]
+                self.assertEqual(window["used_percent"], 22.0)
+                self.assertIsNone(window["today_used_percent"])
+
+    def test_server_passes_provider_store_to_state_endpoint(self) -> None:
+        """真实 HTTP 请求验证 server、handler 到状态构建的完整接线。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "claude"
+            home.mkdir()
+            homes = {key: () for key in home_keys()}
+            homes["claude"] = (home,)
+            account = mock.Mock(
+                account_key="claude:test-account",
+                account_id="test-account",
+                display_name="Example account",
+                profile_name="claude",
+            )
+            with (
+                patch_provider("claude", "read_account", return_value=account),
+                patch_provider(
+                    "claude",
+                    "read_quota",
+                    side_effect=(
+                        self.snapshot(self.NOW - 60.0, 10.0),
+                        self.snapshot(self.NOW, 22.0),
+                    ),
+                ),
+                patch_provider("claude", "active_sessions", return_value=()),
+                mock.patch.object(
+                    dashboard_state.time, "time", return_value=self.NOW
+                ),
+                DashboardServer(
+                    config=DashboardConfig(port=0, update_check=False),
+                    homes=homes,
+                    state_dir=root / "state",
+                ) as server,
+            ):
+                host, port = server.address
+                url = f"http://{host}:{port}/api/state?refresh=1"
+                with urlopen(url, timeout=5) as response:
+                    json.load(response)
+                with urlopen(url, timeout=5) as response:
+                    state = json.load(response)
+            window = state["accounts"][0]["quota"]["windows"][0]
+            self.assertEqual(window["today_used_percent"], 12.0)
+
+    def test_server_baseline_initialization_failure_is_nonfatal(self) -> None:
+        """初始化失败时服务可继续使用，且不启用今日段存储。"""
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch(
+                "a_token_monitor.dashboard.server.ProviderQuotaBaselineStore",
+                side_effect=ProviderQuotaBaselineError("模拟不可用"),
+            ),
+            self.assertLogs("a_token_monitor.dashboard.server", "WARNING"),
+        ):
+            server = DashboardServer(
+                config=DashboardConfig(update_check=False),
+                homes={key: () for key in home_keys()},
+                state_dir=Path(tmp),
+            )
+            try:
+                self.assertIsNone(server.quota_baselines)
+            finally:
+                server.close()
 
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证今日额度段")
     def test_quota_today_segment_js_clips_invalid_ranges(self) -> None:

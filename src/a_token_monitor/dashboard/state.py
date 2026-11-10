@@ -27,6 +27,10 @@ from ..quota import (
     quota_window_duration,
 )
 from ..providers import PROVIDER_SPECS, ProviderSpec, home_providers
+from ..provider_quota_baseline import (
+    ProviderQuotaBaselineError,
+    ProviderQuotaBaselineStore,
+)
 from ..registry import MultiSessionRegistry
 from ..traffic import TrafficSnapshot, empty_traffic_snapshot
 from ..usage import (
@@ -365,6 +369,8 @@ def build_multi_dashboard_state(
     health: HealthTracker | None = None,
     speed: SpeedTracker | None = None,
     recent_files: _RecentFileCache | None = None,
+    *,
+    quota_baselines: ProviderQuotaBaselineStore | None = None,
 ) -> dict[str, Any]:
     """合并多个账号状态，同时保留每个账号独立的额度快照。"""
 
@@ -474,7 +480,8 @@ def build_multi_dashboard_state(
                 continue
             try:
                 identity = _merge_provider_home(
-                    spec, home, accounts_by_key, quota_by_key, sessions
+                    spec, home, accounts_by_key, quota_by_key, sessions,
+                    quota_baselines=quota_baselines,
                 )
                 if identity:
                     account_keys_by_home[str(home)] = identity
@@ -600,6 +607,8 @@ def _merge_provider_home(
     accounts_by_key: dict[str, dict[str, Any]],
     quota_by_key: dict[tuple[str, str, str], dict[str, Any]],
     sessions: list[dict[str, Any]],
+    *,
+    quota_baselines: ProviderQuotaBaselineStore | None = None,
 ) -> dict[str, str]:
     """把一个 provider 数据目录的账号、额度和活动会话并入 Dashboard 状态。
 
@@ -631,7 +640,18 @@ def _merge_provider_home(
     if profile not in account["profiles"]:
         account["profiles"].append(profile)
     if provider_quota is not None:
-        quota_with_account = _quota_summary(provider_quota)
+        baselines = None
+        if quota_baselines is not None:
+            try:
+                baselines = quota_baselines.observe(
+                    product, account_key, provider_quota
+                )
+            except ProviderQuotaBaselineError:
+                # 中文注释：基线存储失败只隐藏今日段，账号与当前额度仍正常展示。
+                logging.getLogger(__name__).warning(
+                    "%s 今日额度基线不可用，已降级", spec.display_name
+                )
+        quota_with_account = _quota_summary(provider_quota, baselines, time.time())
         if quota_with_account is not None:
             quota_with_account["account"] = provider_account.display_name
             quota_with_account["account_id"] = provider_account.account_id
@@ -721,7 +741,7 @@ def _quota_summary(
 
     ``day_baselines`` 与 ``now`` 由 Dashboard 状态构建传入；只有快照属于 ``now``
     所在的本地自然日、重置周期与基线一致时，才输出今日段。其他调用方（例如
-    provider 额度）不传这两个参数，字段保持 ``None``，前端继续画单色进度条。
+    未配置基线存储的 provider）不传基线，字段保持 ``None``，前端继续画单色进度条。
     """
 
     if snapshot is None:

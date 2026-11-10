@@ -30,6 +30,7 @@ from ..packages import clean_release_entries, scan_release_leftovers
 from ..providers import ProviderHomes, clear_quota_caches, home_keys
 from ..redact.control import RedactControlError, RedactController
 from ..registry import RegistryError
+from ..provider_quota_baseline import ProviderQuotaBaselineStore
 from ..retention import HistoryDataManager, RetentionController, RetentionError
 from ..scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
 from ..speed import SpeedTracker
@@ -130,6 +131,7 @@ class _DashboardContext:
     history: HistoryDataManager | None = None
     retention: RetentionController | None = None
     redact: RedactController | None = None
+    quota_baselines: ProviderQuotaBaselineStore | None = None
     state_cache_lock: Lock = field(default_factory=Lock, repr=False)
     state_cache: dict[str, Any] = field(default_factory=dict, repr=False)
     packages_lock: Lock = field(default_factory=Lock, repr=False)
@@ -215,6 +217,7 @@ class _DashboardContext:
                 health=self.health,
                 speed=self.speed,
                 recent_files=self.recent_files,
+                quota_baselines=self.quota_baselines,
             )
             state["alert_history"] = self.alert_stats()
             _attach_session_advice(state, self.usage_aggregator, self.thresholds_in_use)
@@ -1626,6 +1629,7 @@ def _make_handler(
     updates: UpdateChecker | None = None,
     allow_package_cleanup: bool = False,
     redact: RedactController | None = None,
+    quota_baselines: ProviderQuotaBaselineStore | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """为一个 Dashboard 服务创建绑定了依赖的请求处理器类型。"""
 
@@ -1649,6 +1653,7 @@ def _make_handler(
         history=history,
         retention=retention,
         redact=redact,
+        quota_baselines=quota_baselines,
     )
     return type(
         "DashboardRequestHandler",
