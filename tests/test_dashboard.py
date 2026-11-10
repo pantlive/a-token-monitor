@@ -140,6 +140,67 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(render_accounts.count("${accountRefreshButton()}"), 1)
         self.assertIn("[data-account-refresh]", render_accounts)
 
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证旧额度提示")
+    def test_account_cards_explain_stale_quota(self) -> None:
+        """执行真实账号渲染，旧值带时间及固定原因，恢复后去掉标签。"""
+
+        helpers = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const escapeHtml =") : _DASHBOARD_HTML.index(
+                "  const formatRelativeTime ="
+            )
+        ]
+        renderer = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const quotaStaleBadge =") : _DASHBOARD_HTML.index(
+                "  // 运行健康徽标"
+            )
+        ]
+        script = (
+            helpers
+            + renderer
+            + """
+const assert = require('node:assert/strict');
+const card = {innerHTML: '', querySelectorAll: () => []};
+const document = {getElementById: (id) => id === 'account-list' ? card : {}};
+const accountProfileLabel = (value) => value;
+const accountProductLabel = () => 'Claude Code';
+const planLabel = (value) => value || '';
+const distinctSorted = (values) => [...new Set(values.filter(Boolean))].sort();
+const subscriptionInitials = () => 'CC';
+const speedBadge = () => '';
+const renderQuotaRows = () => '额度行';
+const renderSessionTable = () => '';
+Date.now = () => 1600 * 1000;
+for (const [reason, expected] of Object.entries({
+  credentials_expired: '凭据已过期或续期失败，显示上次成功读取的额度',
+  rate_limited: '额度接口限流，退避期间显示上次成功读取的额度',
+  unavailable: '额度接口暂不可用，显示上次成功读取的额度',
+  '<img src=x onerror=alert(1)>': '额度接口暂不可用，显示上次成功读取的额度'
+})) {
+  renderAccounts({accounts: [{name: 'example'}], quotas: [{
+    account: 'example', observed_at: 1000,
+    metadata: {stale: '1', stale_reason: reason}
+  }]});
+  assert.ok(card.innerHTML.includes('10 分钟前'));
+  assert.ok(card.innerHTML.includes(expected));
+  assert.ok(card.innerHTML.includes('class="quota-badge"'));
+  assert.ok(!card.innerHTML.includes('<img'));
+}
+assert.equal(quotaStaleBadge([{observed_at: 1700, metadata: {stale: '1'}}], 1600)
+  .includes('0 分钟前'), true);
+renderAccounts({accounts: [{name: 'example'}], quotas: [{account: 'example', metadata: {}}]});
+assert.ok(!card.innerHTML.includes('分钟前'));
+"""
+        )
+        for language in ("zh", "en"):
+            with self.subTest(language=language):
+                result = subprocess.run(
+                    [shutil.which("node"), "-e", substitute(script, language)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证额度重置文案")
     def test_quota_reset_shows_days_hours_and_minutes(self) -> None:
         """长额度窗口先拆出天数，再用「h + m」紧凑展示，不再只堆成几千分钟。"""

@@ -14,18 +14,22 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -665,11 +669,11 @@ _POLICY_CACHE: dict[Path, tuple[float, bool]] = {}
 # https://api.anthropic.com/api/oauth/usage（社区抓包发现，上游可能变动）。
 # 请求用本地 OAuth access token 做 Bearer 鉴权：Linux / Windows 读
 # ``~/.claude/.credentials.json``，macOS 读 Keychain 的
-# 「Claude Code-credentials」条目。token 只放进请求头，绝不写入返回值、
-# 日志或异常消息。该接口的 429 限速很激进（被限后可能半小时不恢复），
-# 所以成功结果缓存 5 分钟、失败结果缓存 1 分钟，宁可展示稍旧的数据也不
-# 频繁请求。access token 过期时不主动刷新（交给 Claude Code 自己刷新），
-# 接口返回 401/403 就按额度暂不可读处理。
+# 「Claude Code-credentials」条目。access token 只用于鉴权，refresh token
+# 只用于续期和本机凭据写回；额度返回值及日志不含 token。该接口限流很激进，
+# 所以成功结果缓存 5 分钟、失败结果缓存 1 分钟，429 另退避 10–30 分钟。
+# 文件凭据在到期前 5 分钟持 Claude Code 同款目录锁主动续期、原子写回；
+# Keychain 只读。失败时最多保留 6 小时的旧快照，并保留真实观测时间。
 
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
@@ -678,13 +682,41 @@ _CLAUDE_CREDENTIALS_NAME = ".credentials.json"
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _CLAUDE_KEYCHAIN_TIMEOUT_SECONDS = 5.0
 _CLAUDE_MAX_RESPONSE_BYTES = 256 * 1024
+# 中文注释：OAuth 地址和公开客户端 ID 来自社区抓包，上游可能变动；并非密钥。
+_CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+_CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_CLAUDE_REFRESH_THRESHOLD_SECONDS = 300.0
+_CLAUDE_REFRESH_TIMEOUT_SECONDS = 10.0
+_CLAUDE_LOCK_RETRIES = 120
+# 中文注释：采用 proper-lockfile 默认 10 秒，而非 Kimi 定制的 5 秒，
+# 避免误删 Claude Code 每 5 秒才保活一次的有效锁。
+_CLAUDE_LOCK_STALE_SECONDS = 10.0
+_CLAUDE_LOCK_MIN_DELAY_SECONDS = 0.5
+_CLAUDE_LOCK_MAX_DELAY_SECONDS = 1.0
+_CLAUDE_LAST_GOOD_TTL_SECONDS = 6 * 3600.0
+_CLAUDE_BACKOFF_INITIAL_SECONDS = 600.0
+_CLAUDE_BACKOFF_MAX_SECONDS = 1800.0
 _QUOTA_CACHE_SUCCESS_TTL_SECONDS = 300.0
 _QUOTA_CACHE_FAILURE_TTL_SECONDS = 60.0
 
 _HttpJsonCaller = Callable[[str, Mapping[str, str], float], tuple[int, Any]]
+_HttpPostJsonCaller = Callable[[str, Mapping[str, Any], float], tuple[int, Any]]
+
+
+class _QuotaFailure(Enum):
+    """安全的固定失败原因，可直接用于日志和页面提示。"""
+
+    CREDENTIALS_EXPIRED = "credentials_expired"
+    RATE_LIMITED = "rate_limited"
+    UNAVAILABLE = "unavailable"
+
 
 _quota_cache: dict[Path, tuple[float, QuotaSnapshot | None]] = {}
 _quota_cache_lock = threading.Lock()
+_quota_request_locks: dict[Path, Any] = {}
+_last_good: dict[Path, QuotaSnapshot] = {}
+_backoff_until: dict[Path, tuple[float, float]] = {}
+_quota_logged: set[tuple[Path, str]] = set()
 
 
 def read_claude_quota(
@@ -693,17 +725,48 @@ def read_claude_quota(
     *,
     http_get_json: _HttpJsonCaller | None = None,
     keychain_reader: Callable[[], Mapping[str, Any] | None] | None = None,
+    http_post_json: _HttpPostJsonCaller | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    allow_refresh: bool = True,
 ) -> QuotaSnapshot | None:
-    """通过 Claude Code 的 OAuth usage 接口读取订阅额度（5 小时 / 周窗口）。
-
-    任何网络、凭据或解析问题都返回 ``None``，绝不抛出。使用真实 HTTP 时
-    结果带缓存（成功 5 分钟、失败 1 分钟），避免 Dashboard 轮询反复请求
-    触发接口的激进限速。
-    """
+    """读取额度并主动续期文件凭据；失败时返回带标记的最后成功值。"""
 
     root = _normalize_path(home)
     moment = time.time() if now is None else now
-    use_cache = http_get_json is None and keychain_reader is None
+    # 中文注释：同一 home 串行请求，避免并发轮询穿透 429 退避；不同 home 互不阻塞。
+    with _quota_cache_lock:
+        request_lock = _quota_request_locks.setdefault(root, threading.Lock())
+    with request_lock:
+        return _read_claude_quota_locked(
+            root,
+            moment,
+            http_get_json=http_get_json,
+            keychain_reader=keychain_reader,
+            http_post_json=http_post_json,
+            sleep=sleep,
+            allow_refresh=allow_refresh,
+        )
+
+
+def _read_claude_quota_locked(
+    root: Path,
+    moment: float,
+    *,
+    http_get_json: _HttpJsonCaller | None,
+    keychain_reader: Callable[[], Mapping[str, Any] | None] | None,
+    http_post_json: _HttpPostJsonCaller | None,
+    sleep: Callable[[float], None],
+    allow_refresh: bool,
+) -> QuotaSnapshot | None:
+    """持单账号请求锁执行缓存、续期、退避及降级。"""
+
+    use_cache = (
+        http_get_json is None and keychain_reader is None and http_post_json is None
+    )
+    with _quota_cache_lock:
+        backoff = _backoff_until.get(root)
+    if backoff is not None and moment < backoff[0]:
+        return _stale_claude_quota(root, moment, _QuotaFailure.RATE_LIMITED)
     if use_cache:
         with _quota_cache_lock:
             cached = _quota_cache.get(root)
@@ -711,40 +774,116 @@ def read_claude_quota(
             cached_at, cached_value = cached
             ttl = (
                 _QUOTA_CACHE_SUCCESS_TTL_SECONDS
-                if cached_value is not None
+                if cached_value is not None and not cached_value.metadata.get("stale")
                 else _QUOTA_CACHE_FAILURE_TTL_SECONDS
             )
             if moment - cached_at < ttl:
+                if cached_value is not None and cached_value.metadata.get("stale"):
+                    return _stale_claude_quota(
+                        root,
+                        moment,
+                        _QuotaFailure(cached_value.metadata["stale_reason"]),
+                    )
                 return cached_value
     try:
-        snapshot = _fetch_claude_quota(
+        snapshot, reason = _fetch_claude_quota(
             root,
             moment,
             http_get_json=http_get_json or _http_get_json,
             keychain_reader=keychain_reader or _read_macos_keychain,
+            http_post_json=http_post_json or _http_post_json,
+            sleep=sleep,
+            allow_refresh=allow_refresh,
         )
     except Exception as error:  # noqa: BLE001 - 额度是可选增强，任何意外都不能让监控崩溃
-        # 中文注释：预期内的网络、锁、凭据问题在 _fetch 内部已返回 None；走到这里
-        # 说明是解析或代码缺陷，必须留痕，否则额度会无声消失。正文只记异常类型和
-        # 脱敏后的信息，完整堆栈放在 debug 级别，避免把凭据相关内容写进常规日志。
-        _LOGGER.warning(
-            "Claude Code 额度读取出现意外错误，本轮按无额度处理: %s: %s",
-            type(error).__name__,
-            sanitize_error(error),
+        # 中文注释：sanitize_error 不会过滤任意 token，故只记录脱敏后的异常类型。
+        _log_quota_once(
+            root,
+            "unexpected",
+            sanitize_error(type(error).__name__),
+            level=logging.WARNING,
         )
-        _LOGGER.debug("Claude Code 额度读取异常堆栈", exc_info=True)
         snapshot = None
+        reason = _QuotaFailure.UNAVAILABLE
+    if snapshot is not None:
+        with _quota_cache_lock:
+            _last_good[root] = snapshot
+            _backoff_until.pop(root, None)
+    else:
+        reason = reason or _QuotaFailure.UNAVAILABLE
+        _log_quota_once(root, reason.value, reason.value)
+        if reason is _QuotaFailure.RATE_LIMITED:
+            with _quota_cache_lock:
+                previous = _backoff_until.get(root)
+                delay = min(
+                    previous[1] * 2 if previous else _CLAUDE_BACKOFF_INITIAL_SECONDS,
+                    _CLAUDE_BACKOFF_MAX_SECONDS,
+                )
+                _backoff_until[root] = (moment + delay, delay)
+        snapshot = _stale_claude_quota(root, moment, reason)
     if use_cache:
         with _quota_cache_lock:
             _quota_cache[root] = (moment, snapshot)
     return snapshot
 
 
+def _log_quota_once(
+    home: Path,
+    event: str,
+    message: str,
+    *,
+    level: int = logging.INFO,
+) -> None:
+    """每个账号每类事件只记一次，不记录账号路径、凭据或响应正文。"""
+
+    with _quota_cache_lock:
+        key = (home, event)
+        if key in _quota_logged:
+            return
+        _quota_logged.add(key)
+    _LOGGER.log(level, "Claude Code 额度: %s", message)
+
+
+def _stale_claude_quota(
+    home: Path,
+    now: float,
+    reason: _QuotaFailure,
+) -> QuotaSnapshot | None:
+    """过滤失效窗口并复制旧快照，不把旧值伪装成本轮观测值。"""
+
+    with _quota_cache_lock:
+        snapshot = _last_good.get(home)
+    if snapshot is None or now - snapshot.observed_at > _CLAUDE_LAST_GOOD_TTL_SECONDS:
+        return None
+    windows = tuple(
+        window
+        for window in snapshot.windows
+        if window.resets_at is None or window.resets_at > now
+    )
+    if not windows:
+        return None
+    return replace(
+        snapshot,
+        windows=windows,
+        raw_limit_ids=tuple(window.limit_id for window in windows),
+        metadata={**snapshot.metadata, "stale": "1", "stale_reason": reason.value},
+    )
+
+
 def _clear_quota_cache() -> None:
-    """清空配额缓存（测试用）。"""
+    """清空短期请求缓存，保留退避记录和最后一次成功值。"""
 
     with _quota_cache_lock:
         _quota_cache.clear()
+
+
+def _clear_quota_backoff() -> None:
+    """重置跨请求状态，仅供测试；手动刷新不能绕过退避。"""
+
+    with _quota_cache_lock:
+        _backoff_until.clear()
+        _last_good.clear()
+        _quota_logged.clear()
 
 
 def _fetch_claude_quota(
@@ -753,44 +892,312 @@ def _fetch_claude_quota(
     *,
     http_get_json: _HttpJsonCaller,
     keychain_reader: Callable[[], Mapping[str, Any] | None],
-) -> QuotaSnapshot | None:
-    oauth = _read_claude_oauth(home, keychain_reader)
+    http_post_json: _HttpPostJsonCaller,
+    sleep: Callable[[float], None],
+    allow_refresh: bool,
+) -> tuple[QuotaSnapshot | None, _QuotaFailure | None]:
+    """续期并请求额度，最多续期一次、最多重发一次用量请求。"""
+
+    oauth, source = _read_claude_oauth(home, keychain_reader)
     if oauth is None:
-        return None
-    access_token = oauth.get("accessToken")
-    if not isinstance(access_token, str) or not access_token:
-        return None
-    status, payload = http_get_json(
-        _CLAUDE_USAGE_URL,
-        {
-            "Authorization": f"Bearer {access_token}",
-            "anthropic-beta": _CLAUDE_USAGE_BETA,
-            "Accept": "application/json",
-        },
-        _CLAUDE_USAGE_TIMEOUT_SECONDS,
-    )
+        return None, _QuotaFailure.CREDENTIALS_EXPIRED
+    can_refresh = allow_refresh and source == "file"
+    refreshed = False
+    if can_refresh and not _claude_token_fresh(oauth, now):
+        updated = _refresh_claude_credentials(
+            home,
+            oauth,
+            now,
+            http_post_json=http_post_json,
+            sleep=sleep,
+        )
+        if updated is None:
+            return None, _QuotaFailure.CREDENTIALS_EXPIRED
+        oauth = updated
+        refreshed = True
+    for attempt in range(2):
+        access_token = oauth.get("accessToken")
+        if not isinstance(access_token, str) or not access_token:
+            return None, _QuotaFailure.CREDENTIALS_EXPIRED
+        status, payload = http_get_json(
+            _CLAUDE_USAGE_URL,
+            {
+                "Authorization": f"Bearer {access_token}",
+                "anthropic-beta": _CLAUDE_USAGE_BETA,
+                "Accept": "application/json",
+            },
+            _CLAUDE_USAGE_TIMEOUT_SECONDS,
+        )
+        if status not in (401, 403):
+            break
+        if status != 401 or not can_refresh or refreshed or attempt:
+            return None, _QuotaFailure.CREDENTIALS_EXPIRED
+        updated = _refresh_claude_credentials(
+            home,
+            oauth,
+            now,
+            http_post_json=http_post_json,
+            sleep=sleep,
+            force=True,
+        )
+        if updated is None:
+            return None, _QuotaFailure.CREDENTIALS_EXPIRED
+        oauth = updated
+        refreshed = True
+    if status == 429:
+        return None, _QuotaFailure.RATE_LIMITED
     if status != 200:
-        return None
-    return _parse_claude_usage(
+        return None, _QuotaFailure.UNAVAILABLE
+    snapshot = _parse_claude_usage(
         payload,
         observed_at=now,
         plan_type=_text(oauth.get("subscriptionType")),
     )
+    return snapshot, None if snapshot is not None else _QuotaFailure.UNAVAILABLE
 
 
 def _read_claude_oauth(
     home: Path,
     keychain_reader: Callable[[], Mapping[str, Any] | None],
-) -> Mapping[str, Any] | None:
-    """读取 ``claudeAiOauth`` 凭据段；文件缺失时退回 macOS Keychain。"""
+) -> tuple[Mapping[str, Any] | None, str]:
+    """返回 OAuth 段及来源；文件缺失时退回只读的 macOS Keychain。"""
 
     payload = _read_json_object(home / _CLAUDE_CREDENTIALS_NAME)
+    source = "file"
     if payload is None:
         payload = keychain_reader()
+        source = "keychain"
     if payload is None:
-        return None
+        return None, source
     oauth = payload.get("claudeAiOauth")
-    return oauth if isinstance(oauth, Mapping) else None
+    return (oauth if isinstance(oauth, Mapping) else None), source
+
+
+def _finite_number(value: Any) -> float | None:
+    """只接受有限数字，避免异常过期时间触发错误写回。"""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _claude_token_fresh(oauth: Mapping[str, Any], now: float) -> bool:
+    """expiresAt 为毫秒；没有到期字段时继续使用已有 access token。"""
+
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not token:
+        return False
+    expires_at = _finite_number(oauth.get("expiresAt"))
+    return (
+        expires_at is None
+        or expires_at / 1000 > now + _CLAUDE_REFRESH_THRESHOLD_SECONDS
+    )
+
+
+def _write_claude_credentials(home: Path, payload: Mapping[str, Any]) -> None:
+    """在原目录中以 0600 权限原子替换完整凭据，异常时清理临时文件。"""
+
+    descriptor, temporary = tempfile.mkstemp(
+        dir=home, prefix=".claude-oauth-", suffix=".tmp"
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(dict(payload), handle, ensure_ascii=False)
+            handle.write("\n")
+        temporary_path.chmod(0o600)
+        temporary_path.replace(home / _CLAUDE_CREDENTIALS_NAME)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _refresh_claude_credentials(
+    home: Path,
+    oauth: Mapping[str, Any],
+    now: float,
+    *,
+    http_post_json: _HttpPostJsonCaller,
+    sleep: Callable[[float], None],
+    force: bool = False,
+) -> Mapping[str, Any] | None:
+    """持兼容目录锁续期并保存轮换凭据；任何失败均不重试。"""
+
+    lock = _ClaudeRefreshLock(home, sleep)
+    succeeded = False
+    try:
+        if not lock.acquire():
+            return None
+        # 中文注释：绝不回退到锁前凭据，避免使用已经被其它进程轮换的 refresh token。
+        original = _read_json_object(home / _CLAUDE_CREDENTIALS_NAME)
+        latest = original.get("claudeAiOauth") if original else None
+        if not isinstance(latest, Mapping):
+            return None
+        if _claude_token_fresh(latest, now) and (
+            not force or latest.get("accessToken") != oauth.get("accessToken")
+        ):
+            succeeded = True
+            return latest
+        refresh_token = latest.get("refreshToken")
+        if not isinstance(refresh_token, str) or not refresh_token or not lock.touch():
+            return None
+        status, data = http_post_json(
+            _CLAUDE_TOKEN_URL,
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _CLAUDE_CLIENT_ID,
+            },
+            _CLAUDE_REFRESH_TIMEOUT_SECONDS,
+        )
+        if status != 200 or not isinstance(data, Mapping):
+            return None
+        access_token = data.get("access_token")
+        new_refresh = data.get("refresh_token", refresh_token)
+        expires_in = _finite_number(data.get("expires_in"))
+        if (
+            not isinstance(access_token, str)
+            or not access_token
+            or not isinstance(new_refresh, str)
+            or not new_refresh
+            or expires_in is None
+            or expires_in <= 0
+        ):
+            return None
+        # 中文注释：只替换三项凭据字段，保留 scopes、套餐及所有未知字段。
+        updated = dict(latest)
+        updated.update(
+            accessToken=access_token,
+            refreshToken=new_refresh,
+            expiresAt=int((now + expires_in) * 1000),
+        )
+        # 中文注释：锁丢失或有不遵守锁的写入者时不覆盖文件，也不重发续期请求。
+        if (
+            not lock.touch()
+            or _read_json_object(home / _CLAUDE_CREDENTIALS_NAME) != original
+        ):
+            return None
+        _write_claude_credentials(home, {**original, "claudeAiOauth": updated})
+        succeeded = True
+        return updated
+    except Exception as error:  # noqa: BLE001 - 凭据操作必须失败关闭
+        _log_quota_once(home, "refresh_exception", sanitize_error(type(error).__name__))
+        return None
+    finally:
+        lock.release()
+        event = "refresh_success" if succeeded else "refresh_failed"
+        _log_quota_once(home, event, event)
+
+
+class _ClaudeRefreshLock:
+    """与 proper-lockfile 的 lock(configDir) 默认路径兼容的目录锁。
+
+    mkdir 原子取锁，10 秒陈旧判定；心跳贯穿 HTTP 请求，避免 10 秒请求期间
+    被误抢占。持有目录的身份或 mtime 改变时停止写回，也不删除新持有者的锁。
+    """
+
+    def __init__(
+        self,
+        home: Path,
+        sleep: Callable[[float], None],
+        stale_seconds: float = _CLAUDE_LOCK_STALE_SECONDS,
+        retries: int = _CLAUDE_LOCK_RETRIES,
+    ) -> None:
+        self._lock_dir = home.with_name(home.name + ".lock")
+        self._sleep = sleep
+        self._stale_seconds = stale_seconds
+        self._retries = retries
+        self._identity: tuple[int, int, int] | None = None
+        self._guard = threading.Lock()
+        self._stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+
+    def _stat_identity(self) -> tuple[int, int, int]:
+        """同时检查目录 inode 和 mtime，识别锁已被其它持有者替换。"""
+
+        stat = self._lock_dir.stat()
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns
+
+    def acquire(self) -> bool:
+        """有限次等待目录锁；拿不到锁时绝不发起续期。"""
+
+        for _ in range(self._retries):
+            try:
+                self._lock_dir.mkdir()
+            except FileExistsError:
+                self._break_if_stale()
+            except OSError:
+                return False
+            else:
+                try:
+                    self._identity = self._stat_identity()
+                except OSError:
+                    return False
+                self._heartbeat = threading.Thread(target=self._renew, daemon=True)
+                self._heartbeat.start()
+                return True
+            self._sleep(
+                random.uniform(
+                    _CLAUDE_LOCK_MIN_DELAY_SECONDS,
+                    _CLAUDE_LOCK_MAX_DELAY_SECONDS,
+                )
+            )
+        return False
+
+    def _break_if_stale(self) -> None:
+        """仅清理确认陈旧且未被续期的空锁目录。"""
+
+        try:
+            identity = self._stat_identity()
+            if identity[2] / 1e9 >= time.time() - self._stale_seconds:
+                return
+            if self._stat_identity() == identity:
+                self._lock_dir.rmdir()
+        except OSError:
+            pass
+
+    def _renew(self) -> None:
+        """请求阻塞时仍持续更新 mtime，退出时及时停止。"""
+
+        interval = self._stale_seconds / 2
+        while not self._stop.wait(interval):
+            if not self.touch():
+                return
+
+    def touch(self) -> bool:
+        """确认仍持有原锁后更新时间；失败后禁止继续使用此锁。"""
+
+        with self._guard:
+            if self._identity is None:
+                return False
+            try:
+                if self._stat_identity() != self._identity:
+                    self._identity = None
+                    return False
+                # 中文注释：pathlib 尚无 utime；仅此处用 os 更新目录 mtime。
+                os.utime(self._lock_dir, None)
+                self._identity = self._stat_identity()
+                return True
+            except OSError:
+                self._identity = None
+                return False
+
+    def release(self) -> None:
+        """停止心跳，仅删除自己仍持有的锁目录。"""
+
+        self._stop.set()
+        if self._heartbeat is not None:
+            self._heartbeat.join()
+        with self._guard:
+            try:
+                if (
+                    self._identity is not None
+                    and self._stat_identity() == self._identity
+                ):
+                    self._lock_dir.rmdir()
+            except OSError:
+                pass
+            self._identity = None
 
 
 def _read_macos_keychain() -> Mapping[str, Any] | None:
@@ -892,6 +1299,28 @@ def _http_get_json(
     """GET 一个 JSON 接口；所有网络错误都收敛为 ``(0, None)``。"""
 
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, _read_json_body(response)
+    except urllib.error.HTTPError as error:
+        return error.code, _read_json_body(error)
+    except OSError:
+        return 0, None
+
+
+def _http_post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    timeout: float,
+) -> tuple[int, Any]:
+    """POST JSON；限制响应大小且不记录请求、响应或网络异常正文。"""
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(dict(payload)).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, _read_json_body(response)
