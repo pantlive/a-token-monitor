@@ -77,17 +77,25 @@
     }).join('');
     return `<span class="speed-spark${stale ? ' is-stale' : ''}" aria-hidden="true">${bars}</span>`;
   };
-  const speedBadge = (speed) => {
-    if (!speed || !speed.tps) return '';
+  const speedBadgeVisible = (speed) => {
+    if (!speed || !speed.tps) return false;
     const stale = !speed.live;
-    if (stale && Number(speed.age_seconds || 0) > 3600) return '';
+    return !(stale && Number(speed.age_seconds || 0) > 3600);
+  };
+  // 中文注释：主行只放折线 + tps，TTFT / 多久以前放到附注行，侧栏才能固定三行对齐。
+  const speedBadge = (speed) => {
+    if (!speedBadgeVisible(speed)) return '';
+    const stale = !speed.live;
     const tps = `<span class="speed-tps">${speed.approx ? '≈' : ''}${Math.round(Number(speed.tps))}<small>tps</small></span>`;
-    const ttft = speed.ttft_ms
-      ? `<span class="speed-note">TTFT ${formatTtft(speed.ttft_ms)}</span>`
-      : '';
-    const age = stale ? `<span class="speed-note">${formatSpeedAge(speed.age_seconds)}</span>` : '';
     const title = `最近一次请求：输出 ${Math.round(Number(speed.tps))} tps${speed.ttft_ms ? ` · TTFT ${formatTtft(speed.ttft_ms)}` : ''}`;
-    return `<span class="account-speed${stale ? ' is-stale' : ''}" title="${escapeHtml(title)}">${speedSpark(speed.history, stale)}${tps}${ttft}${age}</span>`;
+    return `<span class="account-speed${stale ? ' is-stale' : ''}" title="${escapeHtml(title)}">${speedSpark(speed.history, stale)}${tps}</span>`;
+  };
+  const speedNote = (speed) => {
+    if (!speedBadgeVisible(speed)) return '';
+    const parts = [];
+    if (speed.ttft_ms) parts.push(`TTFT ${formatTtft(speed.ttft_ms)}`);
+    if (!speed.live) parts.push(formatSpeedAge(speed.age_seconds));
+    return parts.join(' · ');
   };
   // 中文注释：token 单元格显示 K/M/B，悬浮给出精确值（要精确值时不用去数位数）。
   const tokenCell = (value) => `<td class="usage-number" title="${escapeHtml(formatNumber(value))}">${formatTokens(value)}</td>`;
@@ -199,11 +207,13 @@
   };
   const renderQuotaRow = (period, label, windows) => {
     if (!windows.length) {
+      const absentMeta = `该订阅没有${escapeHtml(label)}额度`;
       return `<div class="quota-row absent">
         <span class="quota-row-label">${escapeHtml(label)}</span>
         <div class="bar quota-bar"><span style="width:0"></span></div>
         <span class="quota-row-percent absent">不适用</span>
-        <span class="quota-row-meta">该订阅没有${escapeHtml(label)}额度</span>
+        <span class="quota-row-meta" title="${absentMeta}">${absentMeta}</span>
+        <span class="quota-row-extra"></span>
       </div>`;
     }
     // 同一周期有多条窗口（例如 Kimi 的 limit_month_total / limit_month_code）时取最紧的
@@ -219,7 +229,7 @@
     const level = main.is_exhausted ? 'danger' : percent >= 80 ? 'warn' : '';
     const stateText = main.is_exhausted ? '已耗尽' : unknown ? '未返回已用比例' : '可用';
     const badge = rest.length
-      ? ` <span class="quota-badge" title="${escapeHtml(ordered.map((window) => quotaWindowTitle(window)).join('\n'))}">另有 ${rest.length} 条</span>`
+      ? `<span class="quota-badge" title="${escapeHtml(ordered.map((window) => quotaWindowTitle(window)).join('\n'))}">另有 ${rest.length} 条</span>`
       : '';
     const meta = unknown
       ? `${escapeHtml(stateText)} · ${escapeHtml(quotaDuration(main))}`
@@ -235,11 +245,15 @@
       : '';
     const forecast = quotaForecastText(main);
     const forecastClass = main.projection_status === 'after_reset' ? 'ok' : 'warn';
+    const forecastHtml = forecast
+      ? `<span class="quota-forecast ${forecastClass}">${escapeHtml(forecast)}</span>`
+      : '';
     return `<div class="quota-row ${level || 'ok'}">
       <span class="quota-row-label">${escapeHtml(label)}</span>
       <div class="bar quota-bar"><span class="${level}" style="width:${percent}%"></span>${todayBar}</div>
       <span class="quota-row-percent ${level}">${escapeHtml(quotaPercentText(main))}</span>
-      <span class="quota-row-meta">${meta}${todayBadge}${badge}${forecast ? `<span class="quota-forecast ${forecastClass}">${escapeHtml(forecast)}</span>` : ''}</span>
+      <span class="quota-row-meta" title="${meta}">${meta}</span>
+      <span class="quota-row-extra">${todayBadge}${badge}${forecastHtml}</span>
     </div>`;
   };
   const renderQuotaRows = (quotas) => {
@@ -2500,11 +2514,13 @@
       const subscription = plans.length ? `${product} · ${plans.join(' / ')}` : product;
       const activeCount = accountCounts.active ?? accountSessions.length;
       const accountSource = accountQuotas.map((quota) => quota.source).filter((source) => source).join(' · ');
+      const speedNoteText = speedNote(account.speed);
       return `<article class="account-block">
         <div class="account-heading">
           <div class="account-identity"><div class="account-avatar" aria-hidden="true" title="${escapeHtml(subscription)}">${escapeHtml(subscriptionInitials(subscription))}</div><div><div class="account-label">订阅</div><h3 class="account-title">${escapeHtml(subscription)}</h3><div class="account-meta">Account ID：<span class="mono">${escapeHtml(accountId)}</span>${profiles ? ` · Profile：${escapeHtml(profiles)}` : ''}${accountSource ? ` · 来源：${escapeHtml(accountSource)}` : ''}</div></div></div>
           <div class="account-side">
             <div class="account-actions">${speedBadge(account.speed)}${accountRefreshButton()}</div>
+            <span class="account-speed-note" title="${escapeHtml(speedNoteText)}">${escapeHtml(speedNoteText)}</span>
             <span class="account-activity">${escapeHtml(activeCount)} 个活动</span>
           </div>
         </div>

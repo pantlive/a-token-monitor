@@ -51,7 +51,9 @@
     /* 中文注释：紧跟在额度行之后的那段小标题（活动会话）吃掉剩余空间，
        卡片等高时页脚自然贴底对齐；注意不能用 :nth-of-type，它按 div 序号算。 */
     .account-block .quota-rows-block + .account-subtitle { margin-top: auto; }
-    .account-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
+    /* 中文注释：表头锁最小高度，放下两行账号 meta、一行标题和三行侧栏，
+       有无速度徽章的卡片「额度窗口」小标题才能对齐。 */
+    .account-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; min-height: 102px; padding-bottom: 17px; border-bottom: 1px solid var(--line-soft); }
     .account-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .account-avatar { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border: 1px solid var(--violet-border); border-radius: 10px; color: var(--violet-text-accent); background: var(--violet-soft); font-size: 13px; font-weight: 750; }
     .account-label { color: var(--cyan); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
@@ -59,8 +61,8 @@
     /* 中文注释：账号 ID 长短会让 meta 折成 1 行或 2 行，这里固定成两行高度，
        heading 高度才不会跟着变、三行额度窗口才能跨卡片对齐。 */
     .account-meta { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 3.1em; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-    .account-side { display: grid; justify-items: end; gap: 7px; min-width: 0; text-align: right; }
-    .account-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
+    .account-side { display: grid; flex: 0 0 auto; grid-template-rows: 25px 16px 16px; justify-items: end; gap: 7px; min-width: 0; max-width: 46%; text-align: right; white-space: nowrap; }
+    .account-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; height: 25px; justify-self: stretch; }
     .account-refresh { display: inline-grid; width: 25px; height: 25px; flex: 0 0 auto; padding: 0; place-items: center; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--panel); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
     .account-refresh:hover { border-color: var(--violet-border-strong); color: var(--text); background: var(--surface-hover); }
     .account-refresh:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
@@ -68,17 +70,19 @@
     .account-refresh svg { width: 14px; height: 14px; }
     .account-refresh.is-spinning svg { animation: spin .8s linear infinite; }
     .plan-badge { padding: 4px 8px; border: 1px solid var(--cyan-border); border-radius: 6px; color: var(--cyan); background: var(--cyan-soft); font-size: 11px; }
-    .account-activity { color: var(--muted); font-size: 11px; }
+    .account-speed-note { justify-self: stretch; box-sizing: border-box; width: 0; min-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10.5px; line-height: 16px; }
+    .account-activity { justify-self: stretch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; line-height: 16px; }
     .account-block .account-subtitle:first-of-type { margin-top: 17px; }
-    /* 中文注释：额度行固定四列（周期 / 进度条 / 百分比 / 重置与时长）、固定行高，
+    /* 中文注释：额度行固定三列（周期 / 进度条 / 百分比）加三行（进度、重置、角标），
        缺的周期也占位，所以不同订阅的卡片同构、同名行对齐。 */
     .quota-row {
-      /* 两行布局：第一行「周期 / 进度条 / 百分比」，第二行把重置时间放在进度条下方。
-         卡片并排时宽度会变，固定四列会把右侧文案挤出卡片，所以让重置换行。 */
+      /* 三行布局：第一行周期 / 进度条 / 百分比，第二行重置时间与时长，
+         第三行今日角标、另有 N 条和速度预测。长文案截断，避免把下面的行顶歪。 */
       grid-template-columns: 92px minmax(60px, 1fr) 76px;
-      grid-template-areas: "label bar percent" "label meta meta";
+      grid-template-rows: 18px 16px 20px;
+      grid-template-areas: "label bar percent" "label meta meta" "label extra extra";
       row-gap: 3px;
-      min-height: 52px;
+      min-height: 76px;
       padding: 8px 11px;
       border: 1px solid var(--line-soft);
       border-radius: 8px;
@@ -90,11 +94,15 @@
     .quota-row-percent.warn { color: var(--yellow-text); }
     .quota-row-percent.danger { color: var(--red-text); }
     .quota-row-percent.absent { color: var(--muted-dim); font-size: 12px; font-weight: 600; }
-    .quota-row-meta { grid-area: meta; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-    /* 中文注释：速度预测另起一行；能撑到重置用绿色，会提前用完用黄色。 */
-    .quota-forecast { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .quota-row-meta { grid-area: meta; color: var(--muted); font-size: 11px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .quota-row-extra { grid-area: extra; display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; min-width: 0; min-height: 20px; overflow: hidden; }
+    /* 中文注释：速度预测改行内，和今日角标同一行；能撑到重置用绿色，会提前用完用黄色。 */
+    .quota-forecast { display: inline; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
     .quota-forecast.warn { color: var(--yellow-text); }
     .quota-forecast.ok { color: var(--green-text); }
+    .quota-row-extra .quota-forecast { flex: 1 1 auto; }
+    .quota-row-extra .quota-today,
+    .quota-row-extra .quota-badge { flex: 0 0 auto; }
     .quota-row.absent { border-style: dashed; background: transparent; }
     .quota-row.absent .quota-bar > span { width: 0 !important; }
     .quota-bar { margin: 0; }
@@ -102,9 +110,10 @@
     /* 中文注释：今日新增段叠加在原有绿/黄/红底色上，统一用蓝色区分「今天消耗」；
        右端保留圆角，左端与基线位置对齐。 */
     .quota-bar > .today { position: absolute; top: 0; bottom: 0; border-radius: 0 99px 99px 0; background: var(--blue); }
-    .quota-today { display: inline-block; margin-left: 4px; padding: 1px 6px; border: 1px solid var(--blue-border); border-radius: 99px; color: var(--blue-text); font-size: 10px; font-weight: 600; white-space: nowrap; }
+    .quota-today { display: inline-block; padding: 1px 6px; border: 1px solid var(--blue-border); border-radius: 99px; color: var(--blue-text); font-size: 10px; font-weight: 600; white-space: nowrap; }
     .quota-note { padding: 12px 13px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
     .bar { height: 6px; margin: 13px 0 12px; border-radius: 99px; background: var(--track); overflow: hidden; }
+    .quota-row .bar { margin: 0; }
     .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
     .bar > span.warn { background: var(--yellow); }
     .bar > span.danger { background: var(--red); }
@@ -279,7 +288,7 @@
     .package-block .package-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
 
     /* 中文注释：账号卡片的实时速度——迷你走势条 + 数字，走势条替代圆点，信息更直观。 */
-    .account-speed { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; max-width: 100%; color: var(--muted-strong); }
+    .account-speed { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; max-width: 100%; color: var(--muted-strong); white-space: nowrap; }
     .account-speed .speed-spark { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 14px; }
     .account-speed .speed-spark i { display: block; width: 2px; border-radius: 1px; background: var(--cyan); opacity: .9; }
     .account-speed.is-stale .speed-spark i { background: var(--muted-dim); opacity: .55; }

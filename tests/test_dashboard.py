@@ -139,6 +139,68 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('class="account-actions"', render_accounts)
         self.assertEqual(render_accounts.count("${accountRefreshButton()}"), 1)
         self.assertIn("[data-account-refresh]", render_accounts)
+        self.assertIn('class="account-speed-note"', render_accounts)
+        self.assertIn("${speedBadge(account.speed)}${accountRefreshButton()}", render_accounts)
+        self.assertIn("${escapeHtml(activeCount)} 个活动", render_accounts)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证速度徽标分行")
+    def test_speed_badge_splits_main_and_note(self) -> None:
+        """主行只含折线与 tps；TTFT 和多久以前在附注行用 · 连接。"""
+
+        helpers = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const escapeHtml =") : _DASHBOARD_HTML.index(
+                "  const formatRelativeTime ="
+            )
+        ]
+        renderer = _DASHBOARD_HTML[
+            _DASHBOARD_HTML.index("  const formatTtft =") : _DASHBOARD_HTML.index(
+                "  // 中文注释：token 单元格"
+            )
+        ]
+        script = (
+            helpers
+            + renderer
+            + """
+const live = {tps: 42, ttft_ms: 1200, live: true, history: [10, 20, 30]};
+const stale = {tps: 18, ttft_ms: 800, live: false, age_seconds: 90, history: [8, 12], approx: true};
+const tooOld = {tps: 9, live: false, age_seconds: 4000, history: [1]};
+console.log(JSON.stringify({
+  empty: speedBadge(null),
+  emptyNote: speedNote(null),
+  main: speedBadge(live),
+  note: speedNote(live),
+  staleMain: speedBadge(stale),
+  staleNote: speedNote(stale),
+  tooOld: speedBadge(tooOld),
+  tooOldNote: speedNote(tooOld)
+}));
+"""
+        )
+        for language in ("zh", "en"):
+            with self.subTest(language=language):
+                result = subprocess.run(
+                    [shutil.which("node"), "-e", substitute(script, language)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["empty"], "")
+                self.assertEqual(payload["emptyNote"], "")
+                self.assertIn("account-speed", payload["main"])
+                self.assertIn("speed-tps", payload["main"])
+                self.assertIn("speed-spark", payload["main"])
+                self.assertIn("TTFT", payload["main"])
+                self.assertNotIn("TTFT", payload["main"].split(">", 1)[1])
+                self.assertNotIn("speed-note", payload["main"])
+                self.assertTrue(payload["note"].startswith("TTFT "))
+                self.assertNotIn(" · ", payload["note"])
+                self.assertIn("≈", payload["staleMain"])
+                self.assertIn("TTFT ", payload["staleNote"])
+                self.assertIn(" · ", payload["staleNote"])
+                self.assertEqual(payload["tooOld"], "")
+                self.assertEqual(payload["tooOldNote"], "")
 
     @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证旧额度提示")
     def test_account_cards_explain_stale_quota(self) -> None:
@@ -167,6 +229,7 @@ const planLabel = (value) => value || '';
 const distinctSorted = (values) => [...new Set(values.filter(Boolean))].sort();
 const subscriptionInitials = () => 'CC';
 const speedBadge = () => '';
+const speedNote = () => '';
 const renderQuotaRows = () => '额度行';
 const renderSessionTable = () => '';
 Date.now = () => 1600 * 1000;
@@ -2667,6 +2730,48 @@ class StylesheetIntegrityTests(unittest.TestCase):
         self.assertIn(
             ".account-list { grid-template-columns: minmax(0, 1fr); }",
             _RESPONSIVE_CSS,
+        )
+        side_rules = rules(".account-side")
+        self.assertTrue(side_rules)
+        self.assertTrue(
+            any(
+                "nowrap" in rule and "grid-template-rows:" in rule
+                for rule in side_rules
+            ),
+            side_rules,
+        )
+        speed_rules = rules(".account-speed")
+        self.assertTrue(speed_rules)
+        self.assertTrue(
+            all("flex-wrap: wrap" not in rule for rule in speed_rules),
+            speed_rules,
+        )
+        self.assertTrue(
+            any(
+                '"label bar percent"' in rule
+                and '"label meta meta"' in rule
+                and '"label extra extra"' in rule
+                for rule in row_rules
+            ),
+            row_rules,
+        )
+        row_min_heights = [
+            int(value)
+            for rule in row_rules
+            for value in re.findall(r"min-height:\s*(\d+)px", rule)
+        ]
+        self.assertTrue(
+            row_min_heights and max(row_min_heights) >= 72,
+            row_rules,
+        )
+        quota_meta_rules = rules(".quota-row-meta")
+        self.assertTrue(quota_meta_rules)
+        self.assertTrue(
+            any(
+                "nowrap" in rule and "text-overflow: ellipsis" in rule
+                for rule in quota_meta_rules
+            ),
+            quota_meta_rules,
         )
 
     def test_usage_heatmap_fills_the_card_width(self) -> None:
@@ -6010,7 +6115,8 @@ class QuotaTodaySegmentTests(unittest.TestCase):
             "[{used_percent: 22, today_used_percent: 12, resets_at: 1}]);\n"
             "const withoutToday = renderQuotaRow('five_hours', '5 小时', "
             "[{used_percent: 22, resets_at: 1}]);\n"
-            "console.log(JSON.stringify([withToday, withoutToday]));\n"
+            "const absent = renderQuotaRow('month', '月', []);\n"
+            "console.log(JSON.stringify([withToday, withoutToday, absent]));\n"
         )
         for language, today_label in (("zh", "今日 +"), ("en", "Today +")):
             with self.subTest(language=language):
@@ -6021,16 +6127,29 @@ class QuotaTodaySegmentTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                with_today, without_today = json.loads(result.stdout)
+                with_today, without_today, absent = json.loads(result.stdout)
                 self.assertIn('style="width:22%"', with_today)
                 self.assertIn('class="today" style="left:10%;width:12%"', with_today)
                 self.assertIn(f"{today_label}12.0%", with_today)
                 self.assertLess(
                     with_today.index("width:22%"), with_today.index('class="today"')
                 )
+                extra_at = with_today.index('class="quota-row-extra"')
+                meta_at = with_today.index('class="quota-row-meta"')
+                today_at = with_today.index("quota-today")
+                self.assertLess(meta_at, extra_at)
+                self.assertLess(extra_at, today_at)
+                self.assertNotIn(
+                    "quota-today",
+                    with_today[meta_at:extra_at],
+                )
+                self.assertNotIn(today_label, with_today[meta_at:extra_at])
                 self.assertNotIn('class="today"', without_today)
                 self.assertNotIn(today_label, without_today)
                 self.assertIn('style="width:22%"', without_today)
+                self.assertIn('class="quota-row-extra"', without_today)
+                self.assertIn('class="quota-row-extra"', absent)
+                self.assertIn('class="quota-row-meta"', absent)
 
     def test_quota_today_css_overlays_without_changing_the_base_level(self) -> None:
         css = _BASE_CSS + _DASHBOARD_CSS
