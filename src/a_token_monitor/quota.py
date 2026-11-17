@@ -76,63 +76,174 @@ class QuotaWindow:
         return self.used_percent is not None and self.used_percent >= 100.0
 
 
+# 中文注释：重置时间的正常抖动远小于一个真实周期。60 秒同时用于
+# 「窗口是否今天才开始」和「这是不是一次已经发生的重置」。
+_QUOTA_DAY_RESET_TOLERANCE_SECONDS = 60.0
+
+
 @dataclass(frozen=True)
 class QuotaDayBaseline:
-    """本地自然日开始时某个额度窗口的已用百分比基线。
+    """某个额度窗口在本地自然日内的今日消耗状态。
 
-    基线只用于计算「今日消耗」这一段：当日首次看到快照时把当前 ``used_percent``
-    记成基线，之后同一自然日、同一重置周期内的差值就是今天新增的额度消耗。
+    ``used_percent`` 是当前这段窗口的起点，不是最新已用值。
+    ``high_water_percent`` 是这段窗口里见过的最高已用值；旧数据缺这一列时
+    视为起点，避免升级后凭空画出一段今日消耗。
+    ``carried_percent`` 是今天在更早的窗口里已经用掉、重置后仍要计入的部分。
     """
 
     day_key: str
     used_percent: float
     resets_at: float | None
     observed_at: float
+    high_water_percent: float | None = None
+    carried_percent: float = 0.0
+
+    def __post_init__(self) -> None:
+        high_water = (
+            float(self.used_percent)
+            if self.high_water_percent is None
+            else float(self.high_water_percent)
+        )
+        object.__setattr__(self, "high_water_percent", high_water)
+        object.__setattr__(self, "carried_percent", float(self.carried_percent))
 
 
-def resolve_quota_day_baseline(
+def _window_started_on_local_day(window: QuotaWindow, observed_at: float) -> bool:
+    """窗口起点不早于本地零点（容差 60 秒）时，今天之前不可能有消耗。"""
+
+    resets_at = window.resets_at
+    window_minutes = window.window_minutes
+    if resets_at is None or window_minutes is None:
+        return False
+    window_start = resets_at - float(window_minutes) * 60.0
+    return (
+        window_start
+        >= local_day_start(observed_at) - _QUOTA_DAY_RESET_TOLERANCE_SECONDS
+    )
+
+
+def _is_real_quota_reset(
+    previous_resets_at: float | None,
+    resets_at: float | None,
+    observed_at: float,
+) -> bool:
+    """重置时间前移超过 60 秒，且旧的重置时间已经到期，才算真实重置。
+
+    还没到期就大幅改期，或只抖动几十秒，都不是新窗口，不能把今日消耗清掉。
+    """
+
+    if previous_resets_at is None or resets_at is None:
+        return False
+    moved_forward = (
+        resets_at - previous_resets_at > _QUOTA_DAY_RESET_TOLERANCE_SECONDS
+    )
+    previous_was_due = (
+        previous_resets_at <= observed_at + _QUOTA_DAY_RESET_TOLERANCE_SECONDS
+    )
+    return moved_forward and previous_was_due
+
+
+def advance_quota_day_baseline(
     window: QuotaWindow,
     observed_at: float,
     previous: QuotaDayBaseline | None,
-) -> float | None:
-    """返回 ``observed_at`` 所在本地日的额度基线。
+) -> QuotaDayBaseline | None:
+    """根据一次新观察推进本地日的今日消耗状态。
 
-    - 已用比例缺失：返回 ``None``，不建立基线；
-    - 窗口本身今天才重置（起点不早于本地零点，容差 60 秒）：今天从 0 开始，返回 0；
-    - 没有基线或基线属于别的本地日：以当前已用比例作为新一天的起点；
-    - 重置时间变了（窗口已重置）：返回 0，今日消耗从当前值算起；
-    - 已用比例下降（上游回退或重置早于预期）：以当前值为基线，避免画出假的大段；
-    - 其余情况沿用旧基线，差值即今天新增的消耗。
+    - 已用比例缺失：返回 ``None``，调用方保留旧状态；
+    - 没有旧记录或已经跨日：窗口今天才开始时起点记 0，否则以当前值为起点，
+      最高水位记当前值，已结转消耗记 0；
+    - 同一天发生真实重置：把本窗口已经用掉的部分累加到已结转消耗，起点记 0，
+      最高水位记当前值；
+    - 同一天已用下降：起点和最高水位都保持不动；
+    - 同一天已用上升：只抬高最高水位；
+    - 重置时间只是抖动或尚未到期的改期：只更新 ``resets_at``。
 
     本地日只经 :mod:`a_token_monitor.local_time` 判定，确保跨时区、跨夏令时一致。
+    内容没有变化时仍会刷新 ``observed_at``，方便调用方挡住更早的快照。
     """
 
     used_percent = window.used_percent
     if used_percent is None:
         return None
 
-    resets_at = window.resets_at
-    window_minutes = window.window_minutes
-    if resets_at is not None and window_minutes is not None:
-        window_start = resets_at - window_minutes * 60.0
-        if window_start >= local_day_start(observed_at) - 60.0:
-            # 中文注释：窗口今天才开始，之前的已用不可能发生在今天之前。
-            return 0.0
-
     day_key = local_day_key(observed_at)
     if previous is None or previous.day_key != day_key:
-        return used_percent
+        start = (
+            0.0
+            if _window_started_on_local_day(window, observed_at)
+            else used_percent
+        )
+        return QuotaDayBaseline(
+            day_key=day_key,
+            used_percent=start,
+            resets_at=window.resets_at,
+            observed_at=observed_at,
+            high_water_percent=used_percent,
+            carried_percent=0.0,
+        )
 
-    previous_resets_at = previous.resets_at
+    if _is_real_quota_reset(previous.resets_at, window.resets_at, observed_at):
+        carried = previous.carried_percent + max(
+            0.0,
+            previous.high_water_percent - previous.used_percent,
+        )
+        return QuotaDayBaseline(
+            day_key=day_key,
+            used_percent=0.0,
+            resets_at=window.resets_at,
+            observed_at=observed_at,
+            high_water_percent=used_percent,
+            carried_percent=carried,
+        )
+
+    high_water = previous.high_water_percent
+    if used_percent > high_water:
+        high_water = used_percent
+    # 中文注释：这次没带重置时间时保留旧锚点，否则下一次真实重置无法识别。
+    resets_at = window.resets_at if window.resets_at is not None else previous.resets_at
     if (
-        resets_at is not None
-        and previous_resets_at is not None
-        and abs(resets_at - previous_resets_at) > 1.0
+        high_water == previous.high_water_percent
+        and resets_at == previous.resets_at
+        and previous.observed_at == observed_at
     ):
-        return 0.0
-    if used_percent < previous.used_percent:
-        return used_percent
-    return previous.used_percent
+        return previous
+    return QuotaDayBaseline(
+        day_key=day_key,
+        used_percent=previous.used_percent,
+        resets_at=resets_at,
+        observed_at=observed_at,
+        high_water_percent=high_water,
+        carried_percent=previous.carried_percent,
+    )
+
+
+def quota_day_baseline_changed(
+    previous: QuotaDayBaseline,
+    updated: QuotaDayBaseline,
+) -> bool:
+    """今日进度或重置锚点变了才需要写库；只刷新观察时间不算变化。"""
+
+    return (
+        previous.day_key != updated.day_key
+        or previous.used_percent != updated.used_percent
+        or previous.resets_at != updated.resets_at
+        or previous.high_water_percent != updated.high_water_percent
+        or previous.carried_percent != updated.carried_percent
+    )
+
+
+def quota_day_today_percent(baseline: QuotaDayBaseline) -> float:
+    """返回已经计入今天的消耗，上限 100。
+
+    回落不会减少这个值：它看的是最高水位，而不是此刻的已用比例。
+    """
+
+    consumed = baseline.carried_percent + max(
+        0.0,
+        baseline.high_water_percent - baseline.used_percent,
+    )
+    return min(100.0, max(0.0, consumed))
 
 
 # 中文注释：额度周期统一口径。上游的名字五花八门（primary / secondary / weekly /

@@ -14,7 +14,11 @@ from a_token_monitor.multi_models import (
     SessionStatus,
     TrackedSession,
 )
-from a_token_monitor.quota import QuotaSnapshot, QuotaWindow
+from a_token_monitor.quota import (
+    QuotaSnapshot,
+    QuotaWindow,
+    quota_day_today_percent,
+)
 from a_token_monitor.registry import MultiSessionRegistry
 
 
@@ -495,7 +499,7 @@ class QuotaDayBaselineRegistryTests(unittest.TestCase):
         self.assertEqual(baseline.used_percent, 10.0)
         self.assertEqual(baseline.observed_at, self.OBSERVED_AT + 120.0)
 
-    def test_reset_window_sets_the_baseline_to_zero(self) -> None:
+    def test_future_reset_shift_does_not_zero_the_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             registry = MultiSessionRegistry(Path(temporary_directory) / "state")
             registry.save_quota(self.snapshot(self.OBSERVED_AT, used_percent=10.0))
@@ -510,8 +514,105 @@ class QuotaDayBaselineRegistryTests(unittest.TestCase):
                 local_day_key(self.OBSERVED_AT)
             )[("codex", "primary")]
 
-        self.assertEqual(baseline.used_percent, 0.0)
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.high_water_percent, 20.0)
+        self.assertEqual(baseline.carried_percent, 0.0)
         self.assertEqual(baseline.resets_at, self.RESETS_AT + 3600.0)
+
+    def test_usage_dip_does_not_shrink_today(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.OBSERVED_AT, used_percent=10.0))
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 60.0, used_percent=22.0)
+            )
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 120.0, used_percent=15.0)
+            )
+            baseline = registry.load_quota_day_baseline(
+                local_day_key(self.OBSERVED_AT)
+            )[("codex", "primary")]
+
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+        self.assertEqual(quota_day_today_percent(baseline), 12.0)
+
+    def test_real_reset_keeps_prior_consumption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.OBSERVED_AT, used_percent=10.0))
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 60.0, used_percent=22.0)
+            )
+            observed_at = self.RESETS_AT
+            registry.save_quota(
+                self.snapshot(
+                    observed_at,
+                    used_percent=3.0,
+                    resets_at=observed_at + 18000.0,
+                )
+            )
+            baseline = registry.load_quota_day_baseline(
+                local_day_key(self.OBSERVED_AT)
+            )[("codex", "primary")]
+
+        self.assertEqual(baseline.used_percent, 0.0)
+        self.assertEqual(baseline.carried_percent, 12.0)
+        self.assertEqual(baseline.high_water_percent, 3.0)
+        self.assertEqual(quota_day_today_percent(baseline), 15.0)
+
+    def test_legacy_schema_migrates_and_reread_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = Path(temporary_directory) / "state"
+            state.mkdir()
+            database = state / "monitor.sqlite3"
+            day_key = local_day_key(self.OBSERVED_AT)
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE quota_day_baseline (
+                        limit_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        day_key TEXT NOT NULL,
+                        used_percent REAL NOT NULL,
+                        resets_at REAL,
+                        observed_at REAL NOT NULL,
+                        PRIMARY KEY (limit_id, name)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO quota_day_baseline (
+                        limit_id, name, day_key, used_percent, resets_at, observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "codex",
+                        "primary",
+                        day_key,
+                        10.0,
+                        self.RESETS_AT,
+                        self.OBSERVED_AT,
+                    ),
+                )
+            registry = MultiSessionRegistry(state)
+            migrated = registry.load_quota_day_baseline(day_key)[("codex", "primary")]
+            self.assertEqual(migrated.high_water_percent, 10.0)
+            self.assertEqual(migrated.carried_percent, 0.0)
+            registry.save_quota(
+                self.snapshot(self.OBSERVED_AT + 30.0, used_percent=22.0)
+            )
+            today = quota_day_today_percent(
+                registry.load_quota_day_baseline(day_key)[("codex", "primary")]
+            )
+            reopened = MultiSessionRegistry(state)
+            again = quota_day_today_percent(
+                reopened.load_quota_day_baseline(day_key)[("codex", "primary")]
+            )
+
+        self.assertGreater(today, 0.0)
+        self.assertEqual(again, today)
 
 
 if __name__ == "__main__":

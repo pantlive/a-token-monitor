@@ -10,13 +10,14 @@ from a_token_monitor.quota import (
     QuotaDayBaseline,
     QuotaProjection,
     QuotaWindow,
+    advance_quota_day_baseline,
     merge_sparse_update,
     parse_rate_limits_result,
     project_quota_exhaustion,
+    quota_day_today_percent,
     quota_period,
     quota_period_label,
     quota_window_duration,
-    resolve_quota_day_baseline,
 )
 
 
@@ -336,7 +337,7 @@ class QuotaProjectionTests(unittest.TestCase):
 
 
 class QuotaDayBaselineTests(unittest.TestCase):
-    """验证今日额度基线的七种分支（纯函数，不访问数据库）。"""
+    """验证今日额度状态的推进规则（纯函数，不访问数据库）。"""
 
     OBSERVED_AT = local_day_start(1_800_000_000.0) + 3600.0
 
@@ -359,13 +360,15 @@ class QuotaDayBaselineTests(unittest.TestCase):
             "used_percent": used_percent,
             "resets_at": self.OBSERVED_AT + 3600.0,
             "observed_at": self.OBSERVED_AT - 600.0,
+            "high_water_percent": used_percent,
+            "carried_percent": 0.0,
         }
         values.update(overrides)
         return QuotaDayBaseline(**values)  # type: ignore[arg-type]
 
     def test_missing_used_percent_has_no_baseline(self) -> None:
         self.assertIsNone(
-            resolve_quota_day_baseline(
+            advance_quota_day_baseline(
                 self.window(used_percent=None),
                 self.OBSERVED_AT,
                 None,
@@ -373,63 +376,155 @@ class QuotaDayBaselineTests(unittest.TestCase):
         )
 
     def test_without_previous_uses_current_used_percent(self) -> None:
-        self.assertEqual(
-            resolve_quota_day_baseline(self.window(), self.OBSERVED_AT, None),
-            22.0,
+        baseline = advance_quota_day_baseline(
+            self.window(), self.OBSERVED_AT, None
         )
 
-    def test_keeps_previous_baseline_within_the_same_day(self) -> None:
-        self.assertEqual(
-            resolve_quota_day_baseline(
-                self.window(),
-                self.OBSERVED_AT,
-                self.baseline(10.0),
-            ),
-            10.0,
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 22.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+        self.assertEqual(baseline.carried_percent, 0.0)
+        self.assertEqual(quota_day_today_percent(baseline), 0.0)
+
+    def test_keeps_previous_start_and_raises_high_water(self) -> None:
+        baseline = advance_quota_day_baseline(
+            self.window(),
+            self.OBSERVED_AT,
+            self.baseline(10.0),
         )
 
-    def test_new_local_day_starts_from_current_used_percent(self) -> None:
-        self.assertEqual(
-            resolve_quota_day_baseline(
-                self.window(),
-                self.OBSERVED_AT,
-                self.baseline(
-                    10.0,
-                    day_key=local_day_key(self.OBSERVED_AT - 86400.0),
-                ),
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+        self.assertEqual(quota_day_today_percent(baseline), 12.0)
+
+    def test_new_local_day_clears_carried_consumption(self) -> None:
+        baseline = advance_quota_day_baseline(
+            self.window(),
+            self.OBSERVED_AT,
+            self.baseline(
+                10.0,
+                day_key=local_day_key(self.OBSERVED_AT - 86400.0),
+                high_water_percent=40.0,
+                carried_percent=15.0,
             ),
-            22.0,
         )
+
+        assert baseline is not None
+        self.assertEqual(baseline.day_key, local_day_key(self.OBSERVED_AT))
+        self.assertEqual(baseline.used_percent, 22.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+        self.assertEqual(baseline.carried_percent, 0.0)
+        self.assertEqual(quota_day_today_percent(baseline), 0.0)
 
     def test_window_started_today_starts_from_zero(self) -> None:
-        # 窗口起点正好是本地零点：今天之前不可能有消耗，基线必须是 0。
+        # 窗口起点正好是本地零点：今天之前不可能有消耗，第一条记录的起点必须是 0。
         resets_at = local_day_start(self.OBSERVED_AT) + 300.0 * 60.0
-        self.assertEqual(
-            resolve_quota_day_baseline(
-                self.window(resets_at=resets_at),
-                self.OBSERVED_AT,
-                self.baseline(10.0, resets_at=resets_at),
-            ),
-            0.0,
+        baseline = advance_quota_day_baseline(
+            self.window(resets_at=resets_at),
+            self.OBSERVED_AT,
+            None,
         )
 
-    def test_reset_window_starts_from_zero(self) -> None:
-        self.assertEqual(
-            resolve_quota_day_baseline(
-                self.window(resets_at=self.OBSERVED_AT + 2000.0),
-                self.OBSERVED_AT,
-                self.baseline(10.0, resets_at=self.OBSERVED_AT + 1000.0),
-            ),
-            0.0,
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 0.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+        self.assertEqual(quota_day_today_percent(baseline), 22.0)
+
+    def test_same_day_does_not_rezero_an_existing_baseline(self) -> None:
+        resets_at = local_day_start(self.OBSERVED_AT) + 300.0 * 60.0
+        baseline = advance_quota_day_baseline(
+            self.window(resets_at=resets_at),
+            self.OBSERVED_AT,
+            self.baseline(10.0, resets_at=resets_at),
         )
 
-    def test_falling_used_percent_moves_the_baseline_down(self) -> None:
-        # 上游回退时不能沿用旧基线，否则会算出虚假的一大段今日消耗。
-        self.assertEqual(
-            resolve_quota_day_baseline(
-                self.window(used_percent=20.0),
-                self.OBSERVED_AT,
-                self.baseline(30.0),
-            ),
-            20.0,
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+
+    def test_small_drop_does_not_move_the_baseline(self) -> None:
+        previous = self.baseline(10.0, high_water_percent=22.0)
+        baseline = advance_quota_day_baseline(
+            self.window(used_percent=21.0),
+            self.OBSERVED_AT,
+            previous,
         )
+
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, previous.used_percent)
+        self.assertEqual(baseline.high_water_percent, previous.high_water_percent)
+        self.assertEqual(baseline.carried_percent, previous.carried_percent)
+        self.assertEqual(quota_day_today_percent(baseline), 12.0)
+
+    def test_rise_after_a_drop_only_counts_above_the_high_water(self) -> None:
+        previous = self.baseline(10.0, high_water_percent=25.0)
+        dipped = advance_quota_day_baseline(
+            self.window(used_percent=20.0),
+            self.OBSERVED_AT,
+            previous,
+        )
+        partial = advance_quota_day_baseline(
+            self.window(used_percent=23.0),
+            self.OBSERVED_AT + 60.0,
+            dipped,
+        )
+        exceeded = advance_quota_day_baseline(
+            self.window(used_percent=28.0),
+            self.OBSERVED_AT + 120.0,
+            partial,
+        )
+
+        assert dipped is not None and partial is not None and exceeded is not None
+        self.assertEqual(quota_day_today_percent(dipped), 15.0)
+        self.assertEqual(partial.high_water_percent, 25.0)
+        self.assertEqual(quota_day_today_percent(partial), 15.0)
+        self.assertEqual(exceeded.high_water_percent, 28.0)
+        self.assertEqual(quota_day_today_percent(exceeded), 18.0)
+
+    def test_reset_jitter_of_thirty_seconds_is_not_a_reset(self) -> None:
+        previous = self.baseline(10.0, high_water_percent=22.0)
+        baseline = advance_quota_day_baseline(
+            self.window(resets_at=self.OBSERVED_AT + 3600.0 + 30.0),
+            self.OBSERVED_AT,
+            previous,
+        )
+
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.high_water_percent, 22.0)
+        self.assertEqual(baseline.carried_percent, 0.0)
+        self.assertEqual(baseline.resets_at, self.OBSERVED_AT + 3630.0)
+        self.assertEqual(quota_day_today_percent(baseline), 12.0)
+
+    def test_future_reset_shift_does_not_clear_today(self) -> None:
+        # 旧的重置时间还远未到期，只是上游把时刻往后改了，不是新窗口。
+        baseline = advance_quota_day_baseline(
+            self.window(used_percent=20.0, resets_at=self.OBSERVED_AT + 2000.0),
+            self.OBSERVED_AT,
+            self.baseline(10.0, resets_at=self.OBSERVED_AT + 1000.0),
+        )
+
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 10.0)
+        self.assertEqual(baseline.high_water_percent, 20.0)
+        self.assertEqual(baseline.carried_percent, 0.0)
+        self.assertEqual(baseline.resets_at, self.OBSERVED_AT + 2000.0)
+
+    def test_real_reset_accumulates_today(self) -> None:
+        previous = self.baseline(
+            10.0,
+            high_water_percent=22.0,
+            resets_at=self.OBSERVED_AT - 30.0,
+        )
+        baseline = advance_quota_day_baseline(
+            self.window(used_percent=4.0, resets_at=self.OBSERVED_AT + 18000.0),
+            self.OBSERVED_AT,
+            previous,
+        )
+
+        assert baseline is not None
+        self.assertEqual(baseline.used_percent, 0.0)
+        self.assertEqual(baseline.high_water_percent, 4.0)
+        self.assertEqual(baseline.carried_percent, 12.0)
+        self.assertEqual(quota_day_today_percent(baseline), 16.0)

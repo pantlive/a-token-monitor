@@ -22,6 +22,7 @@ from ..quota import (
     QuotaDayBaseline,
     QuotaSnapshot,
     project_quota_exhaustion,
+    quota_day_today_percent,
     quota_period,
     quota_period_label,
     quota_window_duration,
@@ -724,14 +725,6 @@ def _record_account_name(record: Mapping[str, Any]) -> str:
     return "codex"
 
 
-def _quota_resets_match(left: float | None, right: float | None) -> bool:
-    """判断窗口重置时间与基线是否属于同一周期（容差 1 秒）。"""
-
-    if left is None or right is None:
-        return left is None and right is None
-    return abs(left - right) <= 1.0
-
-
 def _quota_summary(
     snapshot: QuotaSnapshot | None,
     day_baselines: Mapping[tuple[str, str], QuotaDayBaseline] | None = None,
@@ -739,9 +732,10 @@ def _quota_summary(
 ) -> dict[str, Any] | None:
     """把额度快照转换成网页需要的安全字段。
 
-    ``day_baselines`` 与 ``now`` 由 Dashboard 状态构建传入；只有快照属于 ``now``
-    所在的本地自然日、重置周期与基线一致时，才输出今日段。其他调用方（例如
-    未配置基线存储的 provider）不传基线，字段保持 ``None``，前端继续画单色进度条。
+    ``day_baselines`` 与 ``now`` 由 Dashboard 状态构建传入。只要快照属于 ``now``
+    所在的本地自然日，就输出今日段；数值来自基线记下的最高水位和已结转消耗，
+    不因为 ``resets_at`` 抖动而消失。其他调用方不传基线时字段保持 ``None``，
+    前端继续画单色进度条。
     """
 
     if snapshot is None:
@@ -765,18 +759,11 @@ def _quota_summary(
         if (
             baseline is not None
             and same_local_day
-            and _quota_resets_match(window.resets_at, baseline.resets_at)
-            and window.used_percent is not None
+            and baseline.day_key == local_day_key(snapshot.observed_at)
         ):
+            # 中文注释：起点仍是当日第一段窗口的 used_percent；今日值单独累计。
             day_start_used = baseline.used_percent
-            today_used = max(
-                0.0,
-                min(
-                    window.used_percent,
-                    100.0,
-                    window.used_percent - baseline.used_percent,
-                ),
-            )
+            today_used = quota_day_today_percent(baseline)
         windows.append(
             {
                 "limit_id": window.limit_id,
@@ -792,7 +779,7 @@ def _quota_summary(
                 "duration_label": quota_window_duration(window),
                 "projection_status": projection.status,
                 "projected_exhausted_at": projection.projected_exhausted_at,
-                # 中文注释：今日段 = 当前已用 - 本地日基线；缺失时不画第二段。
+                # 中文注释：今日值来自已保存的最高水位；缺失基线时不画第二段。
                 "day_start_used_percent": day_start_used,
                 "today_used_percent": today_used,
             }

@@ -5966,18 +5966,29 @@ class QuotaTodaySegmentTests(unittest.TestCase):
             ),
         )
 
-    def baseline(self, used_percent: float = 10.0) -> QuotaDayBaseline:
+    def baseline(
+        self,
+        used_percent: float = 10.0,
+        *,
+        high_water_percent: float | None = None,
+        carried_percent: float = 0.0,
+        resets_at: float | None = None,
+    ) -> QuotaDayBaseline:
         return QuotaDayBaseline(
             day_key=local_day_key(self.NOW),
             used_percent=used_percent,
-            resets_at=self.RESETS_AT,
+            resets_at=self.RESETS_AT if resets_at is None else resets_at,
             observed_at=self.NOW - 600.0,
+            high_water_percent=(
+                used_percent if high_water_percent is None else high_water_percent
+            ),
+            carried_percent=carried_percent,
         )
 
     def test_quota_summary_exposes_today_segment(self) -> None:
         summary = _quota_summary(
             self.snapshot(self.NOW),
-            {("codex", "primary"): self.baseline()},
+            {("codex", "primary"): self.baseline(high_water_percent=22.0)},
             self.NOW,
         )
 
@@ -5998,23 +6009,24 @@ class QuotaTodaySegmentTests(unittest.TestCase):
         self.assertIsNone(window["day_start_used_percent"])
         self.assertIsNone(window["today_used_percent"])
 
-    def test_quota_summary_hides_today_segment_after_a_reset(self) -> None:
-        baseline = QuotaDayBaseline(
-            day_key=local_day_key(self.NOW),
-            used_percent=10.0,
-            resets_at=self.RESETS_AT - 3600.0,
-            observed_at=self.NOW - 600.0,
-        )
+    def test_quota_summary_keeps_today_when_reset_time_differs(self) -> None:
         summary = _quota_summary(
             self.snapshot(self.NOW),
-            {("codex", "primary"): baseline},
+            {
+                ("codex", "primary"): self.baseline(
+                    0.0,
+                    high_water_percent=4.0,
+                    carried_percent=12.0,
+                    resets_at=self.RESETS_AT - 3600.0,
+                )
+            },
             self.NOW,
         )
 
         self.assertIsNotNone(summary)
         window = summary["windows"][0]
-        self.assertIsNone(window["day_start_used_percent"])
-        self.assertIsNone(window["today_used_percent"])
+        self.assertEqual(window["day_start_used_percent"], 0.0)
+        self.assertEqual(window["today_used_percent"], 16.0)
 
     def test_quota_summary_without_baseline_keeps_the_single_bar(self) -> None:
         summary = _quota_summary(self.snapshot(self.NOW))
@@ -6025,18 +6037,27 @@ class QuotaTodaySegmentTests(unittest.TestCase):
         self.assertIsNone(window["today_used_percent"])
 
     def test_quota_summary_clips_today_consumption(self) -> None:
-        for used, baseline, expected in (
-            (120.0, 10.0, 100.0),
-            (22.0, 30.0, 0.0),
-            (22.0, 0.0, 22.0),
-        ):
-            with self.subTest(used=used, baseline=baseline):
+        cases = (
+            (0.0, 20.0, 90.0, 100.0),
+            (30.0, 30.0, 0.0, 0.0),
+            (0.0, 4.0, 12.0, 16.0),
+        )
+        for start, high_water, carried, expected in cases:
+            with self.subTest(start=start, high_water=high_water, carried=carried):
                 summary = _quota_summary(
-                    self.snapshot(self.NOW, used_percent=used),
-                    {("codex", "primary"): self.baseline(baseline)},
+                    self.snapshot(self.NOW, used_percent=50.0),
+                    {
+                        ("codex", "primary"): self.baseline(
+                            start,
+                            high_water_percent=high_water,
+                            carried_percent=carried,
+                        )
+                    },
                     self.NOW,
                 )
-                self.assertEqual(summary["windows"][0]["today_used_percent"], expected)
+                self.assertEqual(
+                    summary["windows"][0]["today_used_percent"], expected
+                )
 
     def test_build_dashboard_state_reads_the_persisted_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -6053,6 +6074,29 @@ class QuotaTodaySegmentTests(unittest.TestCase):
         window = state["quota"]["windows"][0]
         self.assertEqual(window["day_start_used_percent"], 10.0)
         self.assertEqual(window["today_used_percent"], 12.0)
+
+    def test_today_segment_survives_rebuild_and_stale_lower_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry = MultiSessionRegistry(Path(temporary_directory) / "state")
+            registry.save_quota(self.snapshot(self.NOW - 3600.0, used_percent=10.0))
+            registry.save_quota(self.snapshot(self.NOW, used_percent=22.0))
+            with mock.patch.object(
+                dashboard_state.time, "time", return_value=self.NOW + 60.0
+            ):
+                first = dashboard_state.build_dashboard_state(registry)
+                second = dashboard_state.build_dashboard_state(registry)
+            registry.save_quota(self.snapshot(self.NOW - 1800.0, used_percent=8.0))
+            with mock.patch.object(
+                dashboard_state.time, "time", return_value=self.NOW + 120.0
+            ):
+                third = dashboard_state.build_dashboard_state(registry)
+
+        first_today = first["quota"]["windows"][0]["today_used_percent"]
+        second_today = second["quota"]["windows"][0]["today_used_percent"]
+        third_today = third["quota"]["windows"][0]["today_used_percent"]
+        self.assertGreater(first_today, 0.0)
+        self.assertEqual(second_today, first_today)
+        self.assertEqual(third_today, first_today)
 
     def test_provider_growth_exposes_today_segment(self) -> None:
         """所有有额度的 provider 都接入同一套每日基线。"""
@@ -6251,6 +6295,7 @@ class QuotaTodaySegmentTests(unittest.TestCase):
             "  {used_percent: 22, today_used_percent: -5},\n"
             "  {used_percent: Infinity, today_used_percent: 5},\n"
             "  {used_percent: 22, today_used_percent: NaN},\n"
+            "  {used_percent: 0, today_used_percent: 16},\n"
             "];\n"
             "console.log(JSON.stringify(cases.map(quotaTodaySegment)));\n"
         )
@@ -6264,19 +6309,20 @@ class QuotaTodaySegmentTests(unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             [
-                {"used": 22, "today": 12, "start": 10},
+                {"used": 22, "today": 12, "drawn": 12, "start": 10},
                 None,
                 None,
-                {"used": 100, "today": 100, "start": 0},
-                {"used": 22, "today": 22, "start": 0},
-                None,
-                None,
-                None,
-                {"used": 5, "today": 5, "start": 0},
+                {"used": 100, "today": 100, "drawn": 100, "start": 0},
+                {"used": 22, "today": 30, "drawn": 22, "start": 0},
                 None,
                 None,
                 None,
+                {"used": 5, "today": 5, "drawn": 5, "start": 0},
                 None,
+                None,
+                None,
+                None,
+                {"used": 0, "today": 16, "drawn": 0, "start": 0},
             ],
         )
 
@@ -6294,7 +6340,9 @@ class QuotaTodaySegmentTests(unittest.TestCase):
             "const withoutToday = renderQuotaRow('five_hours', '5 小时', "
             "[{used_percent: 22, resets_at: 1}]);\n"
             "const absent = renderQuotaRow('month', '月', []);\n"
-            "console.log(JSON.stringify([withToday, withoutToday, absent]));\n"
+            "const carried = renderQuotaRow('five_hours', '5 小时', "
+            "[{used_percent: 4, today_used_percent: 16, resets_at: 1}]);\n"
+            "console.log(JSON.stringify([withToday, withoutToday, absent, carried]));\n"
         )
         for language, today_label in (("zh", "今日 +"), ("en", "Today +")):
             with self.subTest(language=language):
@@ -6305,10 +6353,13 @@ class QuotaTodaySegmentTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                with_today, without_today, absent = json.loads(result.stdout)
+                with_today, without_today, absent, carried = json.loads(result.stdout)
                 self.assertIn('style="width:22%"', with_today)
                 self.assertIn('class="today" style="left:10%;width:12%"', with_today)
                 self.assertIn(f"{today_label}12.0%", with_today)
+                self.assertIn('style="width:4%"', carried)
+                self.assertIn('class="today" style="left:0%;width:4%"', carried)
+                self.assertIn(f"{today_label}16.0%", carried)
                 self.assertLess(
                     with_today.index("width:22%"), with_today.index('class="today"')
                 )
