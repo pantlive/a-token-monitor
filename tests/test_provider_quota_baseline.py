@@ -15,7 +15,12 @@ from a_token_monitor.provider_quota_baseline import (
     ProviderQuotaBaselineError,
     ProviderQuotaBaselineStore,
 )
-from a_token_monitor.quota import QuotaDayBaseline, QuotaSnapshot, QuotaWindow
+from a_token_monitor.quota import (
+    QuotaDayBaseline,
+    QuotaSnapshot,
+    QuotaWindow,
+    quota_day_today_percent,
+)
 from _platform_support import requires_chmod
 
 
@@ -51,26 +56,47 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
         self.assertEqual(baseline.used_percent, 10.0)
         self.assertEqual(baseline.day_key, local_day_key(self.NOW))
         reopened = ProviderQuotaBaselineStore(self.store.state_dir)
-        self.assertEqual(
-            reopened.observe("claude", "account-a", self.snapshot(22.0))[
-                self.KEY
-            ],
-            baseline,
-        )
+        grown = reopened.observe("claude", "account-a", self.snapshot(22.0))[
+            self.KEY
+        ]
+        self.assertEqual(grown.used_percent, baseline.used_percent)
+        self.assertEqual(quota_day_today_percent(grown), 12.0)
+        reread = ProviderQuotaBaselineStore(self.store.state_dir)
+        stable = reread.observe("claude", "account-a", self.snapshot(22.0))[
+            self.KEY
+        ]
+        self.assertEqual(quota_day_today_percent(stable), 12.0)
+        self.assertEqual(stable, grown)
 
-    def test_growth_and_repeated_observations_do_not_write(self) -> None:
+    def test_repeated_observations_do_not_write_until_high_water_moves(self) -> None:
         baseline = self.observe(self.snapshot())
         # 中文注释：SQLite 的 data_version 可验证另一个连接没有提交实际写入。
         with sqlite3.connect(self.store.database_file) as connection:
             version = connection.execute("PRAGMA data_version").fetchone()
-            for used in (10.0, 22.0, 30.0):
-                self.assertEqual(
-                    self.observe(self.snapshot(used, self.NOW + 600.0)),
-                    baseline,
-                )
+            self.assertEqual(
+                self.observe(self.snapshot(10.0, self.NOW + 600.0)),
+                baseline,
+            )
             self.assertEqual(
                 connection.execute("PRAGMA data_version").fetchone(), version
             )
+            grown = self.observe(self.snapshot(22.0, self.NOW + 600.0))
+            grown_version = connection.execute("PRAGMA data_version").fetchone()
+            self.assertNotEqual(grown_version, version)
+            self.assertEqual(grown.high_water_percent, 22.0)
+            self.assertEqual(
+                self.observe(self.snapshot(22.0, self.NOW + 900.0)),
+                grown,
+            )
+            self.assertEqual(
+                self.observe(self.snapshot(18.0, self.NOW + 1000.0)),
+                grown,
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA data_version").fetchone(),
+                grown_version,
+            )
+            self.assertEqual(quota_day_today_percent(grown), 12.0)
 
     def test_next_local_day_rebuilds_baseline(self) -> None:
         self.observe(self.snapshot())
@@ -79,16 +105,41 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
         self.assertEqual(baseline.used_percent, 22.0)
         self.assertEqual(baseline.day_key, local_day_key(tomorrow))
 
-    def test_changed_reset_starts_at_zero(self) -> None:
+    def test_reset_jitter_keeps_today_and_real_reset_accumulates(self) -> None:
         self.observe(self.snapshot())
-        snapshot = self.snapshot(22.0, self.NOW + 60.0)
-        snapshot = replace(
-            snapshot,
+        grown = self.observe(self.snapshot(22.0, self.NOW + 60.0))
+        jitter = replace(
+            self.snapshot(22.0, self.NOW + 90.0),
             windows=(
-                replace(snapshot.windows[0], resets_at=self.NOW + 1800.0),
+                replace(
+                    self.snapshot().windows[0],
+                    used_percent=22.0,
+                    resets_at=self.NOW + 3600.0 + 30.0,
+                ),
             ),
         )
-        self.assertEqual(self.observe(snapshot).used_percent, 0.0)
+        updated = self.observe(jitter)
+        self.assertEqual(updated.used_percent, grown.used_percent)
+        self.assertEqual(updated.high_water_percent, 22.0)
+        self.assertEqual(updated.resets_at, self.NOW + 3630.0)
+        self.assertEqual(quota_day_today_percent(updated), 12.0)
+
+        observed_at = self.NOW + 3600.0
+        reset = replace(
+            self.snapshot(4.0, observed_at),
+            windows=(
+                replace(
+                    self.snapshot().windows[0],
+                    used_percent=4.0,
+                    resets_at=observed_at + 5 * 3600.0,
+                ),
+            ),
+        )
+        baseline = self.observe(reset)
+        self.assertEqual(baseline.used_percent, 0.0)
+        self.assertEqual(baseline.high_water_percent, 4.0)
+        self.assertEqual(baseline.carried_percent, 12.0)
+        self.assertEqual(quota_day_today_percent(baseline), 16.0)
 
     def test_window_started_today_starts_at_zero(self) -> None:
         snapshot = self.snapshot()
@@ -100,10 +151,13 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
         )
         self.assertEqual(self.observe(snapshot).used_percent, 0.0)
 
-    def test_decreased_usage_rebuilds_baseline(self) -> None:
+    def test_decreased_usage_keeps_the_baseline(self) -> None:
         self.observe(self.snapshot())
-        baseline = self.observe(self.snapshot(5.0, self.NOW + 60.0))
-        self.assertEqual(baseline.used_percent, 5.0)
+        grown = self.observe(self.snapshot(22.0, self.NOW + 30.0))
+        dipped = self.observe(self.snapshot(5.0, self.NOW + 60.0))
+        self.assertEqual(dipped.used_percent, 10.0)
+        self.assertEqual(dipped.high_water_percent, grown.high_water_percent)
+        self.assertEqual(quota_day_today_percent(dipped), 12.0)
 
     def test_old_snapshot_does_not_downgrade_baseline(self) -> None:
         baseline = self.observe(self.snapshot())
@@ -169,6 +223,68 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
                 )
                 self.assertTrue(path.exists())
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_legacy_schema_migrates_and_reread_matches(self) -> None:
+        state = self.root / "legacy"
+        state.mkdir()
+        database = state / "provider_quota.sqlite3"
+        day_key = local_day_key(self.NOW)
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                """
+                CREATE TABLE provider_quota_day_baseline (
+                    product TEXT NOT NULL,
+                    account_key TEXT NOT NULL,
+                    limit_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    used_percent REAL NOT NULL,
+                    resets_at REAL,
+                    observed_at REAL NOT NULL,
+                    PRIMARY KEY (product, account_key, limit_id, name)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO provider_quota_day_baseline (
+                    product, account_key, limit_id, name, day_key,
+                    used_percent, resets_at, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "claude",
+                    "account-a",
+                    *self.KEY,
+                    day_key,
+                    10.0,
+                    self.NOW + 3600.0,
+                    self.NOW,
+                ),
+            )
+        store = ProviderQuotaBaselineStore(state)
+        with sqlite3.connect(database) as connection:
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(provider_quota_day_baseline)"
+                )
+            }
+            stored = connection.execute(
+                "SELECT high_water_percent, carried_percent "
+                "FROM provider_quota_day_baseline"
+            ).fetchone()
+        self.assertIn("high_water_percent", columns)
+        self.assertIn("carried_percent", columns)
+        self.assertEqual(stored, (10.0, 0.0))
+        grown = store.observe("claude", "account-a", self.snapshot(22.0, self.NOW + 60.0))
+        today = quota_day_today_percent(grown[self.KEY])
+        reopened = ProviderQuotaBaselineStore(state)
+        again = reopened.observe(
+            "claude", "account-a", self.snapshot(22.0, self.NOW + 120.0)
+        )
+        self.assertGreater(today, 0.0)
+        self.assertEqual(quota_day_today_percent(again[self.KEY]), today)
 
     def test_initialization_error_is_wrapped(self) -> None:
         path = self.root / "file"

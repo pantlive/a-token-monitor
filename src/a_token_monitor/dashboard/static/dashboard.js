@@ -175,19 +175,20 @@
     if (minutes < 14400) return `${Math.round(minutes / 1440)} 天`;
     return `${Math.round(minutes / 43200)} 个月`;
   };
-  // 中文注释：今日段 = 当前已用 - 本地日基线。没有基线、数据不合法或差值太小时
-  // 返回 null，进度条保持原来的单色渲染。
+  // 中文注释：蓝色段不能超过当前已用。角标用后端的今日值，跨过重置后可以比条更长。
+  // 没有基线、数据不合法或今日值太小时返回 null，进度条保持单色。
   const quotaTodaySegment = (window) => {
     const rawUsed = window ? window.used_percent : null;
     const rawToday = window ? window.today_used_percent : null;
     if (rawUsed === null || rawUsed === undefined || rawToday === null || rawToday === undefined) return null;
     const usedValue = Number(rawUsed);
     const todayValue = Number(rawToday);
-    if (!Number.isFinite(usedValue) || !Number.isFinite(todayValue)) return null;
+    if (!Number.isFinite(usedValue) || !Number.isFinite(todayValue) || usedValue < 0) return null;
+    if (!(todayValue > 0.05)) return null;
     const used = Math.max(0, Math.min(100, usedValue));
-    const today = Math.max(0, Math.min(used, todayValue));
-    if (!(today > 0.05)) return null;
-    return { used, today, start: used - today };
+    const today = Math.max(0, Math.min(100, todayValue));
+    const drawn = Math.min(used, today);
+    return { used, today, drawn, start: Math.max(0, used - drawn) };
   };
   const quotaPercentText = (window) => (window.used_percent === null || window.used_percent === undefined
     ? '待采集'
@@ -234,11 +235,11 @@
     const meta = unknown
       ? `${escapeHtml(stateText)} · ${escapeHtml(quotaDuration(main))}`
       : `重置 ${escapeHtml(formatReset(main.resets_at))} · ${escapeHtml(quotaDuration(main))}`;
-    // 中文注释：今日新增叠加在原有底色之上，蓝色段从基线画到当前已用；
-    // 原有绿/黄/红底色保留，告警语义不变。
+    // 中文注释：今日新增叠加在原有底色之上。蓝色段最长只能到当前已用，
+    // 角标显示真实今日值，重置前的消耗可以比条上画出来的更长。
     const todaySegment = quotaTodaySegment(main);
-    const todayBar = todaySegment
-      ? `<span class="today" style="left:${todaySegment.start}%;width:${todaySegment.today}%"></span>`
+    const todayBar = todaySegment && todaySegment.drawn > 0
+      ? `<span class="today" style="left:${todaySegment.start}%;width:${todaySegment.drawn}%"></span>`
       : '';
     const todayBadge = todaySegment
       ? `<span class="quota-today">今日 +${escapeHtml(formatPercent(todaySegment.today))}</span>`

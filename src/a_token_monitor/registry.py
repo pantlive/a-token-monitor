@@ -13,13 +13,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from .local_time import local_day_key
 from .multi_models import SessionStatus, TrackedSession
 from .quota import (
     QuotaDayBaseline,
     QuotaSnapshot,
     QuotaWindow,
-    resolve_quota_day_baseline,
+    advance_quota_day_baseline,
 )
 
 
@@ -129,6 +128,8 @@ class MultiSessionRegistry:
                         used_percent REAL NOT NULL,
                         resets_at REAL,
                         observed_at REAL NOT NULL,
+                        high_water_percent REAL,
+                        carried_percent REAL NOT NULL DEFAULT 0,
                         PRIMARY KEY (limit_id, name)
                     );
                     CREATE TABLE IF NOT EXISTS resume_attempts (
@@ -147,6 +148,7 @@ class MultiSessionRegistry:
                 )
                 self._ensure_session_columns(connection)
                 self._backfill_recovery_fields(connection)
+                self._ensure_quota_day_baseline_columns(connection)
             self._protect_database_files()
         except (OSError, sqlite3.Error) as error:
             raise RegistryError(f"无法初始化多会话状态库: {error}") from error
@@ -171,6 +173,32 @@ class MultiSessionRegistry:
                 connection.execute(
                     f"ALTER TABLE sessions ADD COLUMN {name} {column_type}"
                 )
+
+    @staticmethod
+    def _ensure_quota_day_baseline_columns(connection: sqlite3.Connection) -> None:
+        """为已有状态库补上最高水位和已结转消耗，升级当天不回溯旧消耗。"""
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(quota_day_baseline)")
+        }
+        if "high_water_percent" not in columns:
+            connection.execute(
+                "ALTER TABLE quota_day_baseline ADD COLUMN high_water_percent REAL"
+            )
+        if "carried_percent" not in columns:
+            connection.execute(
+                "ALTER TABLE quota_day_baseline "
+                "ADD COLUMN carried_percent REAL NOT NULL DEFAULT 0"
+            )
+        # 中文注释：旧行只存了起点。最高水位先等于起点，下一次轮询再往上累计。
+        connection.execute(
+            """
+            UPDATE quota_day_baseline
+            SET high_water_percent = used_percent
+            WHERE high_water_percent IS NULL
+            """
+        )
 
     @staticmethod
     def _backfill_recovery_fields(connection: sqlite3.Connection) -> None:
@@ -592,11 +620,8 @@ class MultiSessionRegistry:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 previous_baselines = {
-                    (str(row["limit_id"]), str(row["name"])): QuotaDayBaseline(
-                        day_key=str(row["day_key"]),
-                        used_percent=float(row["used_percent"]),
-                        resets_at=self._optional_float(row["resets_at"]),
-                        observed_at=float(row["observed_at"]),
+                    (str(row["limit_id"]), str(row["name"])): (
+                        self._quota_day_baseline_from_row(row)
                     )
                     for row in connection.execute(
                         "SELECT * FROM quota_day_baseline"
@@ -653,7 +678,7 @@ class MultiSessionRegistry:
                         and snapshot.observed_at < previous.observed_at - 1.0
                     ):
                         continue
-                    baseline = resolve_quota_day_baseline(
+                    baseline = advance_quota_day_baseline(
                         window,
                         snapshot.observed_at,
                         previous,
@@ -664,21 +689,26 @@ class MultiSessionRegistry:
                         """
                         INSERT INTO quota_day_baseline (
                             limit_id, name, day_key, used_percent,
-                            resets_at, observed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?)
+                            resets_at, observed_at, high_water_percent,
+                            carried_percent
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(limit_id, name) DO UPDATE SET
                             day_key=excluded.day_key,
                             used_percent=excluded.used_percent,
                             resets_at=excluded.resets_at,
-                            observed_at=excluded.observed_at
+                            observed_at=excluded.observed_at,
+                            high_water_percent=excluded.high_water_percent,
+                            carried_percent=excluded.carried_percent
                         """,
                         (
                             window.limit_id,
                             window.name,
-                            local_day_key(snapshot.observed_at),
-                            baseline,
-                            window.resets_at,
-                            snapshot.observed_at,
+                            baseline.day_key,
+                            baseline.used_percent,
+                            baseline.resets_at,
+                            baseline.observed_at,
+                            baseline.high_water_percent,
+                            baseline.carried_percent,
                         ),
                     )
         except sqlite3.Error as error:
@@ -746,14 +776,30 @@ class MultiSessionRegistry:
         except sqlite3.Error as error:
             raise RegistryError(f"无法读取额度日基线: {error}") from error
         return {
-            (str(row["limit_id"]), str(row["name"])): QuotaDayBaseline(
-                day_key=str(row["day_key"]),
-                used_percent=float(row["used_percent"]),
-                resets_at=self._optional_float(row["resets_at"]),
-                observed_at=float(row["observed_at"]),
+            (str(row["limit_id"]), str(row["name"])): (
+                self._quota_day_baseline_from_row(row)
             )
             for row in rows
         }
+
+    @staticmethod
+    def _quota_day_baseline_from_row(row: sqlite3.Row) -> QuotaDayBaseline:
+        """读取一行今日状态；旧库缺列时最高水位等于起点，已结转消耗为 0。"""
+
+        names = set(row.keys())
+        used_percent = float(row["used_percent"])
+        high_water = row["high_water_percent"] if "high_water_percent" in names else None
+        carried = row["carried_percent"] if "carried_percent" in names else None
+        return QuotaDayBaseline(
+            day_key=str(row["day_key"]),
+            used_percent=used_percent,
+            resets_at=MultiSessionRegistry._optional_float(row["resets_at"]),
+            observed_at=float(row["observed_at"]),
+            high_water_percent=(
+                None if high_water is None else float(high_water)
+            ),
+            carried_percent=0.0 if carried is None else float(carried),
+        )
 
     def claim_due_session(
         self,
