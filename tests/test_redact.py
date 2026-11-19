@@ -6,11 +6,14 @@ import http.client
 import http.server
 import io
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from typing import Any
+
+from _platform_support import requires_chmod
 
 from a_token_monitor.redact.control import RedactControlError, RedactController
 from a_token_monitor.redact.events import RedactEvent
@@ -147,6 +150,7 @@ class RuleTests(_TempState):
         self.assertEqual(redactor.restore(redacted), redacted)
         self.assertFalse(self.store.vault_path.exists())
 
+    @requires_chmod
     def test_vault_is_private(self) -> None:
         redactor = self.redactor()
         redactor.redact(GITHUB)
@@ -760,7 +764,8 @@ class EventLogTests(_TempState):
         self.assertEqual(event["findings"], len(findings))
         self.assertEqual(event["secret_bytes"], sum(finding.size for finding in findings))
         for path in (self.store.events.events_path, self.store.events.stats_path):
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name == "posix":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             content = path.read_text(encoding="utf-8")
             self.assertNotIn(GITHUB, content)
             self.assertNotIn(address, content)

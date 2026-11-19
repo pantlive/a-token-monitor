@@ -567,7 +567,10 @@ class QuotaDayBaselineRegistryTests(unittest.TestCase):
             state.mkdir()
             database = state / "monitor.sqlite3"
             day_key = local_day_key(self.OBSERVED_AT)
-            with sqlite3.connect(database) as connection:
+            # 中文注释：sqlite3 的 with 只提交事务，不关闭连接。Windows 不能删除
+            # 仍被打开的数据库文件，临时目录清理会因此失败。
+            connection = sqlite3.connect(database)
+            try:
                 connection.execute(
                     """
                     CREATE TABLE quota_day_baseline (
@@ -596,6 +599,9 @@ class QuotaDayBaselineRegistryTests(unittest.TestCase):
                         self.OBSERVED_AT,
                     ),
                 )
+                connection.commit()
+            finally:
+                connection.close()
             registry = MultiSessionRegistry(state)
             migrated = registry.load_quota_day_baseline(day_key)[("codex", "primary")]
             self.assertEqual(migrated.high_water_percent, 10.0)

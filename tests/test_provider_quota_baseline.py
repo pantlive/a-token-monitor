@@ -71,7 +71,9 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
     def test_repeated_observations_do_not_write_until_high_water_moves(self) -> None:
         baseline = self.observe(self.snapshot())
         # 中文注释：SQLite 的 data_version 可验证另一个连接没有提交实际写入。
-        with sqlite3.connect(self.store.database_file) as connection:
+        # 这个连接必须显式关闭：with 不会关连接，Windows 上会锁住临时库文件。
+        connection = sqlite3.connect(self.store.database_file)
+        try:
             version = connection.execute("PRAGMA data_version").fetchone()
             self.assertEqual(
                 self.observe(self.snapshot(10.0, self.NOW + 600.0)),
@@ -97,6 +99,8 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
                 grown_version,
             )
             self.assertEqual(quota_day_today_percent(grown), 12.0)
+        finally:
+            connection.close()
 
     def test_next_local_day_rebuilds_baseline(self) -> None:
         self.observe(self.snapshot())
@@ -229,7 +233,10 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
         state.mkdir()
         database = state / "provider_quota.sqlite3"
         day_key = local_day_key(self.NOW)
-        with sqlite3.connect(database) as connection:
+        # 中文注释：sqlite3 的 with 不关闭连接。Windows 上未关闭的句柄会让
+        # 临时目录删不掉数据库文件。
+        connection = sqlite3.connect(database)
+        try:
             connection.execute(
                 """
                 CREATE TABLE provider_quota_day_baseline (
@@ -262,8 +269,12 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
                     self.NOW,
                 ),
             )
+            connection.commit()
+        finally:
+            connection.close()
         store = ProviderQuotaBaselineStore(state)
-        with sqlite3.connect(database) as connection:
+        connection = sqlite3.connect(database)
+        try:
             columns = {
                 row[1]
                 for row in connection.execute(
@@ -274,6 +285,8 @@ class ProviderQuotaBaselineTests(unittest.TestCase):
                 "SELECT high_water_percent, carried_percent "
                 "FROM provider_quota_day_baseline"
             ).fetchone()
+        finally:
+            connection.close()
         self.assertIn("high_water_percent", columns)
         self.assertIn("carried_percent", columns)
         self.assertEqual(stored, (10.0, 0.0))

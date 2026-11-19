@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,8 +45,15 @@ class ActivityIndexCacheTests(unittest.TestCase):
                 return {"call": str(len(calls))}
 
             cache.get(root, loader)
-            # 会话根目录 mtime 变化后会重新扫描，避免目录被替换后命中旧索引。
+            # 会话根目录身份变化后会重新扫描，避免目录被替换后命中旧索引。
+            # Windows 创建子目录不一定更新父目录 mtime（3.10 上因此命中旧索引），
+            # 这里把 mtime 往前拨，锁定的是缓存行为而不是文件系统副作用。
             (root / "new-session").mkdir()
+            stamped = root.stat()
+            os.utime(
+                root,
+                ns=(stamped.st_atime_ns, stamped.st_mtime_ns + 1_000_000_000),
+            )
             cache.get(root, loader)
             self.assertEqual(calls, [1, 1])
 
