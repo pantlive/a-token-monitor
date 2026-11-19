@@ -31,6 +31,13 @@ from ..providers import ProviderHomes, clear_quota_caches, home_keys
 from ..redact.control import RedactControlError, RedactController
 from ..registry import RegistryError
 from ..provider_quota_baseline import ProviderQuotaBaselineStore
+from ..quota_compare import _prepare_accounts, build_quota_compare
+from ..quota_cycles import QuotaCycleError, QuotaCycleStore, normalize_period
+from ..subscription_pricing import (
+    SubscriptionPriceError,
+    save_override,
+    snapshot as subscription_snapshot,
+)
 from ..retention import HistoryDataManager, RetentionController, RetentionError
 from ..scan_dirs import PROVIDER_SPECS, ScanDirsController, ScanDirsError
 from ..speed import SpeedTracker
@@ -89,6 +96,7 @@ _DASHBOARD_PAGE_PATHS: tuple[str, ...] = (
     "/traffic",
     "/usage",
     "/insights",
+    "/quota-compare",
     "/alerts",
     "/search",
     "/disk",
@@ -132,6 +140,10 @@ class _DashboardContext:
     retention: RetentionController | None = None
     redact: RedactController | None = None
     quota_baselines: ProviderQuotaBaselineStore | None = None
+    quota_cycles: QuotaCycleStore | None = None
+    state_dir: Path | None = None
+    usage_index: Path | None = None
+    writes_enabled: bool = False
     state_cache_lock: Lock = field(default_factory=Lock, repr=False)
     state_cache: dict[str, Any] = field(default_factory=dict, repr=False)
     packages_lock: Lock = field(default_factory=Lock, repr=False)
@@ -264,6 +276,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/usage/search": "_get_usage_search",
         "/api/housekeeping": "_get_housekeeping",
         "/api/insights": "_get_insights",
+        "/api/quota-compare": "_get_quota_compare",
+        "/api/subscription-prices": "_get_subscription_prices",
         "/api/update": "_get_update",
         "/api/packages": "_get_packages",
         "/api/redact": "_get_redact",
@@ -281,6 +295,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/usage/search": "_head_usage_search",
         "/api/housekeeping": "_head_housekeeping",
         "/api/insights": "_head_insights",
+        "/api/quota-compare": "_head_quota_compare",
+        "/api/subscription-prices": "_head_subscription_prices",
         "/api/update": "_head_update",
         "/api/packages": "_head_packages",
         "/api/redact": "_head_redact",
@@ -293,6 +309,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         "/api/update": "_post_update",
         "/api/packages": "_post_packages",
         "/api/redact": "_post_redact",
+        "/api/subscription-prices": "_post_subscription_prices",
     }
 
     def do_GET(self) -> None:
@@ -783,6 +800,180 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             status=200,
             payload={"updated_at": time.time(), "insights": insights},
         )
+
+    def _compare_period(self) -> str:
+        """读取并校验额度对比的周期参数。"""
+
+        raw = parse_qs(self._query).get("period", [""])[0]
+        if normalize_period(str(raw)) is None:
+            raise ValueError("period 只能是 5h 或 week")
+        return str(raw)
+
+    def _get_quota_compare(self) -> None:
+        """GET /api/quota-compare：当前窗口对比和最近几个周期。"""
+
+        try:
+            period = self._compare_period()
+        except ValueError as error:
+            self._send_json(
+                status=400,
+                payload={"error": "invalid_period", "message": str(error)},
+            )
+            return
+        ctx = self.context
+        state = ctx.state_payload(force=False)
+        try:
+            payload = build_quota_compare(
+                period,
+                accounts=state.get("accounts") or [],
+                cycle_store=ctx.quota_cycles,
+                usage_index=ctx.usage_index,
+                state_dir=ctx.state_dir,
+            )
+        except (QuotaCycleError, SubscriptionPriceError) as error:
+            self._send_json(
+                status=503,
+                payload={"error": "quota_compare_unavailable", "message": str(error)},
+            )
+            return
+        self._send_json(status=200, payload=payload)
+
+    def _head_quota_compare(self) -> None:
+        """HEAD /api/quota-compare：只回响应头，不扫描额度。"""
+
+        try:
+            period = self._compare_period()
+        except ValueError as error:
+            self._send_json(
+                status=400,
+                payload={"error": "invalid_period", "message": str(error)},
+                include_body=False,
+            )
+            return
+        self._send_json(
+            status=200,
+            payload={"period": period, "rows": [], "history": []},
+            include_body=False,
+        )
+
+    def _subscription_accounts(self) -> list[dict[str, object]]:
+        """从当前面板状态抽出三家订阅账号，供月费表单使用。"""
+
+        ctx = self.context
+        try:
+            state = ctx.state_payload(force=False)
+        except Exception:
+            ctx.logger.exception("读取订阅月费账号失败")
+            return []
+        accounts = state.get("accounts") if isinstance(state, dict) else None
+        if not isinstance(accounts, list):
+            return []
+        return [
+            {
+                "product": item["product"],
+                "account_key": item["account_key"],
+                "display_name": item["display_name"],
+                "detected_plan": item["detected_plan"],
+            }
+            for item in _prepare_accounts(accounts)
+        ]
+
+    def _get_subscription_prices(self) -> None:
+        """GET /api/subscription-prices：默认价、按账号覆盖和是否可写。"""
+
+        ctx = self.context
+        try:
+            payload = subscription_snapshot(
+                ctx.state_dir,
+                self._subscription_accounts() if ctx.state_dir is not None else [],
+                writable=ctx.writes_enabled,
+            )
+        except SubscriptionPriceError as error:
+            self._send_json(
+                status=503,
+                payload={
+                    "error": "subscription_prices_unavailable",
+                    "message": str(error),
+                },
+            )
+            return
+        self._send_json(status=200, payload=payload)
+
+    def _head_subscription_prices(self) -> None:
+        """HEAD /api/subscription-prices：只回响应头，不读账号状态。"""
+
+        self._send_json(
+            status=200,
+            payload={
+                "available": self.context.state_dir is not None,
+                "accounts": [],
+                "plans": {},
+            },
+            include_body=False,
+        )
+
+    def _post_subscription_prices(self) -> None:
+        """POST /api/subscription-prices：按账号保存套餐和月费。"""
+
+        ctx = self.context
+        if ctx.state_dir is None:
+            self._send_json(
+                status=503,
+                payload={
+                    "error": "subscription_prices_unavailable",
+                    "message": "该运行模式没有状态目录，不能保存订阅月费",
+                },
+            )
+            return
+        if not ctx.writes_enabled:
+            self._send_json(
+                status=403,
+                payload={
+                    "error": "read_only",
+                    "message": "Dashboard 开放到了非本机地址，订阅月费只读；请在本机修改。",
+                },
+            )
+            return
+        try:
+            body = self._read_json_body()
+            raw_plan = body.get("plan")
+            if raw_plan is None or raw_plan == "":
+                plan: str | None = None
+            elif isinstance(raw_plan, str):
+                plan = raw_plan
+            else:
+                raise SubscriptionPriceError("套餐名无法识别")
+            save_override(
+                ctx.state_dir,
+                product=str(body.get("product") or ""),
+                account_key=str(body.get("account_key") or ""),
+                plan=plan,
+                monthly_usd=body.get("monthly_usd"),
+            )
+            payload = subscription_snapshot(
+                ctx.state_dir,
+                self._subscription_accounts(),
+                writable=True,
+            )
+        except AlertStoreError as error:
+            self._send_json(
+                status=400,
+                payload={
+                    "error": "invalid_subscription_price",
+                    "message": str(error),
+                },
+            )
+            return
+        except SubscriptionPriceError as error:
+            self._send_json(
+                status=400,
+                payload={
+                    "error": "invalid_subscription_price",
+                    "message": str(error),
+                },
+            )
+            return
+        self._send_json(status=200, payload={"ok": True, **payload})
 
 
     def _head_alerts(self) -> None:
@@ -1630,6 +1821,10 @@ def _make_handler(
     allow_package_cleanup: bool = False,
     redact: RedactController | None = None,
     quota_baselines: ProviderQuotaBaselineStore | None = None,
+    quota_cycles: QuotaCycleStore | None = None,
+    state_dir: Path | None = None,
+    usage_index: Path | None = None,
+    writes_enabled: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """为一个 Dashboard 服务创建绑定了依赖的请求处理器类型。"""
 
@@ -1654,6 +1849,10 @@ def _make_handler(
         retention=retention,
         redact=redact,
         quota_baselines=quota_baselines,
+        quota_cycles=quota_cycles,
+        state_dir=state_dir,
+        usage_index=usage_index,
+        writes_enabled=writes_enabled,
     )
     return type(
         "DashboardRequestHandler",

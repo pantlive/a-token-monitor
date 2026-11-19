@@ -111,6 +111,25 @@ __UPDATE_PANEL__
       </section>
     </section>
 
+    <section class="page-view" id="quota-compare">
+      <section class="page-hero">
+        <div>
+          <div class="eyebrow">Quota compare</div>
+          <h1>额度对比</h1>
+          <p class="section-description">按账号对比 Claude Code、Codex 和 Grok 的 5 小时窗口和周窗口，看消耗速度、每 1% 额度的 API 等价美元，以及最近几个周期。</p>
+        </div>
+        <div class="hero-context"><span class="section-count" id="quota-compare-count">等待加载</span><button id="quota-compare-refresh" class="refresh-button" type="button">刷新</button></div>
+      </section>
+      <section class="panel section-block">
+        <div class="usage-tabs" id="quota-compare-tabs">
+          <button class="usage-tab selected" type="button" data-quota-period="5h">5 小时</button>
+          <button class="usage-tab" type="button" data-quota-period="week">周</button>
+        </div>
+        <div id="quota-compare-current"><div class="empty-state">正在读取额度对比…</div></div>
+        <div id="quota-compare-history"></div>
+      </section>
+    </section>
+
     <section class="page-view" id="alert-history">
       <section class="page-hero">
         <div>

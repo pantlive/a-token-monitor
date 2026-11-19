@@ -626,6 +626,78 @@ def _quota_from_unified_log(
     return _quota_from_billing(latest, latest_ts)
 
 
+def read_grok_billing_snapshots(
+    grok_home: Path,
+    *,
+    offset: int = 0,
+    maximum_bytes: int | None = None,
+) -> tuple[tuple[QuotaSnapshot, ...], int]:
+    """从 unified.jsonl 的 ``offset`` 起读取新增的 billing 额度快照。
+
+    只消费完整行，返回 ``(快照, 下次偏移)``。半行留到文件继续追加后再解析，
+    避免把写到一半的日志当成一次采样。``maximum_bytes`` 用来分块回填，
+    避免一次把整份历史日志读进内存。
+    """
+
+    if offset < 0:
+        raise ValueError("offset 不能小于 0")
+    if maximum_bytes is not None and maximum_bytes <= 0:
+        raise ValueError("maximum_bytes 必须大于 0")
+    log_path = grok_unified_log(grok_home)
+    try:
+        handle = log_path.open("rb")
+    except OSError:
+        return (), offset
+    snapshots: list[QuotaSnapshot] = []
+    next_offset = offset
+    with handle:
+        try:
+            size = os.fstat(handle.fileno()).st_size
+        except OSError:
+            return (), offset
+        if offset > size:
+            offset = 0
+        try:
+            handle.seek(offset)
+            raw = (
+                handle.read(maximum_bytes)
+                if maximum_bytes is not None
+                else handle.read()
+            )
+        except OSError:
+            return (), offset
+    if not raw:
+        return (), offset
+    usable = raw
+    if not raw.endswith(b"\n"):
+        last_newline = raw.rfind(b"\n")
+        if last_newline < 0:
+            return (), offset
+        usable = raw[: last_newline + 1]
+    next_offset = offset + len(usable)
+    for raw_line in usable.splitlines():
+        if _GROK_BILLING not in raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("msg") != "billing: fetched credits config":
+            continue
+        ctx = event.get("ctx")
+        if not isinstance(ctx, Mapping):
+            continue
+        timestamp = _event_timestamp(event)
+        if timestamp is None:
+            continue
+        snapshot = _quota_from_billing(ctx, timestamp)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return tuple(snapshots), next_offset
+
+
 def _latest_billing_event(
     handle: Any,
     size: int,

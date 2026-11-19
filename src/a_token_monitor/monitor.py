@@ -11,7 +11,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from .app_server import AppServerClient, AppServerConfig, AppServerError
 from .alerts import TrafficAlertStore
@@ -35,7 +36,8 @@ from .multi_models import (
 from .process_backend import launch_command
 from .quota import QuotaSnapshot, merge_sparse_update
 from .quota_fallback import JsonlQuotaFallbackReader, recent_session_paths
-from .providers import PROVIDER_SPECS
+from .providers import PROVIDER_SPECS, resolve_provider_homes
+from .quota_cycles import QuotaCycleError, QuotaCycleStore, QuotaSampler, record_codex_quota
 from .registry import MultiSessionRegistry, RegistryError
 from .retention import (
     DEFAULT_SESSION_RETENTION_DAYS,
@@ -201,6 +203,10 @@ class MultiSessionMonitor:
         process_scanner: ProcessScanner | None = None,
         jsonl_reader: JsonlSessionReader | None = None,
         health: HealthTracker | None = None,
+        cycle_store: QuotaCycleStore | None = None,
+        usage_index_path: Path | None = None,
+        enable_quota_sampler: bool = False,
+        quota_sampler_homes: Callable[[], Mapping[str, Sequence[Path]]] | None = None,
     ) -> None:
         self.registry = registry
         self.config = config or MonitorConfig()
@@ -242,6 +248,13 @@ class MultiSessionMonitor:
         self._dashboard: DashboardServer | None = None
         self._stop_event = threading.Event()
         self._started = False
+        # 中文注释：单账号 run() 会打开采样；测试和多账号子监控默认关闭，
+        # 避免 start() 去打 Claude / Grok 的额度接口。
+        self.cycle_store = cycle_store
+        self.usage_index_path = usage_index_path
+        self.enable_quota_sampler = enable_quota_sampler
+        self._quota_sampler_homes = quota_sampler_homes
+        self._quota_sampler: QuotaSampler | None = None
 
     @property
     def quota(self) -> QuotaSnapshot | None:
@@ -288,13 +301,22 @@ class MultiSessionMonitor:
                 self.config.account_name,
                 error,
             )
+        if self.enable_quota_sampler:
+            self._ensure_cycle_store()
         self._started = True
         self.refresh_quota(force=True)
+        # 中文注释：停止信号已经置位时不再拉起线程，关闭路径会马上 join。
+        if self.enable_quota_sampler and not self._stop_event.is_set():
+            self._start_quota_sampler()
 
     def close(self) -> None:
         """停止主循环使用的 App Server；不强杀用户的 Codex 进程。"""
 
         self._stop_event.set()
+        sampler = self._quota_sampler
+        self._quota_sampler = None
+        if sampler is not None:
+            sampler.close()
         for worker in tuple(self._resume_workers.values()):
             worker.thread.join(timeout=0.2)
         self._resume_workers.clear()
@@ -308,6 +330,7 @@ class MultiSessionMonitor:
     def run(self) -> int:
         """持续监控直到收到 Ctrl-C。"""
 
+        self.enable_quota_sampler = True
         lock_store = StateStore(self.registry.state_dir)
         try:
             with lock_store.lock():
@@ -1130,6 +1153,8 @@ class MultiSessionMonitor:
                 self.registry.save_quota(updated)
             except RegistryError as error:
                 self.logger.warning("保存额度通知失败: %s", error)
+                return
+            self._record_codex_quota(updated)
             return
         if method in {"thread/status/changed", "thread/updated"}:
             self._last_reconcile_at = None
@@ -1140,6 +1165,59 @@ class MultiSessionMonitor:
         with self._quota_lock:
             self._quota = snapshot
         self.registry.save_quota(snapshot)
+        self._record_codex_quota(snapshot)
+
+    def _codex_account_key(self) -> str:
+        """额度周期用的账号键，和面板归组规则一致。"""
+
+        account_id = self.config.account_id
+        if isinstance(account_id, str) and account_id.strip():
+            return account_id.strip()
+        return f"profile:{self.config.account_name}"
+
+    def _usage_index_path(self) -> Path:
+        if self.usage_index_path is not None:
+            return self.usage_index_path
+        return self.registry.state_dir / "usage-index.sqlite3"
+
+    def _ensure_cycle_store(self) -> None:
+        if self.cycle_store is not None:
+            return
+        try:
+            self.cycle_store = QuotaCycleStore(self.registry.state_dir)
+        except QuotaCycleError:
+            self.logger.warning("额度周期库不可用，Codex 周期采样已跳过")
+
+    def _default_sampler_homes(self) -> Mapping[str, Sequence[Path]]:
+        return resolve_provider_homes(None, auto_detect=True)
+
+    def _start_quota_sampler(self) -> None:
+        """本进程负责 Claude / Grok 的后台采样时才启动线程。"""
+
+        if self._quota_sampler is not None and self._quota_sampler.is_running:
+            return
+        self._ensure_cycle_store()
+        index = self._usage_index_path()
+        self.usage_index_path = index
+        homes = self._quota_sampler_homes or self._default_sampler_homes
+        self._quota_sampler = QuotaSampler(
+            self.registry.state_dir,
+            homes,
+            usage_index=index,
+            cycle_store=self.cycle_store,
+            logger=self.logger,
+        )
+        self._quota_sampler.start()
+
+    def _record_codex_quota(self, snapshot: QuotaSnapshot) -> None:
+        """Codex 额度轮询和实时通知共用这一处写入周期表。"""
+
+        record_codex_quota(
+            self.cycle_store,
+            self._codex_account_key(),
+            snapshot,
+            usage_index=self._usage_index_path(),
+        )
 
     def _read_fallback_quota(self, now: float) -> QuotaSnapshot | None:
         """App Server 不可达时读取活动或最近 JSONL 的额度事件。"""

@@ -22,12 +22,13 @@ from ..providers import (
     resolve_provider_homes,
     update_provider_homes,
 )
-from ..redact.control import RedactController
+from ..redact.control import RedactController, dashboard_writable
 from ..registry import MultiSessionRegistry
 from ..provider_quota_baseline import (
     ProviderQuotaBaselineError,
     ProviderQuotaBaselineStore,
 )
+from ..quota_cycles import QuotaCycleError, QuotaCycleStore
 from ..retention import HistoryDataManager, RetentionController
 from ..scan_dirs import ScanDirsController
 from ..traffic import TrafficMonitor
@@ -149,11 +150,16 @@ class DashboardServer:
         )
         # 中文注释：非 Codex 额度按面板观察建立每日基线；没有状态目录时保持原行为。
         self.quota_baselines: ProviderQuotaBaselineStore | None = None
+        self.quota_cycles: QuotaCycleStore | None = None
         if self.state_dir is not None:
             try:
                 self.quota_baselines = ProviderQuotaBaselineStore(self.state_dir)
             except ProviderQuotaBaselineError:
                 self.logger.warning("provider 今日额度基线库不可用，已降级")
+            try:
+                self.quota_cycles = QuotaCycleStore(self.state_dir)
+            except QuotaCycleError:
+                self.logger.warning("额度周期库不可用，已降级")
         self.updates = UpdateChecker(
             state_dir=self.state_dir,
             interval=self.config.update_interval,
@@ -213,6 +219,14 @@ class DashboardServer:
             allow_package_cleanup=self.config.allow_package_cleanup,
             redact=self.redact,
             quota_baselines=self.quota_baselines,
+            quota_cycles=self.quota_cycles,
+            state_dir=self.state_dir,
+            usage_index=(
+                self.state_dir / "usage-index.sqlite3"
+                if self.state_dir is not None
+                else None
+            ),
+            writes_enabled=dashboard_writable(self.config.host),
         )
         server = _DashboardHTTPServer(
             (self.config.host, self.config.port),
