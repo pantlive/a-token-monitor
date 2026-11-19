@@ -64,11 +64,25 @@ class RetentionSettings:
         }
 
     def save(self, path: Path) -> None:
-        """原子保存配置并限制为当前用户可读写。"""
+        """原子保存配置并限制为当前用户可读写。
+
+        同一份 settings.json 还放着订阅月费等其它键。这里只覆盖保留期自己的
+        字段，已经写在文件里的其它键保持不动。文件损坏时仍按本配置重写。
+        """
 
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        document: dict[str, object] = {}
+        try:
+            raw_payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raw_payload = None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raw_payload = None
+        if isinstance(raw_payload, dict):
+            document = dict(raw_payload)
+        document.update(self.to_dict())
         payload = json.dumps(
-            self.to_dict(), ensure_ascii=False, indent=2, sort_keys=True
+            document, ensure_ascii=False, indent=2, sort_keys=True
         )
         temporary_path = path.with_suffix(".json.tmp")
         temporary_path.write_text(f"{payload}\n", encoding="utf-8")

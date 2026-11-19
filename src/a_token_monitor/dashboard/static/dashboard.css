@@ -5,6 +5,7 @@
     html[data-page="traffic"] #traffic,
     html[data-page="usage"] #usage,
     html[data-page="insights"] #insights,
+    html[data-page="quota-compare"] #quota-compare,
     html[data-page="alert-history"] #alert-history,
     html[data-page="usage-search"] #usage-search,
     html[data-page="housekeeping"] #housekeeping { display: block; }
@@ -297,3 +298,7 @@
     .account-speed .speed-note { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
     .account-speed.is-stale .speed-tps { color: var(--muted-strong); }
     .kpi-unit { margin-left: 5px; color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: 0; }
+    .quota-trend { margin-top: 22px; }
+    .quota-trend h3 { margin: 0 0 10px; font-size: 15px; }
+    .quota-note { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .quota-flag { color: var(--yellow); }

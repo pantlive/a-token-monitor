@@ -560,12 +560,102 @@
       box.innerHTML = `<div class="empty-state"><span class="empty-title">测试失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
     }
   };
+  const renderSubscriptionPrices = (payload) => {
+    const container = document.getElementById('subscription-price-content');
+    const countLabel = document.getElementById('subscription-price-count');
+    if (!container) return;
+    if (!payload || payload.available === false) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">该运行模式不支持在线管理订阅月费</span></div>';
+      if (countLabel) countLabel.textContent = '不可用';
+      return;
+    }
+    const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+    if (countLabel) countLabel.textContent = `${accounts.length} 个账号`;
+    if (!accounts.length) {
+      container.innerHTML = '<div class="empty-state"><span class="empty-title">还没有可设置的订阅账号</span><span class="empty-hint">监控跑起来并读到 Claude Code、Codex 或 Grok 后会出现在这里。</span></div>';
+      return;
+    }
+    const plans = payload.plans || {};
+    const writable = payload.writable !== false;
+    const cards = accounts.map((account) => {
+      const options = [{ id: '', label: '沿用检测到的套餐' }].concat(plans[account.product] || []);
+      const selected = account.override_plan || '';
+      const optionHtml = options.map((plan) => {
+        const picked = plan.id === selected ? ' selected' : '';
+        const price = plan.monthly_usd === undefined ? '' : ` · $${plan.monthly_usd}`;
+        return `<option value="${escapeHtml(plan.id)}"${picked}>${escapeHtml(plan.label || plan.id)}${plan.id ? price : ''}</option>`;
+      }).join('');
+      const monthly = account.override_monthly_usd === null || account.override_monthly_usd === undefined
+        ? ''
+        : String(account.override_monthly_usd);
+      const detected = account.detected_plan_label || account.detected_plan || '未读到';
+      const unknown = account.unknown_plan ? '<div class="cell-sub quota-flag">未知套餐，请填写月费</div>' : '';
+      const effective = account.monthly_usd === null || account.monthly_usd === undefined
+        ? '未设置'
+        : `$${account.monthly_usd}`;
+      return `<tr data-product="${escapeHtml(account.product)}" data-account="${escapeHtml(account.account_key)}">
+        <td>${escapeHtml(account.product_label || account.product)}<div class="cell-sub">${escapeHtml(account.display_name || account.account_key)}</div>${unknown}</td>
+        <td>${escapeHtml(detected)}</td>
+        <td><select class="subscription-plan"${writable ? '' : ' disabled'}>${optionHtml}</select></td>
+        <td><input class="subscription-monthly" type="number" min="0" step="0.01" placeholder="${escapeHtml(effective)}" value="${escapeHtml(monthly)}"${writable ? '' : ' disabled'}></td>
+        <td><button class="subscription-save" type="button"${writable ? '' : ' disabled'}>保存月费</button> <button class="subscription-clear" type="button"${writable ? '' : ' disabled'}>沿用默认价</button></td>
+      </tr>`;
+    }).join('');
+    const locked = writable ? '' : '<p class="quota-note">Dashboard 开放到了非本机地址，订阅月费只读；请在本机修改。</p>';
+    container.innerHTML = `${locked}<div class="table-scroll"><table class="usage-table"><thead><tr>
+      <th>账号</th><th>检测到的套餐</th><th>套餐</th><th>月费（美元）</th><th></th>
+    </tr></thead><tbody>${cards}</tbody></table></div><div id="subscription-price-result"></div>`;
+    container.querySelectorAll('.subscription-save, .subscription-clear').forEach((button) => {
+      button.addEventListener('click', () => saveSubscriptionPrice(button));
+    });
+  };
+  const refreshSubscriptionPrices = async () => {
+    const container = document.getElementById('subscription-price-content');
+    try {
+      const response = await fetch('/api/subscription-prices', { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      renderSubscriptionPrices(payload);
+    } catch (error) {
+      if (container) container.innerHTML = `<div class="empty-state"><span class="empty-title">读取订阅月费失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
+  const saveSubscriptionPrice = async (button) => {
+    const row = button.closest('tr');
+    const result = document.getElementById('subscription-price-result');
+    if (!row) return;
+    const clearing = button.classList.contains('subscription-clear');
+    const plan = clearing ? null : (row.querySelector('.subscription-plan')?.value || null);
+    const rawMonthly = clearing ? '' : String(row.querySelector('.subscription-monthly')?.value || '').trim();
+    const body = {
+      product: row.dataset.product,
+      account_key: row.dataset.account,
+      plan,
+      monthly_usd: rawMonthly === '' ? null : Number(rawMonthly)
+    };
+    try {
+      const response = await fetch('/api/subscription-prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      renderSubscriptionPrices(payload);
+      const box = document.getElementById('subscription-price-result');
+      if (box) box.innerHTML = '<div class="usage-note">已保存</div>';
+    } catch (error) {
+      if (result) result.innerHTML = `<div class="empty-state"><span class="empty-title">保存月费失败</span><span class="empty-hint">${escapeHtml(error.message)}</span></div>`;
+    }
+  };
   document.getElementById('scan-dirs-refresh-button')?.addEventListener('click', () => {
     refreshScanDirs();
     refreshHistory();
     refreshRedact();
+    refreshSubscriptionPrices();
   });
 __THEME_SCRIPT__
   refreshScanDirs();
   refreshHistory();
   refreshRedact();
+  refreshSubscriptionPrices();

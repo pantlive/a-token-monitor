@@ -347,6 +347,7 @@
   let insightsPollTimer = 0;
   let insightsPollSuspended = false;
   let insightsPeriodDays = '';
+  let quotaComparePeriod = '5h';
   let mainRefreshTimer = 0;
   // 功能页：打开对应页面时才拉告警历史 / 用量检索 / 磁盘明细。
   const loadedSections = new Set();
@@ -396,6 +397,7 @@
     if (breadcrumb) breadcrumb.textContent = title;
     document.title = `${title} - Token Monitor`;
     ensureSectionLoaded(id);
+    if (id === 'quota-compare') refreshQuotaCompare();
     const nextUrl = urlForPage(id, settings.hash);
     if (settings.push) {
       window.history.pushState({ page: id }, '', nextUrl);
@@ -2937,6 +2939,94 @@
     document.getElementById(id)?.addEventListener('change', () => {
       housekeepingTablePage = 0;
       refreshHousekeeping();
+    });
+  });
+  const quotaDash = (value) => value === null || value === undefined || value === '' ? '—' : value;
+  const quotaPercent = (value) => value === null || value === undefined ? '—' : `${Number(value).toFixed(1)}%`;
+  const quotaRatio = (value) => value === null || value === undefined ? '—' : `${Number(value).toFixed(2)}x`;
+  const quotaProjectionLabels = {
+    exhausted: '已用尽',
+    before_reset: '重置前会用尽',
+    after_reset: '能撑到重置',
+    unknown: '暂不预测'
+  };
+  const quotaSourceLabels = {
+    live: '实时采样',
+    backfill_codex: '会话回填',
+    backfill_grok_sparse: '稀疏回填'
+  };
+  const renderQuotaCompare = (payload) => {
+    const current = document.getElementById('quota-compare-current');
+    const history = document.getElementById('quota-compare-history');
+    const countLabel = document.getElementById('quota-compare-count');
+    if (!current || !history) return;
+    const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+    if (countLabel) countLabel.textContent = `${rows.length} 个账号`;
+    if (!rows.length) {
+      current.innerHTML = '<div class="empty-state">还没有可对比的订阅账号</div>';
+    } else {
+      const body = rows.map((row) => {
+        const notes = Array.isArray(row.notes) ? row.notes.filter(Boolean) : [];
+        const note = notes.length ? `<div class="cell-sub quota-note">${notes.map((item) => escapeHtml(item)).join(' · ')}</div>` : '';
+        const payback = row.payback_multiple === null || row.payback_multiple === undefined
+          ? '—'
+          : `${Number(row.payback_multiple).toFixed(2)}x`;
+        return `<tr>
+          <td>${escapeHtml(row.product_label || row.product)}<div class="cell-sub">${escapeHtml(row.display_name || row.account_key)}</div>${note}</td>
+          <td>${escapeHtml(row.plan_label || row.plan || '—')}</td>
+          <td>${quotaPercent(row.used_percent)}</td>
+          <td>${quotaPercent(row.elapsed_percent)}</td>
+          <td>${quotaRatio(row.pace_ratio)}</td>
+          <td>${escapeHtml(quotaProjectionLabels[row.projection_status] || '暂不预测')}<div class="cell-sub">${escapeHtml(formatTime(row.projected_exhausted_at))}</div></td>
+          <td>${quotaDash(row.tokens === null || row.tokens === undefined ? null : formatNumber(row.tokens))}</td>
+          <td>${row.cost_usd === null || row.cost_usd === undefined ? '—' : escapeHtml(formatUsdCompact(row.cost_usd))}</td>
+          <td>${row.usd_per_percent === null || row.usd_per_percent === undefined ? '—' : escapeHtml(formatUsdCompact(row.usd_per_percent))}</td>
+          <td>${row.full_window_usd === null || row.full_window_usd === undefined ? '—' : escapeHtml(formatUsdCompact(row.full_window_usd))}</td>
+          <td>${payback}</td>
+        </tr>`;
+      }).join('');
+      const periodNote = payload.period === '5h' ? '<p class="quota-note">5 小时窗口不计算回本倍数</p>' : '';
+      current.innerHTML = `<div class="table-scroll"><table class="usage-table"><thead><tr>
+        <th>账号</th><th>套餐</th><th>已用</th><th>时间已过</th><th>消耗速度</th><th>预计耗尽</th>
+        <th>窗口 tokens</th><th>窗口内美元</th><th>每 1% 额度</th><th>用满窗口</th><th>回本倍数</th>
+      </tr></thead><tbody>${body}</tbody></table></div>${periodNote}`;
+    }
+    const cycles = Array.isArray(payload && payload.history) ? payload.history : [];
+    const title = payload.period === '5h' ? '最近 12 个 5 小时窗口' : '最近 8 周';
+    if (!cycles.length) {
+      history.innerHTML = `<div class="quota-trend"><h3>${title}</h3><div class="empty-state">还没有历史周期</div></div>`;
+      return;
+    }
+    const maxUsed = Math.max(...cycles.map((item) => Number(item.max_used_percent) || 0), 1);
+    const bars = cycles.map((item) => {
+      const width = Math.max(2, Math.round((Number(item.max_used_percent) || 0) / maxUsed * 100));
+      const flags = [
+        item.incomplete ? '采样不完整' : '',
+        item.settled === 'pending' ? '待结算' : '',
+        quotaSourceLabels[item.source] || ''
+      ].filter(Boolean).join(' · ');
+      const cost = item.cost_usd === null || item.cost_usd === undefined ? '—' : formatUsdCompact(item.cost_usd);
+      return `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${escapeHtml(item.product_label || item.product)} · ${escapeHtml(item.display_name || item.account_key)}</span><span class="top-project-value">${quotaPercent(item.max_used_percent)} · ${escapeHtml(cost)}</span></div><div class="bar"><span style="width:${width}%"></span></div><div class="cell-sub">${escapeHtml(formatTime(item.cycle_start))}${flags ? ` · ${escapeHtml(flags)}` : ''}</div></div>`;
+    }).join('');
+    history.innerHTML = `<div class="quota-trend"><h3>${title}</h3>${bars}</div>`;
+  };
+  const refreshQuotaCompare = async () => {
+    const current = document.getElementById('quota-compare-current');
+    try {
+      const response = await fetch(`/api/quota-compare?period=${encodeURIComponent(quotaComparePeriod)}`, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || `HTTP ${response.status}`);
+      renderQuotaCompare(payload);
+    } catch (error) {
+      if (current) current.innerHTML = `<div class="empty-state">读取额度对比失败: ${escapeHtml(error.message)}</div>`;
+    }
+  };
+  document.getElementById('quota-compare-refresh')?.addEventListener('click', refreshQuotaCompare);
+  document.querySelectorAll('[data-quota-period]').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      quotaComparePeriod = tab.dataset.quotaPeriod || '5h';
+      document.querySelectorAll('[data-quota-period]').forEach((item) => item.classList.toggle('selected', item === tab));
+      refreshQuotaCompare();
     });
   });
   document.querySelectorAll('[data-insights-days]').forEach((tab) => {

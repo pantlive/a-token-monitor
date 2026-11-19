@@ -31,6 +31,7 @@ from .providers import (
     home_providers,
     resolve_provider_homes,
 )
+from .quota_cycles import QuotaCycleError, QuotaCycleStore, QuotaSampler
 from .redact.control import RedactController, dashboard_writable
 from .registry import MultiSessionRegistry
 from .retention import HistoryDataManager, RetentionController
@@ -146,6 +147,8 @@ class MultiAccountMonitor:
         else:
             raise ValueError("没有 Codex 账号时必须指定 state_dir")
         self.logger = logger or logging.getLogger(__name__)
+        self._quota_cycle_store: QuotaCycleStore | None = None
+        self._quota_sampler: QuotaSampler | None = None
         self.account_monitors = tuple(
             self._create_account_monitor(account) for account in accounts
         )
@@ -499,6 +502,7 @@ class MultiAccountMonitor:
                     existing_accounts,
                 )
                 item = self._create_account_monitor(spec)
+                self._attach_cycle_store(item.monitor)
                 if self._started:
                     try:
                         item.monitor.start(allow_app_server_failure=True)
@@ -545,13 +549,17 @@ class MultiAccountMonitor:
 
         if self._started:
             return
+        self._ensure_quota_sampling()
         for item in self.account_monitors:
+            self._attach_cycle_store(item.monitor)
             item.monitor.start(allow_app_server_failure=True)
             self.logger.info(
                 "账号 %s 已加入监控: CODEX_HOME=%s",
                 item.account.name,
                 item.account.home,
             )
+        if self._quota_sampler is not None and not self._quota_sampler.is_running:
+            self._quota_sampler.start()
         self._started = True
 
     def run_once(self, now: float | None = None) -> None:
@@ -643,6 +651,10 @@ class MultiAccountMonitor:
         """关闭 Dashboard 和所有账号的 App Server，不终止用户任务。"""
 
         self._stop_event.set()
+        sampler = self._quota_sampler
+        self._quota_sampler = None
+        if sampler is not None:
+            sampler.close()
         thread = self._index_thread
         self._index_thread = None
         if thread is not None and thread.is_alive():
@@ -751,11 +763,49 @@ class MultiAccountMonitor:
             config=monitor_config,
             session_root=account.session_root,
             logger=self.logger,
+            cycle_store=self._quota_cycle_store,
+            usage_index_path=self.state_dir / "usage-index.sqlite3",
+            enable_quota_sampler=False,
         )
         return AccountMonitor(
             account=account,
             registry=registry,
             monitor=monitor,
+        )
+
+    def _ensure_quota_sampling(self) -> None:
+        """面板没打开时也要持续记下 Claude / Grok / Codex 的额度周期。"""
+
+        if self._quota_cycle_store is None:
+            try:
+                self._quota_cycle_store = QuotaCycleStore(self.state_dir)
+            except QuotaCycleError:
+                self.logger.warning("额度周期库不可用，后台采样已跳过")
+                return
+        index = self.state_dir / "usage-index.sqlite3"
+        for item in self.account_monitors:
+            self._attach_cycle_store(item.monitor)
+        if self._quota_sampler is None:
+            self._quota_sampler = QuotaSampler(
+                self.state_dir,
+                lambda: self.homes,
+                usage_index=index,
+                cycle_store=self._quota_cycle_store,
+                codex_sessions=self._codex_backfill_sources,
+                logger=self.logger,
+            )
+
+    def _attach_cycle_store(self, monitor: MultiSessionMonitor) -> None:
+        """子监控只写 Codex 周期，采样线程由编排层单独持有。"""
+
+        monitor.cycle_store = self._quota_cycle_store
+        monitor.usage_index_path = self.state_dir / "usage-index.sqlite3"
+        monitor.enable_quota_sampler = False
+
+    def _codex_backfill_sources(self) -> tuple[tuple[str, Path], ...]:
+        return tuple(
+            (item.account.identity_key, item.account.session_root)
+            for item in self.account_monitors
         )
 
     @property
