@@ -112,7 +112,6 @@
        右端保留圆角，左端与基线位置对齐。 */
     .quota-bar > .today { position: absolute; top: 0; bottom: 0; border-radius: 0 99px 99px 0; background: var(--blue); }
     .quota-today { display: inline-block; padding: 1px 6px; border: 1px solid var(--blue-border); border-radius: 99px; color: var(--blue-text); font-size: 10px; font-weight: 600; white-space: nowrap; }
-    .quota-note { padding: 12px 13px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
     .bar { height: 6px; margin: 13px 0 12px; border-radius: 99px; background: var(--track); overflow: hidden; }
     .quota-row .bar { margin: 0; }
     .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
@@ -301,4 +300,59 @@
     .quota-trend { margin-top: 22px; }
     .quota-trend h3 { margin: 0 0 10px; font-size: 15px; }
     .quota-note { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .quota-rows-block > .quota-note { padding: 12px 13px; border: 1px dashed var(--line); border-radius: 8px; }
+    .quota-chart { min-width: 0; margin-top: 18px; padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-raised); }
+    .quota-chart-title { margin: 0 0 10px; color: var(--text); font-size: 15px; }
+    .quota-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 12px; color: var(--muted); font-size: 11px; }
+    .quota-legend > span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+    .quota-swatch { display: inline-block; flex: 0 0 auto; width: 10px; height: 10px; border-radius: 3px; background: var(--muted); }
+    .quota-swatch.ok { background: var(--green); }
+    .quota-swatch.warn { background: var(--yellow); }
+    .quota-swatch.danger { background: var(--red); }
+    .quota-swatch.marker { width: 2px; height: 12px; border-radius: 1px; background: var(--text); }
+    .quota-swatch.hollow { border: 2px solid var(--muted); border-radius: 50%; background: var(--panel); }
+    .quota-pace-list { display: grid; gap: 4px; }
+    .quota-pace-row { display: grid; grid-template-columns: minmax(150px, 220px) minmax(120px, 1fr) minmax(150px, 250px); grid-template-areas: "name track value" ". badges badges"; align-items: center; gap: 4px 14px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+    .quota-pace-name { grid-area: name; display: grid; min-width: 0; font-size: 12px; }
+    .quota-pace-name span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .quota-pace-track { position: relative; grid-area: track; height: 14px; border-radius: 99px; background: var(--track); }
+    .quota-pace-fill { display: block; height: 100%; min-width: 2px; border-radius: 99px; background: var(--green); }
+    .quota-pace-fill.warn { background: var(--yellow); }
+    .quota-pace-fill.danger { background: var(--red); }
+    .quota-pace-marker { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); }
+    .quota-pace-value { grid-area: value; min-width: 0; color: var(--text); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+    .quota-pace-row.warn .quota-pace-value { color: var(--yellow-text); }
+    .quota-pace-row.danger .quota-pace-value { color: var(--red-text); }
+    .quota-pace-badges, .quota-badges { grid-area: badges; display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+    .quota-badges { margin-top: 5px; }
+    .quota-pace-badges:empty { display: none; }
+    .quota-pace-idle-list { display: grid; gap: 4px; margin-top: 10px; }
+    .quota-pace-idle { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 7px; color: var(--muted); font-size: 12px; }
+    .quota-pace-idle-name { min-width: 0; margin-right: 4px; overflow-wrap: anywhere; }
+    .quota-value-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+    .quota-value-group { min-width: 0; }
+    .quota-value-group h4 { margin: 0 0 8px; color: var(--muted-strong); font-size: 12px; }
+    .quota-value-row { display: grid; grid-template-columns: minmax(90px, 40%) minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 5px 0; }
+    .quota-value-name { overflow: hidden; color: var(--muted-strong); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .quota-value-track { position: relative; display: flex; align-items: center; height: 14px; border-radius: 4px; background: var(--track); }
+    .quota-value-fill { display: block; height: 100%; border-radius: 4px; }
+    .quota-value-empty { padding-left: 8px; color: var(--muted-dim); font-size: 10px; white-space: nowrap; }
+    .quota-value-num { min-width: 52px; color: var(--text); font-size: 12px; font-weight: 650; text-align: right; }
+    .quota-value-ref { position: absolute; top: -4px; bottom: -4px; width: 0; border-left: 1px dashed var(--yellow); }
+    .quota-value-ref em { position: absolute; top: -13px; left: 3px; color: var(--yellow-text); font-size: 9px; font-style: normal; white-space: nowrap; }
+    .quota-history-svg { display: block; width: 100%; height: auto; max-width: 100%; }
+    .quota-hline { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
+    .quota-axis { fill: var(--muted); font-size: 11px; }
+    .quota-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; opacity: .85; }
+    .quota-dot { stroke-width: 2; }
+    .quota-dot.hollow { stroke-dasharray: 2 1.5; }
+    .quota-detail { margin-top: 18px; }
+    .quota-detail summary { width: fit-content; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-strong); background: var(--surface-raised); cursor: pointer; font-size: 12px; }
+    .quota-detail[open] summary { margin-bottom: 10px; }
+    @media (max-width: 720px) {
+      .quota-pace-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "name" "track" "value" "badges"; }
+      .quota-value-row { grid-template-columns: minmax(0, 1fr) auto; }
+      .quota-value-name { grid-column: 1 / -1; }
+      .quota-chart { padding: 12px; }
+    }
     .quota-flag { color: var(--yellow); }

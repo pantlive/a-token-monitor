@@ -4106,6 +4106,39 @@ class UsageSearchDashboardTests(unittest.TestCase):
         self.assertLess(html.find('id="insights"'), html.find('id="usage-search"'))
         self.assertIn('id="usage-search-body"', html)
 
+    def test_quota_compare_page_renders_charts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            server = self._server(root, self._aggregator(root))
+            base_url = f"http://{server.address[0]}:{server.address[1]}"
+            try:
+                with urlopen(f"{base_url}/quota-compare", timeout=5) as response:
+                    html = response.read().decode("utf-8")
+            finally:
+                server.close()
+
+        for marker in (
+            'id="quota-compare-current"',
+            'id="quota-compare-charts"',
+            'id="quota-compare-history"',
+            'id="quota-compare-detail"',
+            "quotaPaceChart",
+            "quotaValueChart",
+            "quotaHistoryChart",
+            "quotaDetailTable",
+            "<details",
+            "<svg",
+            "/api/quota-compare",
+            'data-quota-period="5h"',
+            'data-quota-period="week"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertNotIn("cdn.", html)
+        for library in ("chart.js", "d3.js", "echarts", "plotly", "highcharts"):
+            with self.subTest(library=library):
+                self.assertNotIn(library, html.lower())
+
     def test_usage_section_supports_account_dimension(self) -> None:
         """用量与成本估算区必须能按账号统计：维度切换、账号筛选和账号排行。"""
 
