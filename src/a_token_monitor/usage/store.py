@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from contextlib import closing
+import threading
+from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from ..local_time import local_day_key
 from .pricing import (
@@ -94,6 +95,9 @@ class _UsageIndexStore:
         self.path = path.expanduser()
         self._json1: bool | None = None
         self._pending_checked = False
+        # 中文注释：transaction() 打开的共享连接按线程保存；sqlite3 连接默认
+        # 不能跨线程使用，其他线程照旧走短连接。
+        self._local = threading.local()
         # 中文注释：只在状态目录写入索引，不复制或压缩原始 JSONL。
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -308,7 +312,7 @@ class _UsageIndexStore:
         """读取一个文件的持久化解析状态；损坏记录按未缓存处理。"""
 
         try:
-            with closing(self._connect()) as connection, connection:
+            with self._read_connection() as connection:
                 row = connection.execute(
                     """
                     SELECT inode, mtime_ns, file_size, next_offset, complete,
@@ -320,11 +324,6 @@ class _UsageIndexStore:
                 ).fetchone()
                 if row is None:
                     return None
-                state = _state_from_json(row[5])
-                if state is None:
-                    return None
-                total_deltas: list[UsageDelta] = []
-                fallback_deltas: list[UsageDelta] = []
                 delta_rows = connection.execute(
                     """
                     SELECT kind, timestamp, model, usage_json,
@@ -335,24 +334,7 @@ class _UsageIndexStore:
                     """,
                     (str(path),),
                 )
-                for delta_row in delta_rows:
-                    delta = _delta_from_row(delta_row)
-                    if delta is None:
-                        return None
-                    if delta_row[0] == "total":
-                        total_deltas.append(delta)
-                    elif delta_row[0] == "fallback":
-                        fallback_deltas.append(delta)
-                    else:
-                        return None
-                return _CachedFile(
-                    signature=(int(row[0]), int(row[1]), int(row[2])),
-                    next_offset=int(row[3]),
-                    total_deltas=tuple(total_deltas),
-                    fallback_deltas=tuple(fallback_deltas),
-                    state=state,
-                    complete=bool(row[4]),
-                )
+                return _cached_file_from_rows(row, delta_rows)
         except (
             OSError,
             OverflowError,
@@ -362,6 +344,136 @@ class _UsageIndexStore:
             sqlite3.DatabaseError,
         ):
             return None
+
+    def load_many(self, paths: Iterable[Path]) -> dict[Path, _CachedFile]:
+        """一次连接批量读取多个文件的解析状态，结果与逐个 ``load`` 一致。
+
+        中文注释：冷启动时逐文件开连接、逐文件查询会把几千次小查询摊到每轮
+        索引里；这里两条顺序扫描查完全部状态和增量，再按 path 分组。损坏或
+        不存在的记录不出现在结果里，调用方照旧按未缓存处理（逐个 load 兜底）。
+        整体查询失败时返回空字典。
+        """
+
+        wanted = {str(path): path for path in paths}
+        if not wanted:
+            return {}
+        try:
+            with self._read_connection() as connection:
+                states: dict[str, tuple[Any, ...]] = {}
+                for row in connection.execute(
+                    """
+                    SELECT path, inode, mtime_ns, file_size, next_offset,
+                           complete, state_json
+                    FROM usage_file_state
+                    """
+                ):
+                    key = row[0]
+                    if key in wanted:
+                        states[key] = tuple(row[1:])
+                if not states:
+                    return {}
+                grouped: dict[str, list[tuple[Any, ...]]] = {
+                    key: [] for key in states
+                }
+                for delta_row in connection.execute(
+                    """
+                    SELECT path, kind, timestamp, model, usage_json,
+                           billing_usage_json, project
+                    FROM usage_delta
+                    ORDER BY rowid
+                    """
+                ):
+                    bucket = grouped.get(delta_row[0])
+                    if bucket is not None:
+                        bucket.append(tuple(delta_row[1:]))
+        except (OSError, sqlite3.DatabaseError):
+            return {}
+        result: dict[Path, _CachedFile] = {}
+        usage_cache: dict[str, TokenUsage | None] = {}
+        for key, state_row in states.items():
+            try:
+                cached = _cached_file_from_rows(
+                    state_row, grouped[key], usage_cache
+                )
+            except (OverflowError, TypeError, ValueError, json.JSONDecodeError):
+                cached = None
+            if cached is not None:
+                result[wanted[key]] = cached
+        return result
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """让本线程在上下文内共用一个连接，结束时统一提交一次。
+
+        中文注释：DELETE 日志模式下每次提交都要 fsync，逐文件短连接提交会把
+        一轮几十个文件的写入放大成几十次刷盘。上下文内 ``save``/``load`` 复用
+        同一连接，每个文件的写入放在独立 SAVEPOINT 里，单个文件失败只回滚
+        它自己；上下文外仍是原来的短连接行为。打不开连接时退回短连接。
+        """
+
+        if getattr(self._local, "connection", None) is not None:
+            # 中文注释：嵌套调用直接复用外层事务，由外层负责提交。
+            yield
+            return
+        try:
+            connection = self._connect()
+        except (OSError, sqlite3.DatabaseError):
+            yield
+            return
+        try:
+            connection.execute("BEGIN")
+        except sqlite3.DatabaseError:
+            connection.close()
+            yield
+            return
+        self._local.connection = connection
+        try:
+            yield
+        finally:
+            self._local.connection = None
+            try:
+                # 中文注释：上下文里抛出异常时也提交已经写好的文件，保持和
+                # 内存缓存一致；之前的逐文件提交语义也是做完一个算一个。
+                connection.commit()
+            except sqlite3.DatabaseError:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+            finally:
+                connection.close()
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        """事务内复用共享连接，否则打开一次只读短连接。"""
+
+        shared = getattr(self._local, "connection", None)
+        if shared is not None:
+            yield shared
+            return
+        with closing(self._connect()) as connection:
+            yield connection
+
+    @contextmanager
+    def _write_connection(self) -> Iterator[sqlite3.Connection]:
+        """事务内用 SAVEPOINT 包住一次写入，否则用短连接独立提交。"""
+
+        shared = getattr(self._local, "connection", None)
+        if shared is None:
+            with closing(self._connect()) as connection, connection:
+                yield connection
+            return
+        shared.execute("SAVEPOINT usage_write")
+        try:
+            yield shared
+        except BaseException:
+            try:
+                shared.execute("ROLLBACK TO usage_write")
+                shared.execute("RELEASE usage_write")
+            except sqlite3.DatabaseError:
+                pass
+            raise
+        shared.execute("RELEASE usage_write")
 
     def search_deltas(
         self,
@@ -726,7 +838,7 @@ class _UsageIndexStore:
         """保存文件检查点，只追加本轮新产生的增量。"""
 
         try:
-            with closing(self._connect()) as connection, connection:
+            with self._write_connection() as connection:
                 if replace_deltas:
                     connection.execute(
                         "DELETE FROM usage_delta WHERE path = ?",
@@ -778,12 +890,12 @@ class _UsageIndexStore:
             # 中文注释：持久化失败只损失下次启动的缓存，不中断额度监控。
             return
 
-    def prune(self, paths: Mapping[Path, Any]) -> None:
-        """删除已经不在当前扫描范围的文件索引。"""
+    def prune(self, paths: Mapping[Path, Any]) -> bool:
+        """删除已经不在当前扫描范围的文件索引；写入失败时返回 False。"""
 
         allowed = {str(path) for path in paths}
         try:
-            with closing(self._connect()) as connection, connection:
+            with self._write_connection() as connection:
                 rows = connection.execute(
                     "SELECT path FROM usage_file_state"
                 ).fetchall()
@@ -809,10 +921,13 @@ class _UsageIndexStore:
                         stale_accounts,
                     )
         except (OSError, sqlite3.DatabaseError):
-            return
+            return False
+        return True
 
-    def save_file_accounts(self, sources: Mapping[Path, _UsageSource]) -> None:
+    def save_file_accounts(self, sources: Mapping[Path, _UsageSource]) -> bool:
         """把每个 JSONL 文件所属的账号身份写入索引，供按账号聚合使用。
+
+        写入失败时返回 False，调用方据此决定下一轮是否重试。
 
         中文注释：账号身份来自 profile / auth.json，不在 token 明细里；这里按
         文件覆盖写入，既让检索能按账号分组和筛选，也保证 profile 换号后旧会话
@@ -831,9 +946,9 @@ class _UsageIndexStore:
             for path, source in sources.items()
         ]
         if not rows:
-            return
+            return True
         try:
-            with closing(self._connect()) as connection, connection:
+            with self._write_connection() as connection:
                 connection.executemany(
                     """
                     INSERT INTO usage_file_account(
@@ -856,7 +971,45 @@ class _UsageIndexStore:
                 )
         except (OSError, OverflowError, TypeError, ValueError, sqlite3.DatabaseError):
             # 中文注释：账号表写入失败只影响分组展示，不影响 token 索引。
-            return
+            return False
+        return True
+
+
+def _cached_file_from_rows(
+    state_row: Sequence[Any],
+    delta_rows: Iterable[Sequence[Any]],
+    usage_cache: dict[str, TokenUsage | None] | None = None,
+) -> _CachedFile | None:
+    """把 usage_file_state 一行和它的 usage_delta 行还原成缓存；损坏返回 None。
+
+    ``state_row`` 依次是 inode、mtime_ns、file_size、next_offset、complete、
+    state_json；``delta_rows`` 依次是 kind、timestamp、model、usage_json、
+    billing_usage_json、project，且已按 rowid 排序。
+    """
+
+    state = _state_from_json(state_row[5])
+    if state is None:
+        return None
+    total_deltas: list[UsageDelta] = []
+    fallback_deltas: list[UsageDelta] = []
+    for delta_row in delta_rows:
+        delta = _delta_from_row(tuple(delta_row), usage_cache)
+        if delta is None:
+            return None
+        if delta_row[0] == "total":
+            total_deltas.append(delta)
+        elif delta_row[0] == "fallback":
+            fallback_deltas.append(delta)
+        else:
+            return None
+    return _CachedFile(
+        signature=(int(state_row[0]), int(state_row[1]), int(state_row[2])),
+        next_offset=int(state_row[3]),
+        total_deltas=tuple(total_deltas),
+        fallback_deltas=tuple(fallback_deltas),
+        state=state,
+        complete=bool(state_row[4]),
+    )
 
 
 def _delta_to_row(path: str, kind: str, delta: UsageDelta) -> tuple[object, ...]:
