@@ -911,16 +911,37 @@ class UsageAggregatorTests(unittest.TestCase):
     def test_background_delay_limits_disk_rate_and_completed_refreshes(self) -> None:
         aggregator = UsageAggregator(refresh_interval=300.0)
 
-        self.assertEqual(aggregator.read_budget_bytes, 1024 * 1024)
-        self.assertEqual(aggregator.index_bytes_per_sec, 1024 * 1024)
-        self.assertEqual(
+        mib = 1024 * 1024
+        self.assertEqual(aggregator.read_budget_bytes, 8 * mib)
+        self.assertEqual(aggregator.index_bytes_per_sec, 16 * mib)
+        # 按读速上限摊开：8 MiB / 16 MiB/s = 0.5 秒。
+        self.assertAlmostEqual(
             aggregator._background_delay(
                 complete=False,
-                read_bytes=1024 * 1024,
+                read_bytes=8 * mib,
+            ),
+            0.5,
+        )
+        # 占空比 50%：本轮工作 1 秒，至少休息 1 秒。
+        self.assertGreaterEqual(
+            aggregator._background_delay(
+                complete=False,
+                read_bytes=mib,
+                elapsed=1.0,
             ),
             1.0,
         )
-        self.assertEqual(
+        # 读得很快时只受 0.05 秒下限约束，不再强制等 1 秒。
+        self.assertAlmostEqual(
+            aggregator._background_delay(
+                complete=False,
+                read_bytes=1024,
+                elapsed=0.001,
+            ),
+            0.05,
+        )
+        # 没有读到新字节却未完成时不空转。
+        self.assertGreaterEqual(
             aggregator._background_delay(complete=False, read_bytes=0),
             1.0,
         )

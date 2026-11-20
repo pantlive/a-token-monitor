@@ -59,10 +59,11 @@ class TokenUsage:
         """从 Codex 的 snake_case 或 camelCase 字段读取 token 数。"""
 
         parsed: dict[str, int] = {}
-        for field_name in _TOKEN_FIELDS:
-            amount = _token_number(
-                value.get(field_name, value.get(_camel_case(field_name)))
-            )
+        # 中文注释：camelCase 写法预先算好；冷启动要还原几十万条持久化增量，
+        # 逐字段现拼字符串会占掉大半时间。取值顺序与 get(snake, get(camel)) 一致。
+        for field_name, camel_name in _TOKEN_FIELD_ALIASES:
+            raw = value[field_name] if field_name in value else value.get(camel_name)
+            amount = _token_number(raw)
             if amount is not None:
                 parsed[field_name] = amount
         if not parsed:
@@ -440,17 +441,24 @@ def _usage_from_object(value: object) -> TokenUsage | None:
     return TokenUsage.from_mapping(value)
 
 
-def _delta_from_row(row: tuple[object, ...]) -> UsageDelta | None:
-    """从 SQLite 行恢复一个 token 增量。"""
+def _delta_from_row(
+    row: tuple[object, ...],
+    usage_cache: dict[str, TokenUsage | None] | None = None,
+) -> UsageDelta | None:
+    """从 SQLite 行恢复一个 token 增量。
+
+    ``usage_cache`` 按 JSON 原文缓存解析结果：计价用量和原始用量多半是同一段
+    JSON，批量还原时可以省掉一半解析。TokenUsage 不可变，共享实例是安全的。
+    """
 
     timestamp = row[1]
     model = row[2]
     if not isinstance(timestamp, (int, float)) or not isinstance(model, str):
         return None
-    usage = _usage_from_object(json.loads(cast(str, row[3])))
+    usage = _usage_from_json(row[3], usage_cache)
     billing_value = row[4]
     billing_usage = (
-        _usage_from_object(json.loads(billing_value))
+        _usage_from_json(billing_value, usage_cache)
         if isinstance(billing_value, str)
         else None
     )
@@ -466,6 +474,23 @@ def _delta_from_row(row: tuple[object, ...]) -> UsageDelta | None:
         billing_usage=billing_usage,
         project=project,
     )
+
+
+def _usage_from_json(
+    text: object,
+    cache: dict[str, TokenUsage | None] | None,
+) -> TokenUsage | None:
+    """解析一段持久化的 token 用量 JSON；给了缓存且是字符串时复用结果。"""
+
+    if cache is None or not isinstance(text, str):
+        return _usage_from_object(json.loads(cast(str, text)))
+    try:
+        return cache[text]
+    except KeyError:
+        pass
+    usage = _usage_from_object(json.loads(text))
+    cache[text] = usage
+    return usage
 
 
 def _codex_session_id(path: Path) -> str | None:
@@ -496,6 +521,10 @@ def _token_number(value: Any) -> int | None:
 
     if value is None or isinstance(value, bool):
         return None
+    if type(value) is int and 0 <= value <= _EXACT_FLOAT_INT_LIMIT:
+        # 中文注释：持久化的 token 数都是普通整数，走快速路径；范围内
+        # int(float(value)) == value，结果与下面的通用分支一致。
+        return value
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -510,6 +539,15 @@ def _camel_case(field_name: str) -> str:
 
     head, *tail = field_name.split("_")
     return head + "".join(item.capitalize() for item in tail)
+
+
+# 中文注释：token 字段的 snake_case / camelCase 写法对照，供 from_mapping 使用。
+_TOKEN_FIELD_ALIASES = tuple(
+    (field_name, _camel_case(field_name)) for field_name in _TOKEN_FIELDS
+)
+
+# 中文注释：不超过 2**53 的整数转 float 不丢精度。
+_EXACT_FLOAT_INT_LIMIT = 2**53
 
 
 def _round_number(value: float) -> float:

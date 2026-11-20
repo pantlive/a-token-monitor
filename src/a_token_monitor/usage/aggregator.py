@@ -5,9 +5,10 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, ContextManager, Iterator, Mapping
 
 from ..grok import (
     GrokSessionInfo,
@@ -60,9 +61,10 @@ from .sources import _SourceDiscoveryMixin
 
 class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin):
     """扫描多个 CODEX_HOME 并按账号、时间窗口汇总 JSONL 用量。"""
-    # 中文注释：单轮和单文件都最多读取 1 MiB，避免冷的 ext4.vhdx 突发读满。
-    _DEFAULT_READ_BUDGET = 1 * 1024 * 1024
-    _PER_FILE_READ_BUDGET = 1 * 1024 * 1024
+    # 中文注释：单轮最多读 8 MiB、单文件最多 4 MiB；突发读取量有界，平均读速
+    # 再由 _DEFAULT_INDEX_BYTES_PER_SEC 和 _INDEX_DUTY_CYCLE 共同限制。
+    _DEFAULT_READ_BUDGET = 8 * 1024 * 1024
+    _PER_FILE_READ_BUDGET = 4 * 1024 * 1024
     _PERIODS = (
         ("today", "今天", "calendar_day"),
         ("seven_days", "近 7 天", "seven_days"),
@@ -75,8 +77,20 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
     # 中文注释：热力图按自然周对齐，53 列覆盖最近一年（含当前未走完的一周）。
     _HEATMAP_WEEKS = 53
 
-    # 中文注释：后台索引限速，避免冷 vhdx 被一次读满，同时不再靠手工连点。
-    _DEFAULT_INDEX_BYTES_PER_SEC = 1 * 1024 * 1024
+    # 中文注释：后台索引平均读速上限。补完几十到一两百 MiB 的增量约 10 秒内
+    # 完成，又远低于磁盘带宽，不会把冷 vhdx 读满。
+    _DEFAULT_INDEX_BYTES_PER_SEC = 16 * 1024 * 1024
+
+    # 中文注释：后台索引的工作占空比。每轮工作 t 秒后至少休息
+    # t × (1 − duty) / duty 秒，慢盘读一轮更久时自动降速，磁盘至少一半时间空闲。
+    _INDEX_DUTY_CYCLE = 0.5
+
+    # 中文注释：一轮没有读到任何新字节却仍未完成（例如文件刚被改写、超限的
+    # projcache），继续高频空转没有意义，按这个间隔重试。
+    _INDEX_IDLE_RETRY_SECONDS = 1.0
+
+    # 中文注释：实测吞吐的指数滑动平均系数，前端用它估算剩余时间。
+    _THROUGHPUT_EMA_ALPHA = 0.3
 
     def __init__(
         self,
@@ -134,6 +148,17 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         self._deduplicated_bytes = 0
         self._last_indexed_at: float | None = None
         self._last_index_error: str | None = None
+        # 中文注释：后台索引的实测吞吐（字节/秒，EMA），None 表示还没有样本。
+        self._throughput_ema: float | None = None
+        # 中文注释：首轮用一次批量查询预热内存缓存，之后只按需逐文件兜底。
+        self._cache_warmed = False
+        # 中文注释：本轮预热耗时。预热是一次性顺序读 SQLite 和 CPU 解码，
+        # 不是 JSONL 读盘，不计入占空比的休息时间。
+        self._last_warm_seconds = 0.0
+        # 中文注释：上次成功写入索引的来源集合和账号映射；没变时跳过
+        # prune 和 save_file_accounts，避免每轮全表读写。
+        self._pruned_paths: frozenset[Path] | None = None
+        self._saved_accounts: dict[Path, tuple[Any, ...]] | None = None
         self._lock = threading.RLock()
         self._snapshot_lock = threading.Lock()
         self._worker_lock = threading.Lock()
@@ -257,6 +282,12 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         while not self._stop.is_set():
             read_bytes = 0
             complete = True
+            started = time.monotonic()
+            # 中文注释：elapsed 是本轮读 JSONL、解析和写索引的时间，用于占空比；
+            # busy 另外包含预建分桶这类纯 CPU 工作，用于按读速上限摊开整轮周期。
+            # 首轮的批量预热只顺序读一次 SQLite，两者都不计入。
+            elapsed = 0.0
+            busy = 0.0
             with self._lock:
                 job = self._job
                 if job is not None:
@@ -273,22 +304,100 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
                             read_bytes = int(
                                 indexing.get("read_bytes_this_refresh") or 0
                             )
-            delay = self._background_delay(complete, read_bytes)
+                    work_end = time.monotonic()
+                    elapsed = max(
+                        0.0, work_end - started - self._last_warm_seconds
+                    )
+                    self._last_warm_seconds = 0.0
+                    if not complete and read_bytes > 0:
+                        # 中文注释：按读速上限本来就要等一段时间，这段空档里先把
+                        # 已缓存文件的分桶和计价算好，完成那一轮不必一次性处理
+                        # 全部历史增量。只用不会拉长本轮周期的那部分空档。
+                        cycle = read_bytes / self.index_bytes_per_sec
+                        slack = cycle - elapsed / self._INDEX_DUTY_CYCLE
+                        if slack > 0:
+                            self._prebuild_rollups(work_end + slack)
+                    busy = elapsed + (time.monotonic() - work_end)
+            delay = self._background_delay(complete, read_bytes, elapsed, busy)
+            if not complete:
+                self._record_throughput(read_bytes, busy + delay)
             if self._stop.wait(timeout=delay):
                 return
 
-    def _background_delay(self, complete: bool, read_bytes: int) -> float:
-        """计算后台下一轮等待时间，限制平均读速和空转频率。"""
+    def _background_delay(
+        self,
+        complete: bool,
+        read_bytes: int,
+        elapsed: float = 0.0,
+        busy: float | None = None,
+    ) -> float:
+        """计算后台下一轮等待时间，同时限制平均读速和工作占空比。
+
+        ``elapsed`` 是本轮读盘工作的耗时；``busy`` 是本轮全部工作耗时（含纯
+        CPU 的预建分桶，默认等于 ``elapsed``）。未完成时取三者最大值：
+
+        - ``read_bytes / index_bytes_per_sec − busy``：整轮周期（工作 + 等待）
+          不短于按读速上限读完本轮字节所需的时间，平均读速不超过上限；
+        - ``elapsed × (1 − duty) / duty``：读盘工作最多占 ``_INDEX_DUTY_CYCLE``，
+          慢盘读一轮更久时自动降速；
+        - 0.05 秒下限。
+
+        本轮没有读到新字节时按 ``_INDEX_IDLE_RETRY_SECONDS`` 重试，避免空转。
+        """
 
         if complete:
             # 中文注释：索引完成后只按正常刷新周期检查追加，禁止每 2 秒
             # 重建全部时间窗口和聚合结果。
             return self.refresh_interval
-        minimum_delay = max(
+        duty = self._INDEX_DUTY_CYCLE
+        work = max(0.0, float(elapsed))
+        total = work if busy is None else max(work, float(busy))
+        delay = max(
             0.05,
-            min(1.0, self.read_budget_bytes / self.index_bytes_per_sec),
+            read_bytes / self.index_bytes_per_sec - total,
+            work * (1.0 - duty) / duty,
         )
-        return max(minimum_delay, read_bytes / self.index_bytes_per_sec)
+        if read_bytes <= 0:
+            delay = max(delay, self._INDEX_IDLE_RETRY_SECONDS)
+        return delay
+
+    def _prebuild_rollups(self, deadline: float) -> None:
+        """在 ``deadline``（monotonic）之前为已缓存文件预建分桶。
+
+        ``_FileRollup.update`` 对同一增量序列幂等、对追加只处理新尾部，
+        预建与完成时现算的结果完全一致。
+        """
+
+        for path, cached_file in tuple(self._cache.items()):
+            if time.monotonic() >= deadline:
+                return
+            deltas = cached_file.deltas
+            rollup = self._rollups.get(path)
+            if rollup is not None and rollup.sequence is deltas:
+                continue
+            if rollup is None:
+                rollup = self._rollups.setdefault(path, _FileRollup())
+            rollup.update(deltas)
+
+    def _record_throughput(self, read_bytes: int, cycle_seconds: float) -> None:
+        """用一轮「工作 + 休息」的实测吞吐更新 EMA，供前端估算剩余时间。"""
+
+        if read_bytes <= 0 or cycle_seconds <= 0:
+            return
+        sample = read_bytes / cycle_seconds
+        previous = self._throughput_ema
+        alpha = self._THROUGHPUT_EMA_ALPHA
+        self._throughput_ema = (
+            sample if previous is None else previous + alpha * (sample - previous)
+        )
+
+    def _reported_bytes_per_sec(self) -> int:
+        """返回给前端的读速：有实测样本时用 EMA，且不超过配置上限。"""
+
+        measured = self._throughput_ema
+        if measured is None or measured <= 0:
+            return self.index_bytes_per_sec
+        return max(1, int(min(float(self.index_bytes_per_sec), measured)))
 
     def _run_index_once(
         self,
@@ -332,7 +441,10 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         observed_at = time.time() if now is None else float(now)
         sources = self._build_sources(registries, metadata_by_profile)
         self._remove_stale_cache(sources)
+        self._warm_cache(sources)
         file_deltas: dict[Path, tuple[UsageDelta, ...]] = {}
+        # 中文注释：读取时已经 stat 过的签名留给进度统计复用，不再重复 stat。
+        signatures: dict[Path, tuple[int, int, int]] = {}
         effective_sources = dict(sources)
         ordered_paths = tuple(sorted(sources, key=str))
         if ordered_paths:
@@ -341,46 +453,48 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
         remaining_budget = self.read_budget_bytes
         next_cursor = self._index_cursor
         read_bytes_this_refresh = 0
-        for path_index, path in enumerate(ordered_paths):
-            cached_file = self._cache.get(path)
-            if remaining_budget > 0:
-                per_file_budget = min(
-                    remaining_budget,
-                    self._PER_FILE_READ_BUDGET,
-                )
-                cached_file = self._read_file(
-                    path,
-                    maximum_bytes=per_file_budget,
-                )
-                if cached_file is not None:
-                    read_bytes = cached_file.last_read_bytes
-                    remaining_budget = max(0, remaining_budget - read_bytes)
-                    read_bytes_this_refresh += read_bytes
-                    if read_bytes > 0:
-                        next_cursor = self._index_cursor + path_index + 1
-            if cached_file is None:
-                continue
-            file_deltas[path] = cached_file.deltas
-            source = sources[path]
-            if source.project is None and cached_file.project is not None:
-                effective_sources[path] = _UsageSource(
-                    profile_name=source.profile_name,
-                    account_id=source.account_id,
-                    codex_home=source.codex_home,
-                    project=cached_file.project,
-                    product=source.product,
-                )
+        with self._index_transaction():
+            for path_index, path in enumerate(ordered_paths):
+                cached_file = self._cache.get(path)
+                if remaining_budget > 0:
+                    per_file_budget = min(
+                        remaining_budget,
+                        self._PER_FILE_READ_BUDGET,
+                    )
+                    cached_file = self._read_file(
+                        path,
+                        maximum_bytes=per_file_budget,
+                    )
+                    if cached_file is not None:
+                        signatures[path] = cached_file.signature
+                        read_bytes = cached_file.last_read_bytes
+                        remaining_budget = max(0, remaining_budget - read_bytes)
+                        read_bytes_this_refresh += read_bytes
+                        if read_bytes > 0:
+                            next_cursor = self._index_cursor + path_index + 1
+                if cached_file is None:
+                    continue
+                file_deltas[path] = cached_file.deltas
+                source = sources[path]
+                if source.project is None and cached_file.project is not None:
+                    effective_sources[path] = _UsageSource(
+                        profile_name=source.profile_name,
+                        account_id=source.account_id,
+                        codex_home=source.codex_home,
+                        project=cached_file.project,
+                        product=source.product,
+                    )
         if ordered_paths:
             self._index_cursor = next_cursor % len(ordered_paths)
         # 中文注释：账号身份按文件写进索引，检索才能按账号聚合和筛选；
         # 这里覆盖本次扫描到的全部来源，不要求这轮真的读过文件。
-        if self._persistent is not None:
-            self._persistent.save_file_accounts(effective_sources)
+        self._save_file_accounts(effective_sources)
         indexing = self._index_progress(
             tuple(sources),
             read_bytes_this_refresh=read_bytes_this_refresh,
+            signatures=signatures,
         )
-        indexing["bytes_per_sec"] = self.index_bytes_per_sec
+        indexing["bytes_per_sec"] = self._reported_bytes_per_sec()
         indexing["deduplicated_files"] = self._deduplicated_files
         indexing["deduplicated_bytes"] = self._deduplicated_bytes
         # 中文注释：未遍历完全部 JSONL 时不计算也不输出可被误认为最终值的数字。
@@ -535,24 +649,77 @@ class UsageAggregator(_UsageQueryMixin, _SourceDiscoveryMixin, _FileReaderMixin)
             if path not in sources:
                 del self._chat_partial[path]
         if self._persistent is not None and self.prune_stale:
-            self._persistent.prune(sources)
+            # 中文注释：prune 要全表读出路径再比对，来源集合没变时没有可删的行，
+            # 跳过；写入失败时不记录，下一轮重试。
+            current = frozenset(sources)
+            if current != self._pruned_paths and self._persistent.prune(sources):
+                self._pruned_paths = current
+
+    def _save_file_accounts(self, sources: Mapping[Path, _UsageSource]) -> None:
+        """账号映射相对上次成功写入有变化时才写索引。"""
+
+        if self._persistent is None:
+            return
+        current = {
+            path: (
+                source.account_key,
+                source.account_name,
+                source.account_id,
+                source.profile_name,
+                source.product,
+            )
+            for path, source in sources.items()
+        }
+        if current == self._saved_accounts:
+            return
+        if self._persistent.save_file_accounts(sources) is not False:
+            self._saved_accounts = current
+
+    def _warm_cache(self, sources: Mapping[Path, _UsageSource]) -> None:
+        """首轮用一次批量查询把持久索引读进内存，代替逐文件开连接查询。"""
+
+        if self._cache_warmed or self._persistent is None:
+            return
+        self._cache_warmed = True
+        missing = [path for path in sources if path not in self._cache]
+        if not missing:
+            return
+        started = time.monotonic()
+        for path, cached in self._persistent.load_many(missing).items():
+            self._cache.setdefault(path, cached)
+        self._last_warm_seconds = time.monotonic() - started
+
+    def _index_transaction(self) -> ContextManager[None]:
+        """一轮读取共用一个 SQLite 连接并只提交一次；没有持久索引时为空操作。"""
+
+        if self._persistent is None:
+            return nullcontext()
+        return self._persistent.transaction()
 
     def _index_progress(
         self,
         paths: tuple[Path, ...],
         read_bytes_this_refresh: int,
+        signatures: Mapping[Path, tuple[int, int, int]] | None = None,
     ) -> dict[str, int | float | bool]:
-        """汇总有界索引进度，供 Dashboard 明确标注统计完整性。"""
+        """汇总有界索引进度，供 Dashboard 明确标注统计完整性。
 
+        ``signatures`` 是本轮读取时已经拿到的文件签名，命中时直接复用，
+        只给本轮没读到的文件补一次 stat。
+        """
+
+        known = signatures or {}
         total_bytes = 0
         indexed_bytes = 0
         pending_files = 0
         for path in paths:
             cached = self._cache.get(path)
-            try:
-                current_signature = _file_signature(path)
-            except OSError:
-                continue
+            current_signature = known.get(path)
+            if current_signature is None:
+                try:
+                    current_signature = _file_signature(path)
+                except OSError:
+                    continue
             if current_signature is None:
                 continue
             file_size = current_signature[2]
