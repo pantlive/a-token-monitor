@@ -2955,60 +2955,200 @@
     backfill_codex: '会话回填',
     backfill_grok_sparse: '稀疏回填'
   };
-  const renderQuotaCompare = (payload) => {
-    const current = document.getElementById('quota-compare-current');
-    const history = document.getElementById('quota-compare-history');
-    const countLabel = document.getElementById('quota-compare-count');
-    if (!current || !history) return;
-    const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
-    if (countLabel) countLabel.textContent = `${rows.length} 个账号`;
-    if (!rows.length) {
-      current.innerHTML = '<div class="empty-state">还没有可对比的订阅账号</div>';
-    } else {
-      const body = rows.map((row) => {
-        const notes = Array.isArray(row.notes) ? row.notes.filter(Boolean) : [];
-        const note = notes.length ? `<div class="cell-sub quota-note">${notes.map((item) => escapeHtml(item)).join(' · ')}</div>` : '';
-        const payback = row.payback_multiple === null || row.payback_multiple === undefined
-          ? '—'
-          : `${Number(row.payback_multiple).toFixed(2)}x`;
-        return `<tr>
-          <td>${escapeHtml(row.product_label || row.product)}<div class="cell-sub">${escapeHtml(row.display_name || row.account_key)}</div>${note}</td>
+  const QUOTA_PALETTE = ['var(--blue)', 'var(--violet)', 'var(--cyan)', 'var(--green)', 'var(--yellow)', 'var(--red)'];
+  const quotaHasValue = (value) => value !== null && value !== undefined;
+  const quotaClamp = (value) => Math.min(100, Math.max(0, Number(value) || 0));
+  const quotaAccountId = (item) => `${item.product}|${item.account_key}`;
+  const quotaAccountName = (item) => `${item.product_label || item.product} · ${item.display_name || item.account_key}`;
+  const quotaPad = (value) => String(value).padStart(2, '0');
+  const quotaShortTime = (seconds, period) => {
+    if (!quotaHasValue(seconds)) return '—';
+    const date = new Date(Number(seconds) * 1000);
+    const day = `${quotaPad(date.getMonth() + 1)}/${quotaPad(date.getDate())}`;
+    return period === '5h' ? `${day} ${quotaPad(date.getHours())}:${quotaPad(date.getMinutes())}` : day;
+  };
+  // 中文注释：同一个账号在三张图里用同一种颜色，先按当前行排序，历史里多出来的账号再往后补。
+  const quotaColorMap = (rows, cycles) => {
+    const colors = new Map();
+    [...rows, ...cycles].forEach((item) => {
+      const id = quotaAccountId(item);
+      if (!colors.has(id)) colors.set(id, QUOTA_PALETTE[colors.size % QUOTA_PALETTE.length]);
+    });
+    return colors;
+  };
+  const quotaPaceLevel = (row) => {
+    if (row.projection_status === 'before_reset' || row.projection_status === 'exhausted') return 'danger';
+    const ratio = Number(row.pace_ratio);
+    if (!Number.isFinite(ratio) || row.pace_ratio === null) return 'ok';
+    if (ratio > 1.5) return 'danger';
+    return ratio > 1 ? 'warn' : 'ok';
+  };
+  const quotaNoteBadges = (row) => {
+    const notes = Array.isArray(row.notes) ? row.notes.filter(Boolean) : [];
+    return notes.map((item) => `<span class="quota-badge">${escapeHtml(item)}</span>`).join('');
+  };
+  const quotaPaceChart = (rows, period) => {
+    const active = rows.filter((row) => quotaHasValue(row.used_percent));
+    const idle = rows.filter((row) => !quotaHasValue(row.used_percent));
+    const lines = active.map((row) => {
+      const level = quotaPaceLevel(row);
+      const used = quotaClamp(row.used_percent);
+      const elapsed = quotaHasValue(row.elapsed_percent) ? quotaClamp(row.elapsed_percent) : null;
+      const marker = elapsed === null ? '' : `<i class="quota-pace-marker" style="left:${elapsed}%"></i>`;
+      const parts = [quotaPercent(row.used_percent)];
+      if (quotaHasValue(row.pace_ratio)) parts.push(quotaRatio(row.pace_ratio));
+      const projection = quotaProjectionLabels[row.projection_status];
+      if (row.projection_status === 'before_reset' || row.projection_status === 'exhausted') {
+        parts.push(quotaHasValue(row.projected_exhausted_at) && row.projection_status === 'before_reset'
+          ? `${projection} ${quotaShortTime(row.projected_exhausted_at, '5h')}`
+          : projection);
+      }
+      const title = `${quotaAccountName(row)} · 已用 ${quotaPercent(row.used_percent)} · 时间进度 ${quotaPercent(row.elapsed_percent)}`;
+      return `<div class="quota-pace-row ${level}" title="${escapeHtml(title)}">
+        <div class="quota-pace-name"><strong>${escapeHtml(row.product_label || row.product)}</strong><span>${escapeHtml(row.display_name || row.account_key)}</span></div>
+        <div class="quota-pace-track"><span class="quota-pace-fill ${level}" style="width:${used}%"></span>${marker}</div>
+        <div class="quota-pace-value">${escapeHtml(parts.join(' · '))}</div>
+        <div class="quota-pace-badges"><span class="quota-badge">${escapeHtml(row.plan_label || row.plan || '—')}</span>${quotaNoteBadges(row)}</div>
+      </div>`;
+    }).join('');
+    const idleLines = idle.map((row) => `<div class="quota-pace-idle" title="${escapeHtml(quotaAccountName(row))}">
+        <span class="quota-pace-idle-name">${escapeHtml(quotaAccountName(row))}</span>
+        <span class="quota-badge">${escapeHtml(row.plan_label || row.plan || '—')}</span>${quotaNoteBadges(row)}
+      </div>`).join('');
+    const legend = `<div class="quota-legend">
+        <span><i class="quota-swatch ok"></i>节奏正常</span><span><i class="quota-swatch warn"></i>略快</span><span><i class="quota-swatch danger"></i>过快</span>
+        <span><i class="quota-swatch marker"></i>时间进度</span>
+      </div>`;
+    const periodNote = period === '5h' ? '<div class="quota-note">5 小时窗口不计算回本倍数</div>' : '';
+    return `<div class="quota-chart"><h3 class="quota-chart-title">当前窗口进度</h3>${active.length ? legend : ''}<div class="quota-pace-list">${lines}</div>${idleLines ? `<div class="quota-pace-idle-list">${idleLines}</div>` : ''}${periodNote}</div>`;
+  };
+  const quotaBarGroup = (rows, colors, key, label, format, reference) => {
+    const values = rows.map((row) => (quotaHasValue(row[key]) ? Number(row[key]) : null));
+    const peak = Math.max(...values.map((value) => value || 0), reference || 0);
+    const scale = peak > 0 ? peak * 1.08 : 1;
+    const refLine = reference ? `<i class="quota-value-ref" style="left:${reference / scale * 100}%"><em>回本线 ${reference}x</em></i>` : '';
+    const lines = rows.map((row, index) => {
+      const value = values[index];
+      const color = colors.get(quotaAccountId(row));
+      const bar = value === null
+        ? '<span class="quota-value-empty">样本不足</span>'
+        : `<span class="quota-value-fill" style="width:${Math.max(1.5, value / scale * 100)}%;background:${color}"></span>`;
+      return `<div class="quota-value-row" title="${escapeHtml(quotaAccountName(row))}">
+        <span class="quota-value-name">${escapeHtml(quotaAccountName(row))}</span>
+        <div class="quota-value-track">${bar}${refLine}</div>
+        <span class="quota-value-num">${value === null ? '—' : escapeHtml(format(value))}</span>
+      </div>`;
+    }).join('');
+    return `<div class="quota-value-group"><h4>${escapeHtml(label)}</h4>${lines}</div>`;
+  };
+  const quotaValueChart = (rows, colors, period) => {
+    const comparable = rows.filter((row) => !row.no_window && !row.missing_snapshot);
+    const hasPrice = comparable.some((row) => quotaHasValue(row.usd_per_percent));
+    const hasPayback = period === 'week' && comparable.some((row) => quotaHasValue(row.payback_multiple));
+    if (!hasPrice && !hasPayback) return '';
+    const groups = [quotaBarGroup(comparable, colors, 'usd_per_percent', '每 1% 额度', (value) => formatUsdCompact(value), 0)];
+    if (period === 'week') groups.push(quotaBarGroup(comparable, colors, 'payback_multiple', '回本倍数', (value) => `${value.toFixed(2)}x`, 1));
+    return `<div class="quota-chart"><h3 class="quota-chart-title">性价比</h3><div class="quota-value-groups">${groups.join('')}</div></div>`;
+  };
+  const quotaHistoryChart = (cycles, colors, period) => {
+    const title = period === '5h' ? '最近 12 个 5 小时窗口' : '最近 8 周';
+    if (!cycles.length) {
+      return `<div class="quota-chart"><h3 class="quota-chart-title">${title}</h3><div class="empty-state">还没有历史周期</div></div>`;
+    }
+    const width = 480;
+    const height = 230;
+    const left = 40;
+    const right = 12;
+    const top = 12;
+    const bottom = 26;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const times = cycles.map((item) => Number(item.cycle_start)).filter((value) => Number.isFinite(value));
+    if (!times.length) {
+      return `<div class="quota-chart"><h3 class="quota-chart-title">${title}</h3><div class="empty-state">还没有历史周期</div></div>`;
+    }
+    const minT = Math.min(...times);
+    const maxT = Math.max(...times);
+    const xOf = (value) => (maxT === minT ? left + plotW / 2 : left + (Number(value) - minT) / (maxT - minT) * plotW);
+    const yOf = (value) => top + plotH - quotaClamp(value) / 100 * plotH;
+    const grid = [0, 25, 50, 75, 100].map((tick) => `<line class="quota-hline" x1="${left}" x2="${width - right}" y1="${yOf(tick)}" y2="${yOf(tick)}"/><text class="quota-axis" x="${left - 6}" y="${yOf(tick) + 3.5}" text-anchor="end">${tick}%</text>`).join('');
+    const tickCount = maxT === minT ? 1 : 4;
+    const xTicks = Array.from({ length: tickCount + 1 }, (_, index) => minT + (maxT - minT) * index / tickCount)
+      .filter((value, index) => maxT !== minT || index === 0)
+      .map((value, index, list) => `<text class="quota-axis" x="${xOf(value)}" y="${height - 8}" text-anchor="${list.length === 1 ? 'middle' : index === 0 ? 'start' : index === list.length - 1 ? 'end' : 'middle'}">${escapeHtml(quotaShortTime(value, period))}</text>`).join('');
+    const groups = new Map();
+    cycles.forEach((item) => {
+      const id = quotaAccountId(item);
+      if (!groups.has(id)) groups.set(id, { name: quotaAccountName(item), points: [] });
+      groups.get(id).points.push(item);
+    });
+    const series = [...groups.entries()].map(([id, group]) => {
+      const color = colors.get(id) || QUOTA_PALETTE[0];
+      const points = group.points
+        .filter((item) => Number.isFinite(Number(item.cycle_start)))
+        .sort((a, b) => Number(a.cycle_start) - Number(b.cycle_start));
+      const path = points.map((item) => `${xOf(item.cycle_start).toFixed(1)},${yOf(item.max_used_percent).toFixed(1)}`).join(' ');
+      const line = points.length > 1 ? `<polyline class="quota-line" style="stroke:${color}" points="${path}"/>` : '';
+      const dots = points.map((item) => {
+        const hollow = item.incomplete || item.settled === 'pending';
+        const flags = [item.incomplete ? '采样不完整' : '', item.settled === 'pending' ? '待结算' : '', quotaSourceLabels[item.source] || ''].filter(Boolean).join(' · ');
+        const cost = quotaHasValue(item.cost_usd) ? formatUsdCompact(item.cost_usd) : '—';
+        const tip = `${group.name}\n${formatTime(item.cycle_start)} · ${quotaPercent(item.max_used_percent)} · ${cost}${flags ? `\n${flags}` : ''}`;
+        return `<circle class="quota-dot${hollow ? ' hollow' : ''}" cx="${xOf(item.cycle_start).toFixed(1)}" cy="${yOf(item.max_used_percent).toFixed(1)}" r="4" style="${hollow ? 'fill:var(--panel);' : `fill:${color};`}stroke:${color}"><title>${escapeHtml(tip)}</title></circle>`;
+      }).join('');
+      return line + dots;
+    }).join('');
+    const legend = [...groups.entries()].map(([id, group]) => `<span><i class="quota-swatch" style="background:${colors.get(id) || QUOTA_PALETTE[0]}"></i>${escapeHtml(group.name)}</span>`).join('');
+    return `<div class="quota-chart"><h3 class="quota-chart-title">${title}</h3>
+      <div class="quota-legend">${legend}<span><i class="quota-swatch hollow"></i>空心点表示采样不完整或待结算</span></div>
+      <svg class="quota-history-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${title}">${grid}${xTicks}${series}</svg></div>`;
+  };
+  const quotaDetailTable = (rows, openState) => {
+    const body = rows.map((row) => {
+      const payback = quotaHasValue(row.payback_multiple) ? `${Number(row.payback_multiple).toFixed(2)}x` : '—';
+      const usd = (value) => (quotaHasValue(value) ? escapeHtml(formatUsdCompact(value)) : '—');
+      return `<tr>
+          <td>${escapeHtml(row.product_label || row.product)}<div class="cell-sub">${escapeHtml(row.display_name || row.account_key)}</div><div class="quota-badges">${quotaNoteBadges(row)}</div></td>
           <td>${escapeHtml(row.plan_label || row.plan || '—')}</td>
           <td>${quotaPercent(row.used_percent)}</td>
           <td>${quotaPercent(row.elapsed_percent)}</td>
           <td>${quotaRatio(row.pace_ratio)}</td>
           <td>${escapeHtml(quotaProjectionLabels[row.projection_status] || '暂不预测')}<div class="cell-sub">${escapeHtml(formatTime(row.projected_exhausted_at))}</div></td>
-          <td>${quotaDash(row.tokens === null || row.tokens === undefined ? null : formatNumber(row.tokens))}</td>
-          <td>${row.cost_usd === null || row.cost_usd === undefined ? '—' : escapeHtml(formatUsdCompact(row.cost_usd))}</td>
-          <td>${row.usd_per_percent === null || row.usd_per_percent === undefined ? '—' : escapeHtml(formatUsdCompact(row.usd_per_percent))}</td>
-          <td>${row.full_window_usd === null || row.full_window_usd === undefined ? '—' : escapeHtml(formatUsdCompact(row.full_window_usd))}</td>
+          <td>${quotaDash(quotaHasValue(row.tokens) ? formatNumber(row.tokens) : null)}</td>
+          <td>${usd(row.cost_usd)}</td>
+          <td>${usd(row.usd_per_percent)}</td>
+          <td>${usd(row.full_window_usd)}</td>
           <td>${payback}</td>
         </tr>`;
-      }).join('');
-      const periodNote = payload.period === '5h' ? '<p class="quota-note">5 小时窗口不计算回本倍数</p>' : '';
-      current.innerHTML = `<div class="table-scroll"><table class="usage-table"><thead><tr>
+    }).join('');
+    return `<details class="quota-detail"${openState ? ' open' : ''}><summary>查看明细表</summary><div class="table-wrap"><table class="tight usage-table"><thead><tr>
         <th>账号</th><th>套餐</th><th>已用</th><th>时间已过</th><th>消耗速度</th><th>预计耗尽</th>
         <th>窗口 tokens</th><th>窗口内美元</th><th>每 1% 额度</th><th>用满窗口</th><th>回本倍数</th>
-      </tr></thead><tbody>${body}</tbody></table></div>${periodNote}`;
-    }
+      </tr></thead><tbody>${body}</tbody></table></div></details>`;
+  };
+  const renderQuotaCompare = (payload) => {
+    const current = document.getElementById('quota-compare-current');
+    const charts = document.getElementById('quota-compare-charts');
+    const history = document.getElementById('quota-compare-history');
+    const detail = document.getElementById('quota-compare-detail');
+    const countLabel = document.getElementById('quota-compare-count');
+    if (!current || !history) return;
+    const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
     const cycles = Array.isArray(payload && payload.history) ? payload.history : [];
-    const title = payload.period === '5h' ? '最近 12 个 5 小时窗口' : '最近 8 周';
-    if (!cycles.length) {
-      history.innerHTML = `<div class="quota-trend"><h3>${title}</h3><div class="empty-state">还没有历史周期</div></div>`;
-      return;
+    const period = payload && payload.period === 'week' ? 'week' : '5h';
+    if (countLabel) countLabel.textContent = `${rows.length} 个账号`;
+    const colors = quotaColorMap(rows, cycles);
+    const wasOpen = Boolean(detail && detail.querySelector('details[open]'));
+    if (!rows.length) {
+      current.innerHTML = '<div class="empty-state">还没有可对比的订阅账号</div>';
+      if (charts) charts.innerHTML = '';
+      if (detail) detail.innerHTML = '';
+    } else {
+      current.innerHTML = quotaPaceChart(rows, period);
+      if (charts) charts.innerHTML = quotaValueChart(rows, colors, period);
+      if (detail) detail.innerHTML = quotaDetailTable(rows, wasOpen);
     }
-    const maxUsed = Math.max(...cycles.map((item) => Number(item.max_used_percent) || 0), 1);
-    const bars = cycles.map((item) => {
-      const width = Math.max(2, Math.round((Number(item.max_used_percent) || 0) / maxUsed * 100));
-      const flags = [
-        item.incomplete ? '采样不完整' : '',
-        item.settled === 'pending' ? '待结算' : '',
-        quotaSourceLabels[item.source] || ''
-      ].filter(Boolean).join(' · ');
-      const cost = item.cost_usd === null || item.cost_usd === undefined ? '—' : formatUsdCompact(item.cost_usd);
-      return `<div class="top-project"><div class="top-project-row"><span class="top-project-label">${escapeHtml(item.product_label || item.product)} · ${escapeHtml(item.display_name || item.account_key)}</span><span class="top-project-value">${quotaPercent(item.max_used_percent)} · ${escapeHtml(cost)}</span></div><div class="bar"><span style="width:${width}%"></span></div><div class="cell-sub">${escapeHtml(formatTime(item.cycle_start))}${flags ? ` · ${escapeHtml(flags)}` : ''}</div></div>`;
-    }).join('');
-    history.innerHTML = `<div class="quota-trend"><h3>${title}</h3>${bars}</div>`;
+    history.innerHTML = quotaHistoryChart(cycles, colors, period);
   };
   const refreshQuotaCompare = async () => {
     const current = document.getElementById('quota-compare-current');
